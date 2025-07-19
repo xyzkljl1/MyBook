@@ -21,7 +21,8 @@ namespace MyBook
             mail = new(config);
             stock = new(config);
             //mail.SearchICBCBill(DateTime.Now.AddMonths(-2));
-            stock.FetchUS();
+            stock.Fetch(new Stock("QQQ", StockType.US));
+            stock.Fetch(new Stock("021282", StockType.CNFUND));
         }
     }
 }
