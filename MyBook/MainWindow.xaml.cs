@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -16,9 +17,14 @@ namespace MyBook
     /// </summary>
     public partial class MainWindow : Window
     {
+        [DllImport("kernel32.dll")]
+        private static extern bool AllocConsole();
         Fetcher fetcher = new Fetcher();
         public MainWindow()
         {
+#if DEBUG
+            AllocConsole();
+#endif
             fetcher.RunSchedule();
             InitializeComponent();
         }

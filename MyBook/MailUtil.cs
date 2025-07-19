@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Security.Authentication;
@@ -32,16 +33,33 @@ namespace MyBook
             username = config["yahoo_user"]!;
             apppasswd = config["yahoo_pass"]!;
         }
+        // 工行对账单，所有信用卡视作同一账户
         public async Task SearchICBCBill(DateTime date)
         {
             // 按月份搜索
-            var text = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单",date);
-            if(!String.IsNullOrEmpty(text))
+            var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单",date);
+            if(!String.IsNullOrEmpty(billText))
             {
                 try
                 {
                     var doc = new HtmlDocument();
-                    doc.LoadHtml(text);
+                    doc.LoadHtml(billText);
+                    var node = doc.DocumentNode.SelectSingleNode("//tr/td/b[text()='合计']");
+                    if(node!=null)
+                    {
+                        //还款明细表格,合计所在的行，及其之后的行，都是合计数据
+                        var line = node.ParentNode.ParentNode;
+                        while(line!=null)
+                        {
+                            // 依次为 合计 币种 应还 最低还款 额度，第二行之后没有合计列；金额一定会向右对齐，只需要找第一个align=right的节点
+                            var text = line.SelectSingleNode(".//td[@align='right']/b")!.InnerText;
+                            // 形如6,414.21/RMB
+                            //text.Split('/')[1];
+                            var c = new Currency(text.Split('/')[0],text.Split('/')[1]);
+                           
+                            line = line.NextSibling;
+                        }
+                    }
                 }
                 catch (Exception e)
                 {

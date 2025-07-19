@@ -11,6 +11,7 @@ namespace MyBook
     {
         IConfigurationRoot config;
         MailUtil mail;
+        StockUtil stock;
         public Fetcher()
         {
         }
@@ -18,7 +19,9 @@ namespace MyBook
         {
             config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
             mail = new(config);
-            mail.SearchICBCBill(DateTime.Now.AddMonths(-2));
+            stock = new(config);
+            //mail.SearchICBCBill(DateTime.Now.AddMonths(-2));
+            stock.FetchUS();
         }
     }
 }
