@@ -42,6 +42,7 @@ namespace MyBook
             {
                 try
                 {
+                    var tables = FormUtil.ReadFromHTML(billText);
                     var doc = new HtmlDocument();
                     doc.LoadHtml(billText);
                     var node = doc.DocumentNode.SelectSingleNode("//tr/td/b[text()='合计']");
