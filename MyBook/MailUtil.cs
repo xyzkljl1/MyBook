@@ -51,7 +51,9 @@ namespace MyBook
                         var line = node.ParentNode.ParentNode;
                         while(line!=null)
                         {
-                            // 依次为 合计 币种 应还 最低还款 额度，第二行之后没有合计列；金额一定会向右对齐，只需要找第一个align=right的节点
+                            // 依次为 合计 币种 应还 最低还款 额度，第二行之后没有合计列；金额一定会向右对齐，第一个align=right的是上月收入(即还款),第二个是本月支出
+                            // 发邮件的时候刚好结算本月账单，上月也还过了，因此此时信用卡负债=本月支出
+                            // 不考虑分期和手动还款的情况
                             var text = line.SelectSingleNode(".//td[@align='right']/b")!.InnerText;
                             // 形如6,414.21/RMB
                             //text.Split('/')[1];
