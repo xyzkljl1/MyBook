@@ -41,20 +41,29 @@ namespace MyBook
                 if (rows.Count == 0)
                     continue;
 
+                var columnCount = rows[0].Cells.Count;
+                var dataRows = rows.Skip(1)
+                    .Where(row => row.Cells.Any(cell => !String.IsNullOrEmpty(cell)))
+                    .Where(row => columnCount <= 1 || row.SourceCellCount != 1)
+                    .Select(row => row.Cells)
+                    .ToList();
+                if (dataRows.Count == 0)
+                    continue;
+
                 forms.Add(new FormTable
                 {
                     Title = title,
-                    Headers = rows[0],
-                    Rows = rows.Skip(1).ToList()
+                    Headers = rows[0].Cells,
+                    Rows = dataRows
                 });
             }
 
             return forms;
         }
 
-        private static List<List<string>> ReadTableRows(HtmlNode table)
+        private static List<TableRow> ReadTableRows(HtmlNode table)
         {
-            var rows = new List<List<string>>();
+            var rows = new List<TableRow>();
             var rowSpans = new Dictionary<int, RowSpanCell>();
             var maxColumns = 0;
 
@@ -64,7 +73,8 @@ namespace MyBook
                 var col = 0;
                 var cells = tr.ChildNodes
                     .Where(node => node.Name.Equals("td", StringComparison.OrdinalIgnoreCase)
-                        || node.Name.Equals("th", StringComparison.OrdinalIgnoreCase));
+                        || node.Name.Equals("th", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
 
                 foreach (var cell in cells)
                 {
@@ -95,13 +105,13 @@ namespace MyBook
                 }
 
                 maxColumns = Math.Max(maxColumns, row.Count);
-                rows.Add(row);
+                rows.Add(new TableRow(row, cells.Count));
             }
 
             foreach (var row in rows)
             {
-                while (row.Count < maxColumns)
-                    row.Add("");
+                while (row.Cells.Count < maxColumns)
+                    row.Cells.Add("");
             }
 
             return rows;
@@ -126,6 +136,18 @@ namespace MyBook
         {
             var decoded = (HtmlEntity.DeEntitize(text) ?? "").Replace('\u00a0', ' ');
             return Regex.Replace(decoded, @"\s+", " ").Trim();
+        }
+
+        private class TableRow
+        {
+            public TableRow(List<string> cells, int sourceCellCount)
+            {
+                Cells = cells;
+                SourceCellCount = sourceCellCount;
+            }
+
+            public List<string> Cells { get; }
+            public int SourceCellCount { get; }
         }
 
         private class RowSpanCell

@@ -15,6 +15,7 @@ using MailKit.Security;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Identity.Client;
 using MimeKit;
+using static System.Net.Mime.MediaTypeNames;
 using static MailKit.Telemetry;
 
 namespace MyBook
@@ -25,44 +26,116 @@ namespace MyBook
         IProxyClient proxy;
         string username;
         string apppasswd;
-        public MailUtil(IConfigurationRoot config)
+        DatabaseUtil? database;
+        public MailUtil(IConfigurationRoot config, DatabaseUtil? database = null)
         {
             // 为了支持gbk编码
             System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             proxy = new Socks5Client(config["socksproxy"], Int32.Parse(config["socksproxy_port"]!));
             username = config["yahoo_user"]!;
             apppasswd = config["yahoo_pass"]!;
+            this.database = database;
+        }
+        public static Account? FindICBCAccount(List<Account> accounts, string name, CurrencyType currencyType)
+        {
+            return accounts.Find(accounts => accounts.name.Contains(name) && accounts.v.t == currencyType);
         }
         // 工行对账单，所有信用卡视作同一账户
         public async Task SearchICBCBill(DateTime date)
         {
             // 按月份搜索
-            var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单",date);
-            if(!String.IsNullOrEmpty(billText))
+            var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", date);
+            var monthText = date.ToString("yyyy-MM");
+            var accounts = new List<Account>();
+            if (!String.IsNullOrEmpty(billText))
             {
+                Records records = new();
                 try
                 {
                     var tables = FormUtil.ReadFromHTML(billText);
-                    var doc = new HtmlDocument();
-                    doc.LoadHtml(billText);
-                    var node = doc.DocumentNode.SelectSingleNode("//tr/td/b[text()='合计']");
-                    if(node!=null)
+                    if (tables.Count < 4 
+                        || tables[0].Title != "需 还 款 明 细" 
+                        || tables[1].Title != "本 期 交 易 汇 总"
+                        || tables[2].Title != "人民币(本位币) 交 易 明 细"
+                        || tables[3].Title != "外 币 交 易 明 细")
+                        throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
+                    foreach (var line in tables[1].Rows)
                     {
-                        //还款明细表格,合计所在的行，及其之后的行，都是合计数据
-                        var line = node.ParentNode.ParentNode;
-                        while(line!=null)
+                        if (line.Count < 5 || line[0] == "合计")
+                            continue;
+
+                        var balance = Currency.Parse(line[4]);
+                        var account = FindICBCAccount(accounts, line[0], balance.t);
+                        if (account is null)
                         {
-                            // 依次为 合计 币种 应还 最低还款 额度，第二行之后没有合计列；金额一定会向右对齐，第一个align=right的是上月收入(即还款),第二个是本月支出
-                            // 发邮件的时候刚好结算本月账单，上月也还过了，因此此时信用卡负债=本月支出
-                            // 不考虑分期和手动还款的情况
-                            var text = line.SelectSingleNode(".//td[@align='right']/b")!.InnerText;
-                            // 形如6,414.21/RMB
-                            //text.Split('/')[1];
-                            var c = new Currency(text.Split('/')[0],text.Split('/')[1]);
-                           
-                            line = line.NextSibling;
+                            account = new Account { name = line[0], v = balance };
+                            accounts.Add(account);
+                        }
+                        else
+                        {
+                            account.v = balance;
                         }
                     }
+
+                    {
+                        var table = tables[2];
+                        if (table.Headers.Count!= 7
+                            || table.Headers[0] != "卡号后四位"
+                            || table.Headers[1] != "交易日"
+                            || table.Headers[3] != "交易类型"
+                            || table.Headers[4] != "商户名称/城市"
+                            || table.Headers[6] != "记账金额/币种")
+                            throw new MailParseException("Parse ICBC Bill Fail, Invalid Headers");
+                        foreach (var line in table.Rows)
+                        {
+                            var record = new Record();
+                            record.updateTime = DateTime.Now;
+                            record.Account = FindICBCAccount(accounts, line[0], CurrencyType.RMB);
+                            if (record.Account is null)
+                                throw new MailParseException("Parse ICBC Bill Fail, Invalid Account");
+                            record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                            if (line[6].Contains("存入"))
+                                record.isIn = true;
+                            else if (line[6].Contains("支出"))
+                                record.isIn = false;
+                            else
+                                throw new MailParseException("Parse ICBC Bill Fail");
+                            record.Source = $"ICBC对账单邮件({monthText})/人民币明细/{DateTime.Now}/{string.Join(",", line)}";
+                            record.DestAccount = line[4];
+                            record.DescCurrency = Currency.Parse(line[5]);
+                            record.CopyFrom(Currency.Parse(line[6]));
+                            if (line[3]== "消费" || line[3] == "跨行消费" || line[3] == "境外消费")
+                            {
+                                record.Reason = record.Account.desc; // 工行按卡区分用途
+                                records.Add(record);
+                            }
+                            else if (line[3] =="退款" || line[3] == "境外退货")
+                            {
+                                if (!record.isIn)
+                                    throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
+                                //在同一个月内向前搜索对应的消费，尝试消除;比较DescCurrency因为退款是按交易金额退的
+                                Record? destRecord = records.FindLast(destRecord => 
+                                                            destRecord.DestAccount == record.DestAccount && destRecord.isIn == false
+                                                            && destRecord.Account == record.Account && destRecord.DescCurrency == record.DescCurrency);
+                                if (destRecord is not null)
+                                    records.Remove(destRecord);
+                                else // 不能消除则入账
+                                {
+                                    record.Reason = record.Account.desc; // 工行按卡区分用途
+                                    records.Add(record);
+                                }
+                            }
+                            else if (line[3] == "人民币自动转账还款" || line[3] == "自动购汇还款")
+                            {
+                                record.isInternal = true;
+                                record.Reason = "信用卡还款";
+                                records.Add(record);
+                            }
+                        }
+
+                    }
+
+                    database?.SaveAccountsAndRecords(accounts, records);
                 }
                 catch (Exception e)
                 {
