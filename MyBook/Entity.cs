@@ -38,6 +38,7 @@ namespace MyBook
     }
     // 账户
     // 一个账户下的不同余额视作多个账户
+    [SugarIndex("unique_Accounts_name", nameof(Account.name), OrderByType.Asc, true)]
     [SugarTable("Accounts")]
     public class Account
     {

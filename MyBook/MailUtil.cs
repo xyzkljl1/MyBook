@@ -38,7 +38,8 @@ namespace MyBook
         }
         public static Account? FindICBCAccount(List<Account> accounts, string name, CurrencyType currencyType)
         {
-            return accounts.Find(accounts => accounts.name.Contains(name) && accounts.v.t == currencyType);
+            var accountName = DatabaseUtil.BuildAccountName("工商银行", name, currencyType.ToString());
+            return accounts.Find(account => account.name == accountName);
         }
         // 工行对账单，所有信用卡视作同一账户
         public async Task SearchICBCBill(DateTime date)
@@ -68,7 +69,11 @@ namespace MyBook
                         var account = FindICBCAccount(accounts, line[0], balance.t);
                         if (account is null)
                         {
-                            account = new Account { name = line[0], v = balance };
+                            account = new Account
+                            {
+                                name = DatabaseUtil.BuildAccountName("工商银行", line[0], balance.t.ToString()),
+                                v = balance
+                            };
                             accounts.Add(account);
                         }
                         else

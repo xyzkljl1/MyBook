@@ -26,11 +26,12 @@ namespace MyBook
                 IsAutoCloseConnection = true,
                 MoreSettings = new ConnMoreSettings
                 {
-                    SqliteCodeFirstEnableDropColumn = dbType == DbType.Sqlite // 仅Sqlite需要，开启时InitTables时会删除多余的列
+                    SqliteCodeFirstEnableDropColumn = dbType == DbType.Sqlite,
+                    SqliteCodeFirstEnableDefaultValue = dbType == DbType.Sqlite
                 }
             });
 #if DEBUG
-            // 注意这并不是迁移，列改名时会删除旧列从而丢失所有数据
+            // This is schema sync, not migration; renamed columns may lose old data.
             db.CodeFirst.InitTables<Account, Record>();
 #endif
             ValidateSchema();
@@ -66,10 +67,30 @@ namespace MyBook
             }
         }
 
+        public Account GetOrAddAccount(string? accountType, string id, string? secondaryId)
+        {
+            var accountName = BuildAccountName(accountType, id, secondaryId);
+            var account = db.Queryable<Account>().First(it => it.name == accountName);
+            if (account is not null)
+                return account;
+
+            account = new Account { name = accountName };
+            account.Id = db.Insertable(account).ExecuteReturnIdentity();
+            return account;
+        }
+
+        public static string BuildAccountName(string? accountType, string id, string? secondaryId)
+        {
+            var parts = new[] { accountType, id, secondaryId }
+                .Where(part => !String.IsNullOrWhiteSpace(part))
+                .Select(part => part!.Trim());
+            return String.Join("_", parts);
+        }
+
         private Account SaveAccount(Account account)
         {
             var existing = db.Queryable<Account>()
-                .First(it => it.name == account.name && it._v_t == account.v.t);
+                .First(it => it.name == account.name);
 
             if (existing is null)
             {
