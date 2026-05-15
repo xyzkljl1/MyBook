@@ -21,27 +21,71 @@ namespace MyBook
         {
         }
     }
-    enum StockType
+    public enum StockType
     {
         US,
         SHANGHAI,
         CNFUND
     };
-    class Stock
+    [SugarIndex("unique_Stocks_account_code_type", nameof(Stock._account_Id), OrderByType.Asc, nameof(Stock.code), OrderByType.Asc, nameof(Stock.t), OrderByType.Asc, true)]
+    [SugarTable("Stocks")]
+    public class Stock
     {
-        public StockType t;
-        public string code;
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(MyBook.Account.Id))]
+        public Account? Account { get; set; }
+
+        [SugarColumn(DefaultValue = "''")]
+        public string code { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "US", ColumnDataType = MySqlEnumColumnTypes.StockType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public StockType t { get; set; } = StockType.US;
+
+        [SugarColumn(DefaultValue = "0")]
+        public decimal quantity { get; set; } = 0;
+
+        [SugarColumn(DefaultValue = "''")]
+        public string desc { get; set; } = "";
+
+        [SugarColumn(IsIgnore = true)]
+        public Currency currentPrice
+        {
+            get { return new Currency(_currentPrice_v, _currentPrice_t); }
+            set
+            {
+                _currentPrice_v = value.v;
+                _currentPrice_t = value.t;
+            }
+        }
+
+        public Stock()
+        {
+        }
+
         public Stock(string _c, StockType _t)
         {
             code = _c;
             t = _t;
         }
+
+        // 用于存储
+        [SugarColumn(DefaultValue = "0")]
+        public decimal _currentPrice_v { get; set; } = 0;
+
+        [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public CurrencyType _currentPrice_t { get; set; } = CurrencyType.RMB;
+
+        [SugarColumn(IsNullable = true)]
+        public int? _account_Id { get; set; }
     }
 
     // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
     static class MySqlEnumColumnTypes
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
+        public const string StockType = "enum('US','SHANGHAI','CNFUND')";
     }
 
     // 账户

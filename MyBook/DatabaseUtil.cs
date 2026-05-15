@@ -8,7 +8,7 @@ namespace MyBook
     {
         private const string DefaultConnectionString = "server=localhost;port=3306;database=mybook;uid=root;pwd=;charset=utf8mb4;";
         private readonly SqlSugarClient db;
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(Record), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(Record), typeof(Stock), typeof(StatementImport)];
 
         public DatabaseUtil(IConfigurationRoot config)
         {
@@ -25,7 +25,7 @@ namespace MyBook
             });
 #if DEBUG
             // This is schema sync, not migration; renamed columns may lose old data.
-            DropObsoleteIndexes();
+            PrepareSchemaSync();
             db.CodeFirst.InitTables(SchemaTypes);
 #endif
             ValidateSchema();
@@ -161,9 +161,12 @@ namespace MyBook
             return false;
         }
 
-        private void DropObsoleteIndexes()
+        private void PrepareSchemaSync()
         {
             DropIndexIfExists("Accounts", "unique_Accounts_name");
+            DropIndexIfExists("Stocks", "unique_Stocks_account_stockId");
+            RenameColumnIfNeeded("Stocks", "stockId", "code", "varchar(255) not null default ''");
+            RenameColumnIfNeeded("Stocks", "currentPrice", "_currentPrice_v", "decimal(18,4) not null default 0");
         }
 
         private void DropIndexIfExists(string tableName, string indexName)
@@ -178,6 +181,32 @@ namespace MyBook
 
             if (exists)
                 db.Ado.ExecuteCommand($"alter table `{tableName}` drop index `{indexName}`");
+        }
+
+        private void RenameColumnIfNeeded(string tableName, string oldColumnName, string newColumnName, string columnDefinition)
+        {
+            var hasOldColumn = ColumnExists(tableName, oldColumnName);
+            if (!hasOldColumn)
+                return;
+
+            if (ColumnExists(tableName, newColumnName))
+            {
+                db.Ado.ExecuteCommand($"alter table `{tableName}` drop column `{oldColumnName}`");
+                return;
+            }
+
+            db.Ado.ExecuteCommand($"alter table `{tableName}` change column `{oldColumnName}` `{newColumnName}` {columnDefinition}");
+        }
+
+        private bool ColumnExists(string tableName, string columnName)
+        {
+            return db.Ado.SqlQuery<int>($"""
+                select count(*)
+                from information_schema.columns
+                where table_schema = database()
+                  and table_name = '{tableName}'
+                  and column_name = '{columnName}'
+                """).FirstOrDefault() > 0;
         }
 
         private void ValidateSchema()
@@ -211,6 +240,8 @@ namespace MyBook
                 return "Accounts";
             if (type == typeof(Record))
                 return "Records";
+            if (type == typeof(Stock))
+                return "Stocks";
             if (type == typeof(StatementImport))
                 return "StatementImports";
 
