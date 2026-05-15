@@ -27,9 +27,10 @@ namespace MyBook
         public async Task<Currency?> Fetch(Stock stock)
         {
             Currency? ret = null;
-            switch(stock.t)
+            switch(stock.stockType)
             {
-                case StockType.US:
+                case StockType.NASDAQ:
+                case StockType.UST:
                     ret = new Currency(await FetchStock(stock.code), CurrencyType.USD);
                     break;
                 case StockType.SHANGHAI:
@@ -38,8 +39,16 @@ namespace MyBook
                 case StockType.CNFUND:
                     ret = new Currency(await FetchCNFund(stock.code), CurrencyType.RMB);
                     break;
+                case StockType.Cash:
+                    ret = stock.currentPrice.v > 0 ? stock.currentPrice : new Currency(1, stock.currentPrice.t);
+                    break;
             }
             ret = ret==null||ret.v < 0 ? null : ret;
+            if (ret is not null)
+            {
+                stock.currentPrice = ret;
+                stock.currentPriceTime = DateTime.Now;
+            }
             return ret;
         }
         // 返回小于0表示错误

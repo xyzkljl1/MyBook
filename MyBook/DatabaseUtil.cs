@@ -165,7 +165,10 @@ namespace MyBook
         {
             DropIndexIfExists("Accounts", "unique_Accounts_name");
             DropIndexIfExists("Stocks", "unique_Stocks_account_stockId");
+            DropIndexIfExists("Stocks", "unique_Stocks_account_code_type");
             RenameColumnIfNeeded("Stocks", "stockId", "code", "varchar(255) not null default ''");
+            RenameColumnIfNeeded("Stocks", "t", "stockType", "enum('US','NASDAQ','UST','SHANGHAI','CNFUND','Cash') not null default 'NASDAQ'");
+            MigrateStockTypeUS();
             RenameColumnIfNeeded("Stocks", "currentPrice", "_currentPrice_v", "decimal(18,4) not null default 0");
         }
 
@@ -207,6 +210,31 @@ namespace MyBook
                   and table_name = '{tableName}'
                   and column_name = '{columnName}'
                 """).FirstOrDefault() > 0;
+        }
+
+        private void MigrateStockTypeUS()
+        {
+            if (!ColumnExists("Stocks", "stockType"))
+                return;
+
+            var columnType = db.Ado.SqlQuery<string>("""
+                select column_type
+                from information_schema.columns
+                where table_schema = database()
+                  and table_name = 'Stocks'
+                  and column_name = 'stockType'
+                """).FirstOrDefault();
+
+            if (columnType is null || !columnType.Contains("'US'", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (!columnType.Contains("'NASDAQ'", StringComparison.OrdinalIgnoreCase))
+            {
+                db.Ado.ExecuteCommand(
+                    "alter table `Stocks` modify column `stockType` enum('US','NASDAQ','UST','SHANGHAI','CNFUND','Cash') not null default 'NASDAQ'");
+            }
+
+            db.Ado.ExecuteCommand("update `Stocks` set `stockType` = 'NASDAQ' where `stockType` = 'US'");
         }
 
         private void ValidateSchema()

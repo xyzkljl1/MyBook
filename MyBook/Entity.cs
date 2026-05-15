@@ -23,11 +23,20 @@ namespace MyBook
     }
     public enum StockType
     {
-        US,
+        // 纳斯达克交易所上市资产。
+        NASDAQ,
+        // 美国国债。
+        UST,
+        // 上海交易所上市资产。
         SHANGHAI,
-        CNFUND
+        // 国内基金。
+        CNFUND,
+        // 现金类持仓。
+        Cash
     };
-    [SugarIndex("unique_Stocks_account_code_type", nameof(Stock._account_Id), OrderByType.Asc, nameof(Stock.code), OrderByType.Asc, nameof(Stock.t), OrderByType.Asc, true)]
+
+    // 股票、基金、现金等持仓状态，使用 code + stockType 区分具体资产。
+    [SugarIndex("unique_Stocks_account_code_type", nameof(Stock._account_Id), OrderByType.Asc, nameof(Stock.code), OrderByType.Asc, nameof(Stock.stockType), OrderByType.Asc, true)]
     [SugarTable("Stocks")]
     public class Stock
     {
@@ -40,8 +49,8 @@ namespace MyBook
         [SugarColumn(DefaultValue = "''")]
         public string code { get; set; } = "";
 
-        [SugarColumn(DefaultValue = "US", ColumnDataType = MySqlEnumColumnTypes.StockType, SqlParameterDbType = typeof(EnumToStringConvert))]
-        public StockType t { get; set; } = StockType.US;
+        [SugarColumn(DefaultValue = "NASDAQ", ColumnDataType = MySqlEnumColumnTypes.StockType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public StockType stockType { get; set; } = StockType.NASDAQ;
 
         [SugarColumn(DefaultValue = "0")]
         public decimal quantity { get; set; } = 0;
@@ -50,6 +59,7 @@ namespace MyBook
         public string desc { get; set; } = "";
 
         [SugarColumn(IsIgnore = true)]
+        // 当前单价，金额和币种分别存储。
         public Currency currentPrice
         {
             get { return new Currency(_currentPrice_v, _currentPrice_t); }
@@ -60,6 +70,9 @@ namespace MyBook
             }
         }
 
+        [SugarColumn(DefaultValue = "0")]
+        public DateTime currentPriceTime { get; set; }
+
         public Stock()
         {
         }
@@ -67,7 +80,7 @@ namespace MyBook
         public Stock(string _c, StockType _t)
         {
             code = _c;
-            t = _t;
+            stockType = _t;
         }
 
         // 用于存储
@@ -85,11 +98,12 @@ namespace MyBook
     static class MySqlEnumColumnTypes
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
-        public const string StockType = "enum('US','SHANGHAI','CNFUND')";
+        public const string StockType = "enum('NASDAQ','UST','SHANGHAI','CNFUND','Cash')";
     }
 
     // 账户
-    // 一个账户下的不同余额视作多个账户
+    // 一个账户下的不同币种余额视作多个账户。
+    // Account.v 表示该账户中现金、股票、负债等所有种类资产的总和余额。
     [SugarIndex("unique_Accounts_name_currency", nameof(Account.name), OrderByType.Asc, nameof(Account._v_t), OrderByType.Asc, true)]
     [SugarTable("Accounts")]
     public class Account
