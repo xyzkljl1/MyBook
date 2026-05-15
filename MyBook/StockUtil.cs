@@ -9,6 +9,7 @@ using System.Net;
 using System.Text;
 using System.Threading.Tasks;
 using System.Text.Json;
+using System.Globalization;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -40,7 +41,8 @@ namespace MyBook
                     ret = new Currency(await FetchCNFund(stock.code), CurrencyType.RMB);
                     break;
                 case StockType.Cash:
-                    ret = stock.currentPrice.v > 0 ? stock.currentPrice : new Currency(1, stock.currentPrice.t);
+                    var cashCurrency = GetCashCurrency(stock);
+                    ret = cashCurrency is null ? null : await FetchCurrencyToRmb(cashCurrency.Value);
                     break;
             }
             ret = ret==null||ret.v < 0 ? null : ret;
@@ -50,6 +52,50 @@ namespace MyBook
                 stock.currentPriceTime = DateTime.Now;
             }
             return ret;
+        }
+        private static CurrencyType? GetCashCurrency(Stock stock)
+        {
+            // 现金类持仓用 code 保存原币种，例如 USD/HKD；刷新后的 currentPrice 始终是折合人民币的价格。
+            if (!String.IsNullOrWhiteSpace(stock.code))
+            {
+                if (Enum.TryParse<CurrencyType>(stock.code.Trim(), true, out var currencyType))
+                    return currencyType;
+                Console.WriteLine($"fail to parse cash currency type: {stock.code}");
+                return null;
+            }
+            return stock.currentPrice.t;
+        }
+        public async Task<Currency?> FetchCurrencyToRmb(CurrencyType currencyType)
+        {
+            if (currencyType == CurrencyType.RMB)
+                return new Currency(1, CurrencyType.RMB);
+
+            var fromCurrency = ToAlphaVantageCurrencyCode(currencyType);
+            var url = $"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={fromCurrency}&to_currency=CNY&apikey={key}";
+            try
+            {
+                var doc = await HttpGetJson(url);
+                var exchangeRate = doc?["Realtime Currency Exchange Rate"]?.ToObject<JObject>();
+                var rateText = exchangeRate?["5. Exchange Rate"]?.ToString();
+                if (String.IsNullOrWhiteSpace(rateText))
+                    return null;
+                var rate = decimal.Parse(rateText, CultureInfo.InvariantCulture);
+                Console.WriteLine($"{fromCurrency}/CNY:{rate}");
+                return new Currency(rate, CurrencyType.RMB);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"fail to fetch currency exchange rate {fromCurrency}/CNY: {e}");
+            }
+            return null;
+        }
+        private static string ToAlphaVantageCurrencyCode(CurrencyType currencyType)
+        {
+            return currencyType switch
+            {
+                CurrencyType.RMB => "CNY",
+                _ => currencyType.ToString()
+            };
         }
         // 返回小于0表示错误
         // 股价api不返回币种，caller处理币种

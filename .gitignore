@@ -9,3 +9,5 @@
 /MyBook/Properties
 /MyBook/MyBook.csproj.user
 /ICBCexample.html
+/*.db
+/temp_*
