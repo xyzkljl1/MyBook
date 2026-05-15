@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using SqlSugar;
+using SqlSugar.DbConvert;
 
 namespace MyBook
 {
@@ -36,6 +37,13 @@ namespace MyBook
             t = _t;
         }
     }
+
+    // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
+    static class MySqlEnumColumnTypes
+    {
+        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
+    }
+
     // 账户
     // 一个账户下的不同余额视作多个账户
     [SugarIndex("unique_Accounts_name", nameof(Account.name), OrderByType.Asc, true)]
@@ -65,7 +73,7 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public decimal _v_v { get; set; } = 0;
 
-        [SugarColumn(DefaultValue = "0")]
+        [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType _v_t { get; set; } = CurrencyType.RMB;
     }
     // 无论出还是入，只记录本次变动所影响的账户，而不是记录Src和Dest账户
@@ -124,8 +132,13 @@ namespace MyBook
         public string Reason { get; set; } = ""; // 消费/收入原因
 
         // 用于存储
+        [SugarColumn(IsNullable = true)]
         public int? _account_Id { get; set; }
+
+        [SugarColumn(IsNullable = true)]
         public decimal? _descCurrency_v { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType? _descCurrency_t { get; set; }
 
         private Currency? _descCurrency;
@@ -154,7 +167,7 @@ namespace MyBook
         [SugarColumn(ColumnName = "amount", DefaultValue = "0")]
         public decimal v { get; set; } = 0; // 金额，decimal应当可以避免精度问题
 
-        [SugarColumn(ColumnName = "currency_type", DefaultValue = "0")]
+        [SugarColumn(ColumnName = "currency_type", DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType t { get; set; } = CurrencyType.RMB;
         private static char[] seperator = new char[] { '/', '(', ')' };
         public void CopyFrom(Currency? c)

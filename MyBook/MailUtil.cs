@@ -26,8 +26,8 @@ namespace MyBook
         IProxyClient proxy;
         string username;
         string apppasswd;
-        DatabaseUtil? database;
-        public MailUtil(IConfigurationRoot config, DatabaseUtil? database = null)
+        DatabaseUtil database;
+        public MailUtil(IConfigurationRoot config, DatabaseUtil database)
         {
             // 为了支持gbk编码
             System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -36,10 +36,9 @@ namespace MyBook
             apppasswd = config["yahoo_pass"]!;
             this.database = database;
         }
-        public static Account? FindICBCAccount(List<Account> accounts, string name, CurrencyType currencyType)
+        public Account? FindICBCAccount(string name, CurrencyType currencyType)
         {
-            var accountName = DatabaseUtil.BuildAccountName("工商银行", name, currencyType.ToString());
-            return accounts.Find(account => account.name == accountName);
+            return database.GetOrAddAccount("ICBC", name.Substring(0, 4), currencyType.ToString());
         }
         // 工行对账单，所有信用卡视作同一账户
         public async Task SearchICBCBill(DateTime date)
@@ -47,7 +46,6 @@ namespace MyBook
             // 按月份搜索
             var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", date);
             var monthText = date.ToString("yyyy-MM");
-            var accounts = new List<Account>();
             if (!String.IsNullOrEmpty(billText))
             {
                 Records records = new();
@@ -64,22 +62,12 @@ namespace MyBook
                     {
                         if (line.Count < 5 || line[0] == "合计")
                             continue;
-
                         var balance = Currency.Parse(line[4]);
-                        var account = FindICBCAccount(accounts, line[0], balance.t);
+                        var account = FindICBCAccount(line[0], balance.t);
                         if (account is null)
-                        {
-                            account = new Account
-                            {
-                                name = DatabaseUtil.BuildAccountName("工商银行", line[0], balance.t.ToString()),
-                                v = balance
-                            };
-                            accounts.Add(account);
-                        }
-                        else
-                        {
-                            account.v = balance;
-                        }
+                            throw new MailParseException("Parse ICBC Bill Fail, Invalid Account");
+                        //else
+                        //    account.v = balance;
                     }
 
                     {
@@ -95,7 +83,7 @@ namespace MyBook
                         {
                             var record = new Record();
                             record.updateTime = DateTime.Now;
-                            record.Account = FindICBCAccount(accounts, line[0], CurrencyType.RMB);
+                            record.Account = FindICBCAccount(line[0], CurrencyType.RMB);
                             if (record.Account is null)
                                 throw new MailParseException("Parse ICBC Bill Fail, Invalid Account");
                             record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -140,7 +128,7 @@ namespace MyBook
 
                     }
 
-                    database?.SaveAccountsAndRecords(accounts, records);
+                    database.SaveRecords(records);
                 }
                 catch (Exception e)
                 {

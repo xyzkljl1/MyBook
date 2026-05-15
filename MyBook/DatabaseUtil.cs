@@ -6,6 +6,7 @@ namespace MyBook
 {
     class DatabaseUtil
     {
+        private const string DefaultConnectionString = "server=localhost;port=3306;database=mybook;uid=root;pwd=;charset=utf8mb4;";
         private readonly SqlSugarClient db;
         private static readonly Type[] SchemaTypes = [typeof(Account), typeof(Record)];
 
@@ -13,22 +14,14 @@ namespace MyBook
         {
             var connectionString = config["database_connection"]
                 ?? config.GetConnectionString("Default")
-                ?? "Data Source=mybook.db";
-            var dbType = ReadDbType(config);
-            if (dbType == DbType.Sqlite)
-                SQLitePCL.Batteries.Init();
+                ?? DefaultConnectionString;
 
             db = new SqlSugarClient(new ConnectionConfig
             {
                 ConnectionString = connectionString,
-                DbType = dbType,
+                DbType = DbType.MySql,
                 InitKeyType = InitKeyType.Attribute,
-                IsAutoCloseConnection = true,
-                MoreSettings = new ConnMoreSettings
-                {
-                    SqliteCodeFirstEnableDropColumn = dbType == DbType.Sqlite,
-                    SqliteCodeFirstEnableDefaultValue = dbType == DbType.Sqlite
-                }
+                IsAutoCloseConnection = true
             });
 #if DEBUG
             // This is schema sync, not migration; renamed columns may lose old data.
@@ -37,14 +30,11 @@ namespace MyBook
             ValidateSchema();
         }
 
-        public void SaveAccountsAndRecords(IEnumerable<Account> accounts, IEnumerable<Record> records)
+        public void SaveRecords(IEnumerable<Record> records)
         {
             db.Ado.BeginTran();
             try
             {
-                foreach (var account in accounts)
-                    SaveAccount(account);
-
                 var recordList = records.ToList();
                 foreach (var record in recordList)
                 {
@@ -104,18 +94,6 @@ namespace MyBook
             existing.desc = account.desc;
             db.Updateable(existing).ExecuteCommand();
             return existing;
-        }
-
-        private static DbType ReadDbType(IConfigurationRoot config)
-        {
-            var dbTypeText = config["database_type"] ?? "Sqlite";
-            return dbTypeText.Trim().ToLowerInvariant() switch
-            {
-                "mysql" => DbType.MySql,
-                "sqlite" => DbType.Sqlite,
-                "sqllite" => DbType.Sqlite,
-                _ => throw new ArgumentException($"Unsupported database_type: {dbTypeText}")
-            };
         }
 
         private void ValidateSchema()
