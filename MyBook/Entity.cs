@@ -125,10 +125,10 @@ namespace MyBook
             }
         }
 
-        [SugarColumn(DefaultValue = "''")]
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(1024)")]
         public string Source { get; set; } = ""; // 获得该信息的途径
 
-        [SugarColumn(DefaultValue = "''")]
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(1024)")]
         public string Reason { get; set; } = ""; // 消费/收入原因
 
         // 用于存储
