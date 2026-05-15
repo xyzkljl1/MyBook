@@ -38,7 +38,7 @@ namespace MyBook
         }
         public Account? FindICBCAccount(string name, CurrencyType currencyType)
         {
-            return database.GetOrAddAccount("ICBC", name.Substring(0, 4), currencyType.ToString());
+            return database.GetOrAddAccount("ICBC", name.Substring(0, 4), currencyType);
         }
         // 工行对账单，所有信用卡视作同一账户
         public async Task SearchICBCBill(DateTime date)

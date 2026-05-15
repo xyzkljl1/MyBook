@@ -25,6 +25,7 @@ namespace MyBook
             });
 #if DEBUG
             // This is schema sync, not migration; renamed columns may lose old data.
+            DropObsoleteIndexes();
             db.CodeFirst.InitTables<Account, Record>();
 #endif
             ValidateSchema();
@@ -57,21 +58,27 @@ namespace MyBook
             }
         }
 
-        public Account GetOrAddAccount(string? accountType, string id, string? secondaryId)
+        public Account GetOrAddAccount(string? accountType, string id, CurrencyType currencyType)
         {
-            var accountName = BuildAccountName(accountType, id, secondaryId);
-            var account = db.Queryable<Account>().First(it => it.name == accountName);
+            var accountName = BuildAccountName(accountType, id);
+            var accountQuery = db.Queryable<Account>()
+                .Where(it => it.name == accountName);
+
+            if (currencyType != CurrencyType.Any)
+                accountQuery = accountQuery.Where(it => it._v_t == currencyType);
+
+            var account = accountQuery.First();
             if (account is not null)
                 return account;
 
-            account = new Account { name = accountName };
+            account = new Account { name = accountName, _v_t = currencyType };
             account.Id = db.Insertable(account).ExecuteReturnIdentity();
             return account;
         }
 
-        public static string BuildAccountName(string? accountType, string id, string? secondaryId)
+        public static string BuildAccountName(string? accountType, string id)
         {
-            var parts = new[] { accountType, id, secondaryId }
+            var parts = new[] { accountType, id }
                 .Where(part => !String.IsNullOrWhiteSpace(part))
                 .Select(part => part!.Trim());
             return String.Join("_", parts);
@@ -80,7 +87,7 @@ namespace MyBook
         private Account SaveAccount(Account account)
         {
             var existing = db.Queryable<Account>()
-                .First(it => it.name == account.name);
+                .First(it => it.name == account.name && it._v_t == account._v_t);
 
             if (existing is null)
             {
@@ -94,6 +101,25 @@ namespace MyBook
             existing.desc = account.desc;
             db.Updateable(existing).ExecuteCommand();
             return existing;
+        }
+
+        private void DropObsoleteIndexes()
+        {
+            DropIndexIfExists("Accounts", "unique_Accounts_name");
+        }
+
+        private void DropIndexIfExists(string tableName, string indexName)
+        {
+            var exists = db.Ado.SqlQuery<int>($"""
+                select count(*)
+                from information_schema.statistics
+                where table_schema = database()
+                  and table_name = '{tableName}'
+                  and index_name = '{indexName}'
+                """).FirstOrDefault() > 0;
+
+            if (exists)
+                db.Ado.ExecuteCommand($"alter table `{tableName}` drop index `{indexName}`");
         }
 
         private void ValidateSchema()

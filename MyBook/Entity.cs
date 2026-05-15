@@ -41,12 +41,12 @@ namespace MyBook
     // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
     static class MySqlEnumColumnTypes
     {
-        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
+        public const string CurrencyType = "enum('Any','RMB','USD','JPY','SGD','HKD')";
     }
 
     // 账户
     // 一个账户下的不同余额视作多个账户
-    [SugarIndex("unique_Accounts_name", nameof(Account.name), OrderByType.Asc, true)]
+    [SugarIndex("unique_Accounts_name_currency", nameof(Account.name), OrderByType.Asc, nameof(Account._v_t), OrderByType.Asc, true)]
     [SugarTable("Accounts")]
     public class Account
     {
@@ -150,6 +150,7 @@ namespace MyBook
     //币种
     public enum CurrencyType
     {
+        Any,
         RMB,
         USD,
         JPY,
