@@ -8,7 +8,7 @@ namespace MyBook
     {
         private const string DefaultConnectionString = "server=localhost;port=3306;database=mybook;uid=root;pwd=;charset=utf8mb4;";
         private readonly SqlSugarClient db;
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(Record)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(Record), typeof(StatementImport)];
 
         public DatabaseUtil(IConfigurationRoot config)
         {
@@ -26,29 +26,18 @@ namespace MyBook
 #if DEBUG
             // This is schema sync, not migration; renamed columns may lose old data.
             DropObsoleteIndexes();
-            db.CodeFirst.InitTables<Account, Record>();
+            db.CodeFirst.InitTables(SchemaTypes);
 #endif
             ValidateSchema();
         }
 
         public void SaveRecords(IEnumerable<Record> records)
         {
+            var recordList = records.ToList();
             db.Ado.BeginTran();
             try
             {
-                var recordList = records.ToList();
-                foreach (var record in recordList)
-                {
-                    if (record.Account is null)
-                        continue;
-
-                    var account = SaveAccount(record.Account);
-                    record._account_Id = account.Id;
-                }
-
-                if (recordList.Count > 0)
-                    db.Insertable(recordList).ExecuteCommand();
-
+                SaveRecordsCore(recordList);
                 db.Ado.CommitTran();
             }
             catch
@@ -58,22 +47,65 @@ namespace MyBook
             }
         }
 
+        public bool IsStatementImported(string provider, string month)
+        {
+            return db.Queryable<StatementImport>()
+                .Any(it => it.provider == provider && it.month == month);
+        }
+
+        public bool SaveStatementRecordsOnce(string provider, string month, IEnumerable<Record> records)
+        {
+            var recordList = records.ToList();
+            db.Ado.BeginTran();
+            try
+            {
+                if (IsStatementImported(provider, month))
+                {
+                    db.Ado.CommitTran();
+                    return false;
+                }
+
+                db.Insertable(new StatementImport { provider = provider, month = month })
+                    .ExecuteCommand();
+                SaveRecordsCore(recordList);
+                db.Ado.CommitTran();
+                return true;
+            }
+            catch (Exception e)
+            {
+                db.Ado.RollbackTran();
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, month))
+                    return false;
+                throw;
+            }
+        }
+
         public Account GetOrAddAccount(string? accountType, string id, CurrencyType currencyType)
         {
             var accountName = BuildAccountName(accountType, id);
-            var accountQuery = db.Queryable<Account>()
-                .Where(it => it.name == accountName);
-
-            if (currencyType != CurrencyType.Any)
-                accountQuery = accountQuery.Where(it => it._v_t == currencyType);
-
-            var account = accountQuery.First();
+            var account = FindAccount(accountName, currencyType);
             if (account is not null)
                 return account;
 
             account = new Account { name = accountName, _v_t = currencyType };
             account.Id = db.Insertable(account).ExecuteReturnIdentity();
             return account;
+        }
+
+        public Account? FindAccount(string? accountType, string id, CurrencyType? currencyType = null)
+        {
+            return FindAccount(BuildAccountName(accountType, id), currencyType);
+        }
+
+        private Account? FindAccount(string accountName, CurrencyType? currencyType)
+        {
+            var accountQuery = db.Queryable<Account>()
+                .Where(it => it.name == accountName);
+
+            if (currencyType.HasValue)
+                accountQuery = accountQuery.Where(it => it._v_t == currencyType.Value);
+
+            return accountQuery.First();
         }
 
         public static string BuildAccountName(string? accountType, string id)
@@ -101,6 +133,32 @@ namespace MyBook
             existing.desc = account.desc;
             db.Updateable(existing).ExecuteCommand();
             return existing;
+        }
+
+        private void SaveRecordsCore(List<Record> recordList)
+        {
+            foreach (var record in recordList)
+            {
+                if (record.Account is null)
+                    continue;
+
+                var account = SaveAccount(record.Account);
+                record._account_Id = account.Id;
+            }
+
+            if (recordList.Count > 0)
+                db.Insertable(recordList).ExecuteCommand();
+        }
+
+        private static bool IsDuplicateKeyException(Exception exception)
+        {
+            for (var current = exception; current is not null; current = current.InnerException)
+            {
+                if (current.Message.Contains("Duplicate entry", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
         }
 
         private void DropObsoleteIndexes()
@@ -153,6 +211,8 @@ namespace MyBook
                 return "Accounts";
             if (type == typeof(Record))
                 return "Records";
+            if (type == typeof(StatementImport))
+                return "StatementImports";
 
             return type.Name;
         }

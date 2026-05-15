@@ -23,6 +23,7 @@ namespace MyBook
     // 从雅虎邮箱拉信用卡账单
     class MailUtil
     {
+        private const string ICBCProvider = "ICBC";
         IProxyClient proxy;
         string username;
         string apppasswd;
@@ -38,14 +39,17 @@ namespace MyBook
         }
         public Account? FindICBCAccount(string name, CurrencyType currencyType)
         {
-            return database.GetOrAddAccount("ICBC", name.Substring(0, 4), currencyType);
+            return database.GetOrAddAccount(ICBCProvider, name.Substring(0, 4), currencyType);
         }
-        // 工行对账单，所有信用卡视作同一账户
+        // 工行对账单，按卡号区分用途
         public async Task SearchICBCBill(DateTime date)
         {
             // 按月份搜索
-            var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", date);
             var monthText = date.ToString("yyyy-MM");
+            if (database.IsStatementImported(ICBCProvider, monthText))
+                return;
+
+            var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", date);
             if (!String.IsNullOrEmpty(billText))
             {
                 Records records = new();
@@ -128,7 +132,7 @@ namespace MyBook
 
                     }
 
-                    database.SaveRecords(records);
+                    database.SaveStatementRecordsOnce(ICBCProvider, monthText, records);
                 }
                 catch (Exception e)
                 {

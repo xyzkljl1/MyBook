@@ -41,7 +41,7 @@ namespace MyBook
     // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
     static class MySqlEnumColumnTypes
     {
-        public const string CurrencyType = "enum('Any','RMB','USD','JPY','SGD','HKD')";
+        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
     }
 
     // 账户
@@ -147,10 +147,23 @@ namespace MyBook
     {
     }
 
+    [SugarIndex("unique_StatementImports_provider_month", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.month), OrderByType.Asc, true)]
+    [SugarTable("StatementImports")]
+    public class StatementImport
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [SugarColumn(DefaultValue = "''")]
+        public string provider { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "''")]
+        public string month { get; set; } = "";
+    }
+
     //币种
     public enum CurrencyType
     {
-        Any,
         RMB,
         USD,
         JPY,
