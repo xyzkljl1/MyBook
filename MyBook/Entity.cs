@@ -211,7 +211,7 @@ namespace MyBook
     {
     }
 
-    [SugarIndex("unique_StatementImports_provider_month", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.month), OrderByType.Asc, true)]
+    [SugarIndex("unique_StatementImports_provider_date", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.date), OrderByType.Asc, true)]
     [SugarTable("StatementImports")]
     public class StatementImport
     {
@@ -222,7 +222,7 @@ namespace MyBook
         public string provider { get; set; } = "";
 
         [SugarColumn(DefaultValue = "''")]
-        public string month { get; set; } = "";
+        public string date { get; set; } = "";
     }
 
     //币种

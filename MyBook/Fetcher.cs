@@ -22,7 +22,7 @@ namespace MyBook
             database = new(config);
             mail = new(config, database);
             stock = new(config, database);
-            mail.FetchICBCBill(DateTime.Now.AddMonths(-2));
+            _ = mail.FetchICBCBills();
             //stock.Fetch(new Stock("QQQ", StockType.NASDAQ));
             //stock.Fetch(new Stock("021282", StockType.CNFUND));
         }

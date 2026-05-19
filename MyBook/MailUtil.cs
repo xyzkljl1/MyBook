@@ -26,7 +26,9 @@ namespace MyBook
     class MailUtil
     {
         private const string ICBCProvider = "ICBC";
+        private const string IBKRProvider = "IBKR";
         private const string IBKRReportSender = "donotreply@interactivebrokers.com";
+        private const int IBKRMissingReportLimitDays = 14;
         IProxyClient proxy;
         string username;
         string apppasswd;
@@ -40,19 +42,38 @@ namespace MyBook
             apppasswd = config["yahoo_pass"]!;
             this.database = database;
         }
-        public Account GetICBCAccount(string name, CurrencyType currencyType)
+        private Account GetICBCAccount(string name, CurrencyType currencyType)
         {
             return database.GetAccountByTypeAndId(ICBCProvider, name.Substring(0, 4), currencyType);
         }
+        public async Task FetchICBCBills()
+        {
+            var month = GetNextMonthlyStatementDate(ICBCProvider);
+            var currentMonth = FirstDayOfMonth(DateTime.Today);
+            while (month <= currentMonth)
+            {
+                var imported = await FetchICBCBill(month);
+                if (!imported)
+                {
+                    if (DateTime.Today >= month.AddMonths(1))
+                        throw new InvalidOperationException($"Missing ICBC bill for {month:yyyy-MM}");
+                    return;
+                }
+
+                month = month.AddMonths(1);
+            }
+        }
+
         // 工行对账单，按卡号区分用途
-        public async Task FetchICBCBill(DateTime date)
+        public async Task<bool> FetchICBCBill(DateTime date)
         {
             // 按月份搜索
-            var monthText = date.ToString("yyyy-MM");
-            if (database.IsStatementImported(ICBCProvider, monthText))
-                return;
+            var reportDate = FirstDayOfMonth(date);
+            var monthText = reportDate.ToString("yyyy-MM");
+            if (database.IsStatementImported(ICBCProvider, reportDate))
+                return true;
 
-            var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", date);
+            var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", reportDate);
             if (!String.IsNullOrEmpty(billText))
             {
                 Records records = new();
@@ -131,27 +152,57 @@ namespace MyBook
 
                     }
 
-                    database.SaveStatementRecordsOnce(ICBCProvider, monthText, records);
+                    database.SaveStatementRecordsOnce(ICBCProvider, reportDate, records);
+                    return true;
                 }
                 catch (Exception e)
                 {
                     Console.WriteLine($"parse mail fail :{e.Message}");
+                    throw;
                 }
             }
+
+            return false;
         }
-        public async Task FetchIBKRReport(DateTime date)
+        private async Task FetchIBKRReports()
+        {
+            var date = GetNextDailyStatementDate(IBKRProvider);
+            var missingDays = 0;
+            while (date <= DateTime.Today)
+            {
+                var imported = await FetchIBKRReport(date);
+                if (imported)
+                {
+                    missingDays = 0;
+                }
+                else
+                {
+                    missingDays++;
+                    if (missingDays >= IBKRMissingReportLimitDays)
+                        throw new InvalidOperationException($"Missing IBKR reports for {IBKRMissingReportLimitDays} consecutive days ending {date:yyyy-MM-dd}");
+                }
+
+                date = date.AddDays(1);
+            }
+        }
+
+        private async Task<bool> FetchIBKRReport(DateTime date)
         {
             var subjectDate = date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
+            var expectedSubject = $"{subjectDate}的自定义活动报表";
+            if (database.IsStatementImported(IBKRProvider, date))
+                return true;
+
             var message = await SearchBill(
                 IBKRReportSender,
-                subjectDate,
+                expectedSubject,
                 date,
-                message => IsIBKRCustomActivityReportSubject(message.Subject, subjectDate));
+                message => String.Equals(message.Subject?.Trim(), expectedSubject, StringComparison.Ordinal));
 
             if (message is null)
             {
                 Console.WriteLine($"Find no IBKR custom activity report {subjectDate}");
-                return;
+                return false;
             }
 
             var bodyText = GetMessageText(message);
@@ -160,8 +211,11 @@ namespace MyBook
             if (reportDate is null || String.IsNullOrWhiteSpace(reportAccountId))
             {
                 Console.WriteLine($"parse IBKR report mail fail: missing report date or account id, subject={message.Subject}");
-                return;
+                throw new MailParseException($"Parse IBKR Report Fail, Missing Date Or Account: {message.Subject}");
             }
+
+            if (reportDate.Value.Date != date.Date)
+                throw new MailParseException($"Parse IBKR Report Fail, Date Mismatch: expected {date:yyyy-MM-dd}, got {reportDate.Value:yyyy-MM-dd}");
 
             var account = GetIBKRAccount(reportAccountId);
 
@@ -169,7 +223,7 @@ namespace MyBook
             if (csvAttachments.Count == 0)
             {
                 Console.WriteLine($"parse IBKR report mail fail: no csv attachment, subject={message.Subject}");
-                return;
+                throw new MailParseException($"Parse IBKR Report Fail, Missing Csv Attachment: {message.Subject}");
             }
 
             Console.WriteLine($"Find IBKR custom activity report: {reportDate.Value:yyyy-MM-dd} {reportAccountId} -> {account.name}, csv attachments={csvAttachments.Count}");
@@ -177,17 +231,31 @@ namespace MyBook
                 Console.WriteLine($"Load IBKR report csv in memory: {attachment.FileName}, bytes={attachment.Content.Length}");
 
             // TODO: parse csvAttachments and save report content.
+            database.SaveStatementImportOnce(IBKRProvider, reportDate.Value);
+            return true;
         }
 
-        private static bool IsIBKRCustomActivityReportSubject(string? subject, string subjectDate)
+        private DateTime GetNextMonthlyStatementDate(string provider)
         {
-            if (String.IsNullOrWhiteSpace(subject) || !subject.Contains(subjectDate, StringComparison.OrdinalIgnoreCase))
-                return false;
+            var latestDate = database.GetLatestStatementImportDate(provider);
+            if (latestDate is null)
+                throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
 
-            return subject.Contains("Custom Activity", StringComparison.OrdinalIgnoreCase) ||
-                subject.Contains("Activity Statement", StringComparison.OrdinalIgnoreCase) ||
-                subject.Contains("Activity Report", StringComparison.OrdinalIgnoreCase) ||
-                subject.Contains("自定义活动报表", StringComparison.OrdinalIgnoreCase);
+            return FirstDayOfMonth(latestDate.Value).AddMonths(1);
+        }
+
+        private DateTime GetNextDailyStatementDate(string provider)
+        {
+            var latestDate = database.GetLatestStatementImportDate(provider);
+            if (latestDate is null)
+                throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
+
+            return latestDate.Value.Date.AddDays(1);
+        }
+
+        private static DateTime FirstDayOfMonth(DateTime date)
+        {
+            return new DateTime(date.Year, date.Month, 1);
         }
 
         private Account GetIBKRAccount(string reportAccountId)
@@ -308,13 +376,13 @@ namespace MyBook
                 attachment.ContentType.MediaSubtype.Equals("csv", StringComparison.OrdinalIgnoreCase);
         }
 
-        public async Task<string> SearchBill(string sender, string subject,DateTime date)
+        private async Task<string> SearchBill(string sender, string subject,DateTime date)
         {
             var message = await SearchBill(sender, subject, date, null);
             return message?.HtmlBody ?? message?.TextBody ?? "";
         }
 
-        public async Task<MimeMessage?> SearchBill(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
+        private async Task<MimeMessage?> SearchBill(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
         {
             try
             {

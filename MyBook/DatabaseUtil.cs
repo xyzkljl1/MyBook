@@ -48,25 +48,57 @@ namespace MyBook
             }
         }
 
-        public bool IsStatementImported(string provider, string month)
+        public bool IsStatementImported(string provider, DateTime date)
         {
+            var dateText = FormatStatementImportDate(date);
             return db.Queryable<StatementImport>()
-                .Any(it => it.provider == provider && it.month == month);
+                .Any(it => it.provider == provider && it.date == dateText);
         }
 
-        public bool SaveStatementRecordsOnce(string provider, string month, IEnumerable<Record> records)
+        public DateTime? GetLatestStatementImportDate(string provider)
+        {
+            var latestDate = db.Queryable<StatementImport>()
+                .Where(it => it.provider == provider)
+                .OrderByDescending(it => it.date)
+                .First();
+            if (latestDate is null || !TryParseStatementImportDate(latestDate.date, out var date))
+                return null;
+
+            return date;
+        }
+
+        public bool SaveStatementImportOnce(string provider, DateTime date)
+        {
+            try
+            {
+                if (IsStatementImported(provider, date))
+                    return false;
+
+                db.Insertable(new StatementImport { provider = provider, date = FormatStatementImportDate(date) })
+                    .ExecuteCommand();
+                return true;
+            }
+            catch (Exception e)
+            {
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, date))
+                    return false;
+                throw;
+            }
+        }
+
+        public bool SaveStatementRecordsOnce(string provider, DateTime date, IEnumerable<Record> records)
         {
             var recordList = records.ToList();
             db.Ado.BeginTran();
             try
             {
-                if (IsStatementImported(provider, month))
+                if (IsStatementImported(provider, date))
                 {
                     db.Ado.CommitTran();
                     return false;
                 }
 
-                db.Insertable(new StatementImport { provider = provider, month = month })
+                db.Insertable(new StatementImport { provider = provider, date = FormatStatementImportDate(date) })
                     .ExecuteCommand();
                 SaveRecordsCore(recordList);
                 db.Ado.CommitTran();
@@ -75,7 +107,7 @@ namespace MyBook
             catch (Exception e)
             {
                 db.Ado.RollbackTran();
-                if (IsDuplicateKeyException(e) && IsStatementImported(provider, month))
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, date))
                     return false;
                 throw;
             }
@@ -225,6 +257,21 @@ namespace MyBook
             db.Updateable(stock).ExecuteCommand();
         }
 
+        public static string FormatStatementImportDate(DateTime date)
+        {
+            return date.Date.ToString("yyyy-MM-dd");
+        }
+
+        public static bool TryParseStatementImportDate(string text, out DateTime date)
+        {
+            return DateTime.TryParseExact(
+                text,
+                "yyyy-MM-dd",
+                null,
+                System.Globalization.DateTimeStyles.None,
+                out date);
+        }
+
         private static bool IsDuplicateKeyException(Exception exception)
         {
             for (var current = exception; current is not null; current = current.InnerException)
@@ -243,12 +290,28 @@ namespace MyBook
             DropIndexIfExists("Accounts", "unique_Accounts_name");
             DropIndexIfExists("Stocks", "unique_Stocks_account_stockId");
             DropIndexIfExists("Stocks", "unique_Stocks_account_code_type");
+            DropIndexIfExists("StatementImports", "unique_StatementImports_provider_month");
+            DropIndexIfExists("StatementImports", "unique_StatementImports_provider_date");
             RenameColumnIfNeeded("Stocks", "stockId", "code", "varchar(255) not null default ''");
             RenameColumnIfNeeded("Stocks", "t", "stockType", "enum('US','NASDAQ','UST','SHANGHAI','CNFUND','Cash') not null default 'NASDAQ'");
             MigrateStockTypeUS();
             MigrateStockTypeEnum();
             RenameColumnIfNeeded("Stocks", "currentPrice", "_currentPrice_v", "decimal(18,4) not null default 0");
             MigrateStockCurrentPriceTime();
+            RenameColumnIfNeeded("StatementImports", "month", "date", "varchar(255) not null default ''");
+            MigrateStatementImportDates();
+        }
+
+        private void MigrateStatementImportDates()
+        {
+            if (!ColumnExists("StatementImports", "date"))
+                return;
+
+            db.Ado.ExecuteCommand("""
+                update `StatementImports`
+                set `date` = concat(`date`, '-01')
+                where `date` regexp '^[0-9]{4}-[0-9]{2}$'
+                """);
         }
 
         private void MigrateStockCurrentPriceTime()
