@@ -30,6 +30,7 @@ namespace MyBook
             PrepareForeignKeys();
 #endif
             ValidateSchema();
+            ValidateAccountPrimaryRelations();
         }
 
         public void SaveRecords(IEnumerable<Record> records)
@@ -167,6 +168,28 @@ namespace MyBook
             return existing;
         }
 
+        public Account GetPostingAccount(Account account)
+        {
+            var current = GetExistingAccountByName(account);
+            if (current._primaryAccount_Id is null)
+                return current;
+
+            if (current._primaryAccount_Id.Value == current.Id)
+                throw new InvalidOperationException($"Invalid account primary relation: {current.name}/{current._v_t} points to itself");
+
+            var primary = db.Queryable<Account>()
+                .Where(it => it.Id == current._primaryAccount_Id.Value)
+                .First();
+            if (primary is null)
+                throw new InvalidOperationException($"Invalid account primary relation: {current.name}/{current._v_t} points to missing account {current._primaryAccount_Id.Value}");
+            if (primary._primaryAccount_Id is not null)
+                throw new InvalidOperationException($"Invalid account primary relation: primary account {primary.name}/{primary._v_t} is also a supplementary account");
+            if (primary._v_t != current._v_t)
+                throw new InvalidOperationException($"Invalid account primary relation: {current.name}/{current._v_t} points to {primary.name}/{primary._v_t}");
+
+            return primary;
+        }
+
         private void SaveRecordsCore(List<Record> recordList)
         {
             foreach (var record in recordList)
@@ -174,7 +197,8 @@ namespace MyBook
                 if (record.Account is null)
                     throw new InvalidOperationException("Record account is required.");
 
-                var account = GetExistingAccountByName(record.Account);
+                var account = GetPostingAccount(record.Account);
+                record.Account = account;
                 record._account_Id = account.Id;
             }
 
@@ -285,6 +309,7 @@ namespace MyBook
 
         private void PrepareSchemaSync()
         {
+            DropForeignKeyIfExists("Accounts", "fk_Accounts_Accounts_primaryAccount_Id");
             DropForeignKeyIfExists("Records", "fk_Records_Accounts_account_Id");
             DropForeignKeyIfExists("Stocks", "fk_Stocks_Accounts_account_Id");
             DropIndexIfExists("Accounts", "unique_Accounts_name");
@@ -348,6 +373,7 @@ namespace MyBook
 
         private void PrepareForeignKeys()
         {
+            AddForeignKeyIfMissing("Accounts", "_primaryAccount_Id", "Accounts", "Id", "fk_Accounts_Accounts_primaryAccount_Id");
             AddForeignKeyIfMissing("Records", "_account_Id", "Accounts", "Id", "fk_Records_Accounts_account_Id");
             AddForeignKeyIfMissing("Stocks", "_account_Id", "Accounts", "Id", "fk_Stocks_Accounts_account_Id");
         }
@@ -521,6 +547,27 @@ namespace MyBook
                     throw new InvalidOperationException(
                         $"Database schema mismatch: table {tableName}, missing columns [{missingText}], extra columns [{extraText}]");
                 }
+            }
+        }
+
+        private void ValidateAccountPrimaryRelations()
+        {
+            var accounts = db.Queryable<Account>().ToList();
+            var accountsById = accounts.ToDictionary(account => account.Id);
+            foreach (var account in accounts.Where(account => account._primaryAccount_Id.HasValue))
+            {
+                var primaryAccountId = account._primaryAccount_Id!.Value;
+                if (primaryAccountId == account.Id)
+                    throw new InvalidOperationException($"Invalid account primary relation: {account.name}/{account._v_t} points to itself");
+
+                if (!accountsById.TryGetValue(primaryAccountId, out var primaryAccount))
+                    throw new InvalidOperationException($"Invalid account primary relation: {account.name}/{account._v_t} points to missing account {primaryAccountId}");
+
+                if (primaryAccount._primaryAccount_Id.HasValue)
+                    throw new InvalidOperationException($"Invalid account primary relation: primary account {primaryAccount.name}/{primaryAccount._v_t} is also a supplementary account");
+
+                if (primaryAccount._v_t != account._v_t)
+                    throw new InvalidOperationException($"Invalid account primary relation: {account.name}/{account._v_t} points to {primaryAccount.name}/{primaryAccount._v_t}");
             }
         }
 

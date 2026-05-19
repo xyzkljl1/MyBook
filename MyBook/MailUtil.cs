@@ -42,10 +42,16 @@ namespace MyBook
             apppasswd = config["yahoo_pass"]!;
             this.database = database;
         }
-        private Account GetICBCAccount(string name, CurrencyType currencyType)
+        private Account GetICBCCardAccount(string name, CurrencyType currencyType)
         {
             return database.GetAccountByTypeAndId(ICBCProvider, name.Substring(0, 4), currencyType);
         }
+
+        private Account GetICBCPostingAccount(string name, CurrencyType currencyType)
+        {
+            return database.GetPostingAccount(GetICBCCardAccount(name, currencyType));
+        }
+
         public async Task FetchICBCBills()
         {
             var month = GetNextMonthlyStatementDate(ICBCProvider);
@@ -91,7 +97,7 @@ namespace MyBook
                         if (line.Count < 5 || line[0] == "合计")
                             continue;
                         var balance = Currency.Parse(line[4]);
-                        var account = GetICBCAccount(line[0], balance.t);
+                        _ = GetICBCPostingAccount(line[0], balance.t);
                         //else
                         //    account.v = balance;
                     }
@@ -108,8 +114,9 @@ namespace MyBook
                         foreach (var line in table.Rows)
                         {
                             var record = new Record();
+                            var cardAccount = GetICBCCardAccount(line[0], CurrencyType.RMB);
                             record.updateTime = DateTime.Now;
-                            record.Account = GetICBCAccount(line[0], CurrencyType.RMB);
+                            record.Account = database.GetPostingAccount(cardAccount);
                             record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
                             if (line[6].Contains("存入"))
                                 record.isIn = true;
@@ -123,22 +130,23 @@ namespace MyBook
                             record.CopyFrom(Currency.Parse(line[6]));
                             if (line[3]== "消费" || line[3] == "跨行消费" || line[3] == "境外消费")
                             {
-                                record.Reason = record.Account.desc; // 工行按卡区分用途
+                                record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账
                                 records.Add(record);
                             }
                             else if (line[3] =="退款" || line[3] == "境外退货")
                             {
                                 if (!record.isIn)
                                     throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
-                                //在同一个月内向前搜索对应的消费，尝试消除;比较DescCurrency因为退款是按交易金额退的
+                                // 副卡消费产生的退款仍会显示在副卡卡号下；当前主副卡币种不同，因此按最终入账账户用 IsSameAccount 匹配不会误消除其它卡。
+                                // 在同一个月内向前搜索对应的消费，尝试消除；比较 DescCurrency 因为退款是按交易金额退的。
                                 Record? destRecord = records.FindLast(destRecord => 
                                                             destRecord.DestAccount == record.DestAccount && destRecord.isIn == false
-                                                            && destRecord.Account == record.Account && destRecord.DescCurrency == record.DescCurrency);
+                                                            && IsSameAccount(destRecord.Account, record.Account) && destRecord.DescCurrency == record.DescCurrency);
                                 if (destRecord is not null)
                                     records.Remove(destRecord);
                                 else // 不能消除则入账
                                 {
-                                    record.Reason = record.Account.desc; // 工行按卡区分用途
+                                    record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账
                                     records.Add(record);
                                 }
                             }
@@ -233,6 +241,16 @@ namespace MyBook
             // TODO: parse csvAttachments and save report content.
             database.SaveStatementImportOnce(IBKRProvider, reportDate.Value);
             return true;
+        }
+
+        private static bool IsSameAccount(Account? left, Account? right)
+        {
+            if (left is null || right is null)
+                return false;
+            if (left.Id > 0 && right.Id > 0)
+                return left.Id == right.Id;
+
+            return left.name == right.name && left._v_t == right._v_t;
         }
 
         private DateTime GetNextMonthlyStatementDate(string provider)

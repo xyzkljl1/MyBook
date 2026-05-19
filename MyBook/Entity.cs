@@ -109,6 +109,7 @@ namespace MyBook
 
     // 账户
     // 一个账户下的不同币种余额视作多个账户。
+    // 主副卡关系也按账户行存储，因此同卡不同币种需要分别设置主卡。
     // Account.v 表示该账户中现金、股票、负债等所有种类资产的总和余额。
     [SugarIndex("unique_Accounts_name_currency", nameof(Account.name), OrderByType.Asc, nameof(Account._v_t), OrderByType.Asc, true)]
     [SugarTable("Accounts")]
@@ -116,6 +117,10 @@ namespace MyBook
     {
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
+
+        // 副卡账户指向对应主卡账户；为空表示该账户本身不是副卡。
+        [Navigate(NavigateType.ManyToOne, nameof(_primaryAccount_Id), nameof(MyBook.Account.Id))]
+        public Account? PrimaryAccount { get; set; }
 
         [SugarColumn(IsIgnore = true)]
         public Currency v
@@ -139,6 +144,9 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType _v_t { get; set; } = CurrencyType.RMB;
+
+        [SugarColumn(IsNullable = true)]
+        public int? _primaryAccount_Id { get; set; }
     }
     // 无论出还是入，只记录本次变动所影响的账户，而不是记录Src和Dest账户
     // 一方面大多数交易是流向外部，不需要记录对方账户状况，只是有时需要记录对方账户名以区分原因
