@@ -81,24 +81,35 @@ namespace MyBook
             }
         }
 
+        [Obsolete("Account is reference data. Use GetAccountByTypeAndId or GetAccountByName; create Account rows explicitly before importing data.", true)]
         public Account GetOrAddAccount(string? accountType, string id, CurrencyType currencyType)
         {
-            var accountName = BuildAccountName(accountType, id);
-            var account = FindAccount(accountName, currencyType);
-            if (account is not null)
-                return account;
+            throw new NotSupportedException("Account is reference data. Use GetAccountByTypeAndId or GetAccountByName; create Account rows explicitly before importing data.");
+        }
 
-            account = new Account { name = accountName, _v_t = currencyType };
-            account.Id = db.Insertable(account).ExecuteReturnIdentity();
+        public Account GetAccountByTypeAndId(string? accountType, string id, CurrencyType currencyType)
+        {
+            return GetAccountByName(BuildAccountName(accountType, id), currencyType);
+        }
+
+        public Account GetAccountByName(string accountName, CurrencyType? currencyType = null)
+        {
+            var account = FindAccountByName(accountName, currencyType);
+            if (account is null)
+            {
+                var currencyText = currencyType.HasValue ? currencyType.Value.ToString() : "Any";
+                throw new InvalidOperationException($"Account not found: {accountName}/{currencyText}");
+            }
+
             return account;
         }
 
-        public Account? FindAccount(string? accountType, string id, CurrencyType? currencyType = null)
+        public List<Account> GetAllAccounts()
         {
-            return FindAccount(BuildAccountName(accountType, id), currencyType);
+            return db.Queryable<Account>().ToList();
         }
 
-        private Account? FindAccount(string accountName, CurrencyType? currencyType)
+        private Account? FindAccountByName(string accountName, CurrencyType? currencyType)
         {
             var accountQuery = db.Queryable<Account>()
                 .Where(it => it.name == accountName);
@@ -117,22 +128,10 @@ namespace MyBook
             return String.Join("_", parts);
         }
 
-        private Account SaveAccount(Account account)
+        private Account GetExistingAccountByName(Account account)
         {
-            var existing = db.Queryable<Account>()
-                .First(it => it.name == account.name && it._v_t == account._v_t);
-
-            if (existing is null)
-            {
-                account.Id = db.Insertable(account).ExecuteReturnIdentity();
-                return account;
-            }
-
+            var existing = GetAccountByName(account.name, account._v_t);
             account.Id = existing.Id;
-            existing._v_v = account.v.v;
-            existing._v_t = account.v.t;
-            existing.desc = account.desc;
-            db.Updateable(existing).ExecuteCommand();
             return existing;
         }
 
@@ -141,9 +140,9 @@ namespace MyBook
             foreach (var record in recordList)
             {
                 if (record.Account is null)
-                    continue;
+                    throw new InvalidOperationException("Record account is required.");
 
-                var account = SaveAccount(record.Account);
+                var account = GetExistingAccountByName(record.Account);
                 record._account_Id = account.Id;
             }
 
@@ -153,18 +152,7 @@ namespace MyBook
 
         public void SaveAccountStocks(Account account, IEnumerable<Stock> stocks)
         {
-            if (account.Id <= 0)
-            {
-                var existingAccount = FindAccount(account.name, account._v_t);
-                if (existingAccount is null)
-                {
-                    account.Id = db.Insertable(account).ExecuteReturnIdentity();
-                }
-                else
-                {
-                    account = existingAccount;
-                }
-            }
+            account = GetAccountByName(account.name, account._v_t);
 
             var stockList = stocks.ToList();
             foreach (var stock in stockList)
@@ -225,8 +213,8 @@ namespace MyBook
 
         public void SaveStock(Stock stock)
         {
-            if (stock.Account is not null && stock._account_Id is null && stock.Account.Id > 0)
-                stock._account_Id = stock.Account.Id;
+            if (stock.Account is not null)
+                stock._account_Id = GetExistingAccountByName(stock.Account).Id;
 
             if (stock.Id <= 0)
             {

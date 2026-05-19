@@ -1,10 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Security.Authentication;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using HtmlAgilityPack;
 using MailKit;
@@ -38,9 +40,9 @@ namespace MyBook
             apppasswd = config["yahoo_pass"]!;
             this.database = database;
         }
-        public Account? FindICBCAccount(string name, CurrencyType currencyType)
+        public Account GetICBCAccount(string name, CurrencyType currencyType)
         {
-            return database.GetOrAddAccount(ICBCProvider, name.Substring(0, 4), currencyType);
+            return database.GetAccountByTypeAndId(ICBCProvider, name.Substring(0, 4), currencyType);
         }
         // 工行对账单，按卡号区分用途
         public async Task FetchICBCBill(DateTime date)
@@ -68,9 +70,7 @@ namespace MyBook
                         if (line.Count < 5 || line[0] == "合计")
                             continue;
                         var balance = Currency.Parse(line[4]);
-                        var account = FindICBCAccount(line[0], balance.t);
-                        if (account is null)
-                            throw new MailParseException("Parse ICBC Bill Fail, Invalid Account");
+                        var account = GetICBCAccount(line[0], balance.t);
                         //else
                         //    account.v = balance;
                     }
@@ -88,9 +88,7 @@ namespace MyBook
                         {
                             var record = new Record();
                             record.updateTime = DateTime.Now;
-                            record.Account = FindICBCAccount(line[0], CurrencyType.RMB);
-                            if (record.Account is null)
-                                throw new MailParseException("Parse ICBC Bill Fail, Invalid Account");
+                            record.Account = GetICBCAccount(line[0], CurrencyType.RMB);
                             record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
                             if (line[6].Contains("存入"))
                                 record.isIn = true;
@@ -144,44 +142,41 @@ namespace MyBook
         public async Task FetchIBKRReport(DateTime date)
         {
             var subjectDate = date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
-            var beginDate = date.Date.AddDays(-7);
-            var endDate = date.Date.AddMonths(1);
-            var matchedCount = 0;
+            var message = await SearchBill(
+                IBKRReportSender,
+                subjectDate,
+                date,
+                message => IsIBKRCustomActivityReportSubject(message.Subject, subjectDate));
 
-            try
+            if (message is null)
             {
-                using (MailKit.Net.Imap.ImapClient client = new())
-                {
-                    client.ProxyClient = proxy;
-                    await client.ConnectAsync("imap.mail.yahoo.com", 993, true);
-                    await client.AuthenticateAsync(username, apppasswd);
-                    await client.Inbox.OpenAsync(FolderAccess.ReadOnly);
-
-                    var query = SearchQuery.FromContains(IBKRReportSender)
-                        .And(SearchQuery.SubjectContains(subjectDate))
-                        .And(SearchQuery.SentSince(beginDate))
-                        .And(SearchQuery.SentBefore(endDate));
-                    var uids = await client.Inbox.SearchAsync(query);
-                    foreach (var uid in uids)
-                    {
-                        var message = await client.Inbox.GetMessageAsync(uid);
-                        if (!IsIBKRCustomActivityReportSubject(message.Subject, subjectDate))
-                            continue;
-
-                        matchedCount++;
-                        _ = message.HtmlBody ?? message.TextBody;
-                        Console.WriteLine($"Find IBKR custom activity report: {message.Subject}");
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"fetch IBKR report mail fail :{e.Message}");
+                Console.WriteLine($"Find no IBKR custom activity report {subjectDate}");
                 return;
             }
 
-            if (matchedCount == 0)
-                Console.WriteLine($"Find no IBKR custom activity report {subjectDate}");
+            var bodyText = GetMessageText(message);
+            var reportDate = ParseIBKRReportDate(bodyText);
+            var reportAccountId = ParseIBKRAccountId(bodyText);
+            if (reportDate is null || String.IsNullOrWhiteSpace(reportAccountId))
+            {
+                Console.WriteLine($"parse IBKR report mail fail: missing report date or account id, subject={message.Subject}");
+                return;
+            }
+
+            var account = GetIBKRAccount(reportAccountId);
+
+            var csvAttachments = ReadCsvAttachments(message);
+            if (csvAttachments.Count == 0)
+            {
+                Console.WriteLine($"parse IBKR report mail fail: no csv attachment, subject={message.Subject}");
+                return;
+            }
+
+            Console.WriteLine($"Find IBKR custom activity report: {reportDate.Value:yyyy-MM-dd} {reportAccountId} -> {account.name}, csv attachments={csvAttachments.Count}");
+            foreach (var attachment in csvAttachments)
+                Console.WriteLine($"Load IBKR report csv in memory: {attachment.FileName}, bytes={attachment.Content.Length}");
+
+            // TODO: parse csvAttachments and save report content.
         }
 
         private static bool IsIBKRCustomActivityReportSubject(string? subject, string subjectDate)
@@ -194,7 +189,132 @@ namespace MyBook
                 subject.Contains("Activity Report", StringComparison.OrdinalIgnoreCase) ||
                 subject.Contains("自定义活动报表", StringComparison.OrdinalIgnoreCase);
         }
+
+        private Account GetIBKRAccount(string reportAccountId)
+        {
+            var normalizedReportAccountId = reportAccountId.Trim().ToUpperInvariant();
+            var visibleDigits = Regex.Match(normalizedReportAccountId, @"\d+$").Value;
+            if (String.IsNullOrWhiteSpace(visibleDigits))
+                throw new InvalidOperationException($"Invalid IBKR account id: {reportAccountId}");
+
+            var candidates = database.GetAllAccounts()
+                .Where(account => account.name.StartsWith("IBKR_", StringComparison.OrdinalIgnoreCase))
+                .Where(account =>
+                {
+                    var accountId = account.name["IBKR_".Length..].Trim().ToUpperInvariant();
+                    if (normalizedReportAccountId.Contains('*'))
+                        return accountId.EndsWith(visibleDigits, StringComparison.OrdinalIgnoreCase);
+                    return accountId.Equals(normalizedReportAccountId, StringComparison.OrdinalIgnoreCase);
+                })
+                .ToList();
+
+            if (candidates.Count == 1)
+                return candidates[0];
+
+            var usdCandidates = candidates.Where(account => account._v_t == CurrencyType.USD).ToList();
+            if (usdCandidates.Count == 1)
+                return usdCandidates[0];
+
+            if (candidates.Count > 1)
+            {
+                throw new InvalidOperationException(
+                    $"Find multiple IBKR accounts for {reportAccountId}: {String.Join(",", candidates.Select(account => account.name))}");
+            }
+
+            throw new InvalidOperationException($"Account not found: IBKR/{reportAccountId}");
+        }
+
+        private static DateTime? ParseIBKRReportDate(string text)
+        {
+            var normalizedText = NormalizeMailText(text);
+            var labeledMatch = Regex.Match(
+                normalizedText,
+                @"(?:Report\s*Date|Statement\s*Date|Activity\s*Date|Date|报表日期|日期)\s*[:：]?\s*(?<date>\d{1,2}/\d{1,2}/\d{4}|[A-Z][a-z]+\s+\d{1,2},\s+\d{4})",
+                RegexOptions.IgnoreCase);
+            if (labeledMatch.Success && TryParseIBKRDate(labeledMatch.Groups["date"].Value, out var labeledDate))
+                return labeledDate;
+
+            var match = Regex.Match(normalizedText, @"\b(?<date>\d{1,2}/\d{1,2}/\d{4}|[A-Z][a-z]+\s+\d{1,2},\s+\d{4})\b", RegexOptions.IgnoreCase);
+            if (match.Success && TryParseIBKRDate(match.Groups["date"].Value, out var date))
+                return date;
+
+            return null;
+        }
+
+        private static bool TryParseIBKRDate(string text, out DateTime date)
+        {
+            return DateTime.TryParseExact(
+                text.Trim(),
+                ["M/d/yyyy", "MM/dd/yyyy", "MMMM d, yyyy", "MMM d, yyyy"],
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out date);
+        }
+
+        private static string? ParseIBKRAccountId(string text)
+        {
+            var normalizedText = NormalizeMailText(text);
+            var labeledMatch = Regex.Match(
+                normalizedText,
+                @"(?:Account(?:\s*ID|\s*Number)?|账号|账户)\s*[:：]?\s*(?<account>U(?:\*+|\d*)\d{4,})",
+                RegexOptions.IgnoreCase);
+            if (labeledMatch.Success)
+                return labeledMatch.Groups["account"].Value.ToUpperInvariant();
+
+            var match = Regex.Match(normalizedText, @"\b(?<account>U(?:\*{2,}\d{4,}|\d{5,}))\b", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups["account"].Value.ToUpperInvariant() : null;
+        }
+
+        private static string GetMessageText(MimeMessage message)
+        {
+            if (!String.IsNullOrWhiteSpace(message.TextBody))
+                return WebUtility.HtmlDecode(message.TextBody);
+
+            if (String.IsNullOrWhiteSpace(message.HtmlBody))
+                return "";
+
+            var doc = new HtmlDocument();
+            doc.LoadHtml(message.HtmlBody);
+            return WebUtility.HtmlDecode(doc.DocumentNode.InnerText);
+        }
+
+        private static string NormalizeMailText(string text)
+        {
+            return Regex.Replace(text, @"\s+", " ").Trim();
+        }
+
+        private static List<InMemoryCsvAttachment> ReadCsvAttachments(MimeMessage message)
+        {
+            var attachments = new List<InMemoryCsvAttachment>();
+            foreach (var attachment in message.Attachments)
+            {
+                if (!IsCsvAttachment(attachment) || attachment is not MimePart mimePart)
+                    continue;
+
+                using var memory = new MemoryStream();
+                mimePart.Content.DecodeTo(memory);
+                attachments.Add(new InMemoryCsvAttachment(
+                    mimePart.FileName ?? "report.csv",
+                    memory.ToArray()));
+            }
+
+            return attachments;
+        }
+
+        private static bool IsCsvAttachment(MimeEntity attachment)
+        {
+            var fileName = attachment.ContentDisposition?.FileName ?? attachment.ContentType.Name ?? "";
+            return fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) ||
+                attachment.ContentType.MediaSubtype.Equals("csv", StringComparison.OrdinalIgnoreCase);
+        }
+
         public async Task<string> SearchBill(string sender, string subject,DateTime date)
+        {
+            var message = await SearchBill(sender, subject, date, null);
+            return message?.HtmlBody ?? message?.TextBody ?? "";
+        }
+
+        public async Task<MimeMessage?> SearchBill(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
         {
             try
             {
@@ -216,8 +336,11 @@ namespace MyBook
                         Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
                     foreach (var uid in uids)
                     {
-                        var message = client.Inbox.GetMessage(uid);
-                        return message.HtmlBody;// ?? message.TextBody;
+                        var message = await client.Inbox.GetMessageAsync(uid);
+                        if (messageFilter is not null && !messageFilter(message))
+                            continue;
+
+                        return message;
                     }
                 }
             }
@@ -225,7 +348,9 @@ namespace MyBook
             {
                 Console.WriteLine($"fetch mail fail :{e.Message}");
             }
-            return "";
+            return null;
         }
+
+        private sealed record InMemoryCsvAttachment(string FileName, byte[] Content);
     }
 }
