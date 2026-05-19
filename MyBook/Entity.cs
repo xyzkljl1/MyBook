@@ -25,6 +25,8 @@ namespace MyBook
     {
         // 纳斯达克交易所上市资产。
         NASDAQ,
+        // NYSE Arca 交易所上市资产。
+        ARCA,
         // 美国国债。
         UST,
         // 上海交易所上市资产。
@@ -58,6 +60,10 @@ namespace MyBook
         [SugarColumn(DefaultValue = "''")]
         public string desc { get; set; } = "";
 
+        // 面向界面的可读名称，仅在同步持仓列表时刷新。
+        [SugarColumn(DefaultValue = "''")]
+        public string displayText { get; set; } = "";
+
         [SugarColumn(IsIgnore = true)]
         // 当前单价，金额和币种分别存储。
         public Currency currentPrice
@@ -71,7 +77,7 @@ namespace MyBook
         }
 
         [SugarColumn(DefaultValue = "0")]
-        public DateTime currentPriceTime { get; set; }
+        public long currentPriceTime { get; set; } = 0;
 
         public Stock()
         {
@@ -98,7 +104,7 @@ namespace MyBook
     static class MySqlEnumColumnTypes
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
-        public const string StockType = "enum('NASDAQ','UST','SHANGHAI','CNFUND','Cash')";
+        public const string StockType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash')";
     }
 
     // 账户

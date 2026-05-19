@@ -24,6 +24,7 @@ namespace MyBook
     class MailUtil
     {
         private const string ICBCProvider = "ICBC";
+        private const string IBKRReportSender = "donotreply@interactivebrokers.com";
         IProxyClient proxy;
         string username;
         string apppasswd;
@@ -42,7 +43,7 @@ namespace MyBook
             return database.GetOrAddAccount(ICBCProvider, name.Substring(0, 4), currencyType);
         }
         // 工行对账单，按卡号区分用途
-        public async Task SearchICBCBill(DateTime date)
+        public async Task FetchICBCBill(DateTime date)
         {
             // 按月份搜索
             var monthText = date.ToString("yyyy-MM");
@@ -139,6 +140,59 @@ namespace MyBook
                     Console.WriteLine($"parse mail fail :{e.Message}");
                 }
             }
+        }
+        public async Task FetchIBKRReport(DateTime date)
+        {
+            var subjectDate = date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
+            var beginDate = date.Date.AddDays(-7);
+            var endDate = date.Date.AddMonths(1);
+            var matchedCount = 0;
+
+            try
+            {
+                using (MailKit.Net.Imap.ImapClient client = new())
+                {
+                    client.ProxyClient = proxy;
+                    await client.ConnectAsync("imap.mail.yahoo.com", 993, true);
+                    await client.AuthenticateAsync(username, apppasswd);
+                    await client.Inbox.OpenAsync(FolderAccess.ReadOnly);
+
+                    var query = SearchQuery.FromContains(IBKRReportSender)
+                        .And(SearchQuery.SubjectContains(subjectDate))
+                        .And(SearchQuery.SentSince(beginDate))
+                        .And(SearchQuery.SentBefore(endDate));
+                    var uids = await client.Inbox.SearchAsync(query);
+                    foreach (var uid in uids)
+                    {
+                        var message = await client.Inbox.GetMessageAsync(uid);
+                        if (!IsIBKRCustomActivityReportSubject(message.Subject, subjectDate))
+                            continue;
+
+                        matchedCount++;
+                        _ = message.HtmlBody ?? message.TextBody;
+                        Console.WriteLine($"Find IBKR custom activity report: {message.Subject}");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"fetch IBKR report mail fail :{e.Message}");
+                return;
+            }
+
+            if (matchedCount == 0)
+                Console.WriteLine($"Find no IBKR custom activity report {subjectDate}");
+        }
+
+        private static bool IsIBKRCustomActivityReportSubject(string? subject, string subjectDate)
+        {
+            if (String.IsNullOrWhiteSpace(subject) || !subject.Contains(subjectDate, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return subject.Contains("Custom Activity", StringComparison.OrdinalIgnoreCase) ||
+                subject.Contains("Activity Statement", StringComparison.OrdinalIgnoreCase) ||
+                subject.Contains("Activity Report", StringComparison.OrdinalIgnoreCase) ||
+                subject.Contains("自定义活动报表", StringComparison.OrdinalIgnoreCase);
         }
         public async Task<string> SearchBill(string sender, string subject,DateTime date)
         {

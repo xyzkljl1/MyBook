@@ -21,8 +21,8 @@ namespace MyBook
             config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
             database = new(config);
             mail = new(config, database);
-            stock = new(config);
-            mail.SearchICBCBill(DateTime.Now.AddMonths(-2));
+            stock = new(config, database);
+            mail.FetchICBCBill(DateTime.Now.AddMonths(-2));
             //stock.Fetch(new Stock("QQQ", StockType.NASDAQ));
             //stock.Fetch(new Stock("021282", StockType.CNFUND));
         }

@@ -27,6 +27,7 @@ namespace MyBook
             // This is schema sync, not migration; renamed columns may lose old data.
             PrepareSchemaSync();
             db.CodeFirst.InitTables(SchemaTypes);
+            PrepareForeignKeys();
 #endif
             ValidateSchema();
         }
@@ -150,6 +151,92 @@ namespace MyBook
                 db.Insertable(recordList).ExecuteCommand();
         }
 
+        public void SaveAccountStocks(Account account, IEnumerable<Stock> stocks)
+        {
+            if (account.Id <= 0)
+            {
+                var existingAccount = FindAccount(account.name, account._v_t);
+                if (existingAccount is null)
+                {
+                    account.Id = db.Insertable(account).ExecuteReturnIdentity();
+                }
+                else
+                {
+                    account = existingAccount;
+                }
+            }
+
+            var stockList = stocks.ToList();
+            foreach (var stock in stockList)
+            {
+                stock.Account = account;
+                stock._account_Id = account.Id;
+            }
+
+            db.Ado.BeginTran();
+            try
+            {
+                var existingStocks = db.Queryable<Stock>()
+                    .Where(it => it._account_Id == account.Id &&
+                        (it.stockType == StockType.NASDAQ || it.stockType == StockType.ARCA || it.stockType == StockType.UST))
+                    .ToList();
+                var currentKeys = stockList.Select(GetStockKey)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var deletedIds = existingStocks
+                    .Where(stock => !currentKeys.Contains(GetStockKey(stock)))
+                    .Select(stock => stock.Id)
+                    .ToList();
+                if (deletedIds.Count > 0)
+                    db.Deleteable<Stock>().In(deletedIds).ExecuteCommand();
+
+                foreach (var stock in stockList)
+                {
+                    var existing = existingStocks.FirstOrDefault(it =>
+                        it.code == stock.code && it.stockType == stock.stockType);
+                    if (existing is null)
+                    {
+                        db.Insertable(stock).ExecuteCommand();
+                        continue;
+                    }
+
+                    existing.quantity = stock.quantity;
+                    existing.desc = stock.desc;
+                    existing.displayText = stock.displayText;
+                    existing._currentPrice_t = stock._currentPrice_t;
+                    existing._account_Id = account.Id;
+                    db.Updateable(existing).ExecuteCommand();
+                }
+
+                db.Ado.CommitTran();
+            }
+            catch
+            {
+                db.Ado.RollbackTran();
+                throw;
+            }
+        }
+
+        public List<Stock> GetStocks()
+        {
+            return db.Queryable<Stock>()
+                .Includes(it => it.Account)
+                .ToList();
+        }
+
+        public void SaveStock(Stock stock)
+        {
+            if (stock.Account is not null && stock._account_Id is null && stock.Account.Id > 0)
+                stock._account_Id = stock.Account.Id;
+
+            if (stock.Id <= 0)
+            {
+                stock.Id = db.Insertable(stock).ExecuteReturnIdentity();
+                return;
+            }
+
+            db.Updateable(stock).ExecuteCommand();
+        }
+
         private static bool IsDuplicateKeyException(Exception exception)
         {
             for (var current = exception; current is not null; current = current.InnerException)
@@ -163,13 +250,100 @@ namespace MyBook
 
         private void PrepareSchemaSync()
         {
+            DropForeignKeyIfExists("Records", "fk_Records_Accounts_account_Id");
+            DropForeignKeyIfExists("Stocks", "fk_Stocks_Accounts_account_Id");
             DropIndexIfExists("Accounts", "unique_Accounts_name");
             DropIndexIfExists("Stocks", "unique_Stocks_account_stockId");
             DropIndexIfExists("Stocks", "unique_Stocks_account_code_type");
             RenameColumnIfNeeded("Stocks", "stockId", "code", "varchar(255) not null default ''");
             RenameColumnIfNeeded("Stocks", "t", "stockType", "enum('US','NASDAQ','UST','SHANGHAI','CNFUND','Cash') not null default 'NASDAQ'");
             MigrateStockTypeUS();
+            MigrateStockTypeEnum();
             RenameColumnIfNeeded("Stocks", "currentPrice", "_currentPrice_v", "decimal(18,4) not null default 0");
+            MigrateStockCurrentPriceTime();
+        }
+
+        private void MigrateStockCurrentPriceTime()
+        {
+            if (!ColumnExists("Stocks", "currentPriceTime"))
+                return;
+
+            var dataType = GetColumnDataType("Stocks", "currentPriceTime");
+            if (String.Equals(dataType, "bigint", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (dataType is not null &&
+                (dataType.Equals("int", StringComparison.OrdinalIgnoreCase) ||
+                 dataType.Equals("integer", StringComparison.OrdinalIgnoreCase) ||
+                 dataType.Equals("mediumint", StringComparison.OrdinalIgnoreCase) ||
+                 dataType.Equals("smallint", StringComparison.OrdinalIgnoreCase) ||
+                 dataType.Equals("tinyint", StringComparison.OrdinalIgnoreCase)))
+            {
+                db.Ado.ExecuteCommand("alter table `Stocks` modify column `currentPriceTime` bigint not null default 0");
+                return;
+            }
+
+            if (ColumnExists("Stocks", "currentPriceTime_unix"))
+                db.Ado.ExecuteCommand("alter table `Stocks` drop column `currentPriceTime_unix`");
+
+            db.Ado.ExecuteCommand("alter table `Stocks` add column `currentPriceTime_unix` bigint not null default 0");
+            db.Ado.ExecuteCommand("""
+                update `Stocks`
+                set `currentPriceTime_unix` = coalesce(unix_timestamp(`currentPriceTime`), 0)
+                """);
+            db.Ado.ExecuteCommand("alter table `Stocks` drop column `currentPriceTime`");
+            db.Ado.ExecuteCommand("alter table `Stocks` change column `currentPriceTime_unix` `currentPriceTime` bigint not null default 0");
+        }
+
+        private void PrepareForeignKeys()
+        {
+            AddForeignKeyIfMissing("Records", "_account_Id", "Accounts", "Id", "fk_Records_Accounts_account_Id");
+            AddForeignKeyIfMissing("Stocks", "_account_Id", "Accounts", "Id", "fk_Stocks_Accounts_account_Id");
+        }
+
+        private void AddForeignKeyIfMissing(
+            string tableName,
+            string columnName,
+            string referencedTableName,
+            string referencedColumnName,
+            string foreignKeyName)
+        {
+            if (!db.DbMaintenance.IsAnyTable(tableName, false) ||
+                !db.DbMaintenance.IsAnyTable(referencedTableName, false) ||
+                !ColumnExists(tableName, columnName) ||
+                !ColumnExists(referencedTableName, referencedColumnName) ||
+                ForeignKeyExists(foreignKeyName))
+            {
+                return;
+            }
+
+            db.Ado.ExecuteCommand($"""
+                update `{tableName}` child
+                left join `{referencedTableName}` parent
+                  on child.`{columnName}` = parent.`{referencedColumnName}`
+                set child.`{columnName}` = null
+                where child.`{columnName}` is not null
+                  and parent.`{referencedColumnName}` is null
+                """);
+
+            db.Ado.ExecuteCommand($"""
+                alter table `{tableName}`
+                add constraint `{foreignKeyName}`
+                foreign key (`{columnName}`)
+                references `{referencedTableName}`(`{referencedColumnName}`)
+                on delete set null
+                on update cascade
+                """);
+        }
+
+        private bool ForeignKeyExists(string foreignKeyName)
+        {
+            return db.Ado.SqlQuery<int>($"""
+                select count(*)
+                from information_schema.referential_constraints
+                where constraint_schema = database()
+                  and constraint_name = '{foreignKeyName}'
+                """).FirstOrDefault() > 0;
         }
 
         private void DropIndexIfExists(string tableName, string indexName)
@@ -184,6 +358,12 @@ namespace MyBook
 
             if (exists)
                 db.Ado.ExecuteCommand($"alter table `{tableName}` drop index `{indexName}`");
+        }
+
+        private void DropForeignKeyIfExists(string tableName, string foreignKeyName)
+        {
+            if (ForeignKeyExists(foreignKeyName))
+                db.Ado.ExecuteCommand($"alter table `{tableName}` drop foreign key `{foreignKeyName}`");
         }
 
         private void RenameColumnIfNeeded(string tableName, string oldColumnName, string newColumnName, string columnDefinition)
@@ -212,6 +392,17 @@ namespace MyBook
                 """).FirstOrDefault() > 0;
         }
 
+        private string? GetColumnDataType(string tableName, string columnName)
+        {
+            return db.Ado.SqlQuery<string>($"""
+                select data_type
+                from information_schema.columns
+                where table_schema = database()
+                  and table_name = '{tableName}'
+                  and column_name = '{columnName}'
+                """).FirstOrDefault();
+        }
+
         private void MigrateStockTypeUS()
         {
             if (!ColumnExists("Stocks", "stockType"))
@@ -235,6 +426,26 @@ namespace MyBook
             }
 
             db.Ado.ExecuteCommand("update `Stocks` set `stockType` = 'NASDAQ' where `stockType` = 'US'");
+        }
+
+        private void MigrateStockTypeEnum()
+        {
+            if (!ColumnExists("Stocks", "stockType"))
+                return;
+
+            var columnType = db.Ado.SqlQuery<string>("""
+                select column_type
+                from information_schema.columns
+                where table_schema = database()
+                  and table_name = 'Stocks'
+                  and column_name = 'stockType'
+                """).FirstOrDefault();
+
+            if (columnType is not null && columnType.Contains("'ARCA'", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            db.Ado.ExecuteCommand(
+                "alter table `Stocks` modify column `stockType` enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash') not null default 'NASDAQ'");
         }
 
         private void ValidateSchema()
@@ -294,6 +505,11 @@ namespace MyBook
         {
             return property.GetCustomAttributes()
                 .Any(attribute => attribute.GetType().Name is "Navigate" or "NavigateAttribute");
+        }
+
+        private static string GetStockKey(Stock stock)
+        {
+            return $"{stock.code}\t{stock.stockType}";
         }
     }
 }
