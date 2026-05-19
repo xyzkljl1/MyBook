@@ -105,6 +105,7 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
         public const string StockType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','Manual')";
     }
 
     // 账户
@@ -161,6 +162,9 @@ namespace MyBook
         [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(MyBook.Account.Id))]
         public Account? Account { get; set; }
 
+        [Navigate(NavigateType.ManyToOne, nameof(_statementImport_Id), nameof(MyBook.StatementImport.Id))]
+        public StatementImport? StatementImport { get; set; }
+
         [SugarColumn(DefaultValue = "''")]
         public string DestAccount { get; set; } = ""; // 对方账户描述
 
@@ -213,24 +217,34 @@ namespace MyBook
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType? _descCurrency_t { get; set; }
 
+        [SugarColumn(IsNullable = true)]
+        public int? _statementImport_Id { get; set; }
+
         private Currency? _descCurrency;
     }
     public class Records : List<Record>
     {
     }
 
-    [SugarIndex("unique_StatementImports_provider_date", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.date), OrderByType.Asc, true)]
+    public enum StatementImportProvider
+    {
+        IBKRReportMail,
+        ICBCBillMail,
+        Manual,
+    }
+
+    [SugarIndex("unique_StatementImports_provider_time", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.time), OrderByType.Asc, true)]
     [SugarTable("StatementImports")]
     public class StatementImport
     {
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
 
-        [SugarColumn(DefaultValue = "''")]
-        public string provider { get; set; } = "";
+        [SugarColumn(DefaultValue = "Manual", ColumnDataType = MySqlEnumColumnTypes.StatementImportProvider, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public StatementImportProvider provider { get; set; } = StatementImportProvider.Manual;
 
-        [SugarColumn(DefaultValue = "''")]
-        public string date { get; set; } = "";
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime time { get; set; }
     }
 
     //币种

@@ -39,7 +39,11 @@ namespace MyBook
             db.Ado.BeginTran();
             try
             {
-                SaveRecordsCore(recordList);
+                int? statementImportId = null;
+                if (recordList.Count > 0)
+                    statementImportId = InsertStatementImport(StatementImportProvider.Manual, DateTime.Now);
+
+                SaveRecordsCore(recordList, statementImportId);
                 db.Ado.CommitTran();
             }
             catch
@@ -49,66 +53,61 @@ namespace MyBook
             }
         }
 
-        public bool IsStatementImported(string provider, DateTime date)
+        public bool IsStatementImported(StatementImportProvider provider, DateTime time)
         {
-            var dateText = FormatStatementImportDate(date);
+            var importTime = NormalizeStatementImportTime(time);
             return db.Queryable<StatementImport>()
-                .Any(it => it.provider == provider && it.date == dateText);
+                .Any(it => it.provider == provider && it.time == importTime);
         }
 
-        public DateTime? GetLatestStatementImportDate(string provider)
+        public DateTime? GetLatestStatementImportTime(StatementImportProvider provider)
         {
-            var latestDate = db.Queryable<StatementImport>()
+            var latestImport = db.Queryable<StatementImport>()
                 .Where(it => it.provider == provider)
-                .OrderByDescending(it => it.date)
+                .OrderByDescending(it => it.time)
                 .First();
-            if (latestDate is null || !TryParseStatementImportDate(latestDate.date, out var date))
-                return null;
-
-            return date;
+            return latestImport?.time;
         }
 
-        public bool SaveStatementImportOnce(string provider, DateTime date)
+        public bool SaveStatementImportOnce(StatementImportProvider provider, DateTime time)
         {
             try
             {
-                if (IsStatementImported(provider, date))
+                if (IsStatementImported(provider, time))
                     return false;
 
-                db.Insertable(new StatementImport { provider = provider, date = FormatStatementImportDate(date) })
-                    .ExecuteCommand();
+                InsertStatementImport(provider, time);
                 return true;
             }
             catch (Exception e)
             {
-                if (IsDuplicateKeyException(e) && IsStatementImported(provider, date))
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time))
                     return false;
                 throw;
             }
         }
 
-        public bool SaveStatementRecordsOnce(string provider, DateTime date, IEnumerable<Record> records)
+        public bool SaveStatementRecordsOnce(StatementImportProvider provider, DateTime time, IEnumerable<Record> records)
         {
             var recordList = records.ToList();
             db.Ado.BeginTran();
             try
             {
-                if (IsStatementImported(provider, date))
+                if (IsStatementImported(provider, time))
                 {
                     db.Ado.CommitTran();
                     return false;
                 }
 
-                db.Insertable(new StatementImport { provider = provider, date = FormatStatementImportDate(date) })
-                    .ExecuteCommand();
-                SaveRecordsCore(recordList);
+                var statementImportId = InsertStatementImport(provider, time);
+                SaveRecordsCore(recordList, statementImportId);
                 db.Ado.CommitTran();
                 return true;
             }
             catch (Exception e)
             {
                 db.Ado.RollbackTran();
-                if (IsDuplicateKeyException(e) && IsStatementImported(provider, date))
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time))
                     return false;
                 throw;
             }
@@ -190,7 +189,16 @@ namespace MyBook
             return primary;
         }
 
-        private void SaveRecordsCore(List<Record> recordList)
+        private int InsertStatementImport(StatementImportProvider provider, DateTime time)
+        {
+            return db.Insertable(new StatementImport
+            {
+                provider = provider,
+                time = NormalizeStatementImportTime(time)
+            }).ExecuteReturnIdentity();
+        }
+
+        private void SaveRecordsCore(List<Record> recordList, int? statementImportId = null)
         {
             foreach (var record in recordList)
             {
@@ -200,6 +208,8 @@ namespace MyBook
                 var account = GetPostingAccount(record.Account);
                 record.Account = account;
                 record._account_Id = account.Id;
+                if (statementImportId.HasValue)
+                    record._statementImport_Id = statementImportId.Value;
             }
 
             if (recordList.Count > 0)
@@ -281,19 +291,9 @@ namespace MyBook
             db.Updateable(stock).ExecuteCommand();
         }
 
-        public static string FormatStatementImportDate(DateTime date)
+        public static DateTime NormalizeStatementImportTime(DateTime time)
         {
-            return date.Date.ToString("yyyy-MM-dd");
-        }
-
-        public static bool TryParseStatementImportDate(string text, out DateTime date)
-        {
-            return DateTime.TryParseExact(
-                text,
-                "yyyy-MM-dd",
-                null,
-                System.Globalization.DateTimeStyles.None,
-                out date);
+            return new DateTime(time.Ticks - time.Ticks % 10, time.Kind);
         }
 
         private static bool IsDuplicateKeyException(Exception exception)
@@ -311,12 +311,14 @@ namespace MyBook
         {
             DropForeignKeyIfExists("Accounts", "fk_Accounts_Accounts_primaryAccount_Id");
             DropForeignKeyIfExists("Records", "fk_Records_Accounts_account_Id");
+            DropForeignKeyIfExists("Records", "fk_Records_StatementImports_statementImport_Id");
             DropForeignKeyIfExists("Stocks", "fk_Stocks_Accounts_account_Id");
             DropIndexIfExists("Accounts", "unique_Accounts_name");
             DropIndexIfExists("Stocks", "unique_Stocks_account_stockId");
             DropIndexIfExists("Stocks", "unique_Stocks_account_code_type");
             DropIndexIfExists("StatementImports", "unique_StatementImports_provider_month");
             DropIndexIfExists("StatementImports", "unique_StatementImports_provider_date");
+            DropIndexIfExists("StatementImports", "unique_StatementImports_provider_time");
             RenameColumnIfNeeded("Stocks", "stockId", "code", "varchar(255) not null default ''");
             RenameColumnIfNeeded("Stocks", "t", "stockType", "enum('US','NASDAQ','UST','SHANGHAI','CNFUND','Cash') not null default 'NASDAQ'");
             MigrateStockTypeUS();
@@ -324,19 +326,57 @@ namespace MyBook
             RenameColumnIfNeeded("Stocks", "currentPrice", "_currentPrice_v", "decimal(18,4) not null default 0");
             MigrateStockCurrentPriceTime();
             RenameColumnIfNeeded("StatementImports", "month", "date", "varchar(255) not null default ''");
-            MigrateStatementImportDates();
+            MigrateStatementImportProviderEnum();
+            MigrateStatementImportTime();
         }
 
-        private void MigrateStatementImportDates()
+        private void MigrateStatementImportProviderEnum()
         {
-            if (!ColumnExists("StatementImports", "date"))
+            if (!ColumnExists("StatementImports", "provider"))
                 return;
 
             db.Ado.ExecuteCommand("""
                 update `StatementImports`
-                set `date` = concat(`date`, '-01')
-                where `date` regexp '^[0-9]{4}-[0-9]{2}$'
+                set `provider` = case
+                    when `provider` = 'IBKR' then 'IBKRReportMail'
+                    when `provider` = 'ICBC' then 'ICBCBillMail'
+                    when `provider` in ('IBKRReportMail', 'ICBCBillMail', 'Manual') then `provider`
+                    else 'Manual'
+                end
                 """);
+            db.Ado.ExecuteCommand($"alter table `StatementImports` modify column `provider` {MySqlEnumColumnTypes.StatementImportProvider} not null default 'Manual'");
+        }
+
+        private void MigrateStatementImportTime()
+        {
+            if (ColumnExists("StatementImports", "date"))
+            {
+                if (!ColumnExists("StatementImports", "time"))
+                    db.Ado.ExecuteCommand("alter table `StatementImports` add column `time` datetime(6) null");
+
+                db.Ado.ExecuteCommand("""
+                    update `StatementImports`
+                    set `time` = case
+                        when `date` regexp '^[0-9]{4}-[0-9]{2}$' then str_to_date(concat(`date`, '-01 00:00:00.000000'), '%Y-%m-%d %H:%i:%s.%f')
+                        when `date` regexp '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' then str_to_date(concat(`date`, ' 00:00:00.000000'), '%Y-%m-%d %H:%i:%s.%f')
+                        when `date` regexp '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' then str_to_date(`date`, '%Y-%m-%d %H:%i:%s.%f')
+                        else cast('1970-01-01 00:00:00.000000' as datetime(6))
+                    end
+                    where `time` is null
+                    """);
+
+                db.Ado.ExecuteCommand("alter table `StatementImports` drop column `date`");
+            }
+
+            if (ColumnExists("StatementImports", "time"))
+            {
+                db.Ado.ExecuteCommand("""
+                    update `StatementImports`
+                    set `time` = cast('1970-01-01 00:00:00.000000' as datetime(6))
+                    where `time` is null
+                    """);
+                db.Ado.ExecuteCommand("alter table `StatementImports` modify column `time` datetime(6) not null");
+            }
         }
 
         private void MigrateStockCurrentPriceTime()
@@ -375,6 +415,7 @@ namespace MyBook
         {
             AddForeignKeyIfMissing("Accounts", "_primaryAccount_Id", "Accounts", "Id", "fk_Accounts_Accounts_primaryAccount_Id");
             AddForeignKeyIfMissing("Records", "_account_Id", "Accounts", "Id", "fk_Records_Accounts_account_Id");
+            AddForeignKeyIfMissing("Records", "_statementImport_Id", "StatementImports", "Id", "fk_Records_StatementImports_statementImport_Id");
             AddForeignKeyIfMissing("Stocks", "_account_Id", "Accounts", "Id", "fk_Stocks_Accounts_account_Id");
         }
 

@@ -25,8 +25,9 @@ namespace MyBook
     // 从雅虎邮箱拉信用卡账单
     class MailUtil
     {
-        private const string ICBCProvider = "ICBC";
-        private const string IBKRProvider = "IBKR";
+        private const string ICBCAccountType = "ICBC";
+        private const StatementImportProvider ICBCProvider = StatementImportProvider.ICBCBillMail;
+        private const StatementImportProvider IBKRProvider = StatementImportProvider.IBKRReportMail;
         private const string IBKRReportSender = "donotreply@interactivebrokers.com";
         private const int IBKRMissingReportLimitDays = 14;
         IProxyClient proxy;
@@ -44,7 +45,7 @@ namespace MyBook
         }
         private Account GetICBCCardAccount(string name, CurrencyType currencyType)
         {
-            return database.GetAccountByTypeAndId(ICBCProvider, name.Substring(0, 4), currencyType);
+            return database.GetAccountByTypeAndId(ICBCAccountType, name.Substring(0, 4), currencyType);
         }
 
         private Account GetICBCPostingAccount(string name, CurrencyType currencyType)
@@ -253,22 +254,22 @@ namespace MyBook
             return left.name == right.name && left._v_t == right._v_t;
         }
 
-        private DateTime GetNextMonthlyStatementDate(string provider)
+        private DateTime GetNextMonthlyStatementDate(StatementImportProvider provider)
         {
-            var latestDate = database.GetLatestStatementImportDate(provider);
-            if (latestDate is null)
+            var latestTime = database.GetLatestStatementImportTime(provider);
+            if (latestTime is null)
                 throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
 
-            return FirstDayOfMonth(latestDate.Value).AddMonths(1);
+            return FirstDayOfMonth(latestTime.Value).AddMonths(1);
         }
 
-        private DateTime GetNextDailyStatementDate(string provider)
+        private DateTime GetNextDailyStatementDate(StatementImportProvider provider)
         {
-            var latestDate = database.GetLatestStatementImportDate(provider);
-            if (latestDate is null)
+            var latestTime = database.GetLatestStatementImportTime(provider);
+            if (latestTime is null)
                 throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
 
-            return latestDate.Value.Date.AddDays(1);
+            return latestTime.Value.Date.AddDays(1);
         }
 
         private static DateTime FirstDayOfMonth(DateTime date)
