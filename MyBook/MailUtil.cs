@@ -138,9 +138,9 @@ namespace MyBook
                 record.updateTime = DateTime.Now;
                 record.Account = database.GetPostingAccount(cardAccount);
                 record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
-                if (line[6].Contains("存入"))
+                if (line[6].EndsWith("(存入)", StringComparison.Ordinal))
                     record.isIn = true;
-                else if (line[6].Contains("支出"))
+                else if (line[6].EndsWith("(支出)", StringComparison.Ordinal))
                     record.isIn = false;
                 else
                     throw new MailParseException("Parse ICBC Bill Fail");
@@ -148,7 +148,8 @@ namespace MyBook
                 record.DestAccount = line[4];
                 record.DescCurrency = Currency.Parse(line[5]);
                 record.CopyFrom(postingCurrency);
-                if (line[3] == "消费" || line[3] == "跨行消费" || line[3] == "境外消费")
+                record.v = Math.Abs(record.v) * (record.isIn ? 1 : -1);
+                if (line[3] == "消费" || line[3] == "跨行消费" || line[3] == "境外消费" || line[3] == "缴费")
                 {
                     record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账
                     records.Add(record);
@@ -170,11 +171,17 @@ namespace MyBook
                         records.Add(record);
                     }
                 }
-                else if (line[3] == "人民币自动转账还款" || line[3] == "自动购汇还款")
+                else if (line[3] == "人民币自动转账还款" || line[3] == "自动购汇还款" || line[3] == "转账")
                 {
+                    if (line[3] == "转账" && record.v <= 0)
+                        throw new MailParseException("Parse ICBC Bill Fail, Invalid Transfer");
                     record.isInternal = true;
                     record.Reason = "信用卡还款";
                     records.Add(record);
+                }
+                else
+                {
+                    throw new MailParseException($"Parse ICBC Bill Fail, Unknown Transaction Type: {line[3]}");
                 }
             }
 

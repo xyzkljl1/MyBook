@@ -36,13 +36,13 @@ namespace MyBook
         public void SaveRecords(IEnumerable<Record> records)
         {
             var recordList = records.ToList();
+            if (recordList.Count == 0)
+                return;
+
             db.Ado.BeginTran();
             try
             {
-                int? statementImportId = null;
-                if (recordList.Count > 0)
-                    statementImportId = InsertStatementImport(StatementImportProvider.Manual, DateTime.Now);
-
+                var statementImportId = InsertStatementImport(StatementImportProvider.Manual, DateTime.Now);
                 SaveRecordsCore(recordList, statementImportId);
                 db.Ado.CommitTran();
             }
@@ -204,8 +204,11 @@ namespace MyBook
             }).ExecuteReturnIdentity();
         }
 
-        private void SaveRecordsCore(List<Record> recordList, int? statementImportId = null)
+        private void SaveRecordsCore(List<Record> recordList, int statementImportId)
         {
+            if (statementImportId <= 0)
+                throw new InvalidOperationException("Record statement import is required.");
+
             foreach (var record in recordList)
             {
                 if (record.Account is null)
@@ -214,8 +217,7 @@ namespace MyBook
                 var account = GetPostingAccount(record.Account);
                 record.Account = account;
                 record._account_Id = account.Id;
-                if (statementImportId.HasValue)
-                    record._statementImport_Id = statementImportId.Value;
+                record._statementImport_Id = statementImportId;
             }
 
             if (recordList.Count > 0)
@@ -293,6 +295,55 @@ namespace MyBook
                 .ToList();
         }
 
+        public DatabaseCleanupResult CleanVolatileData()
+        {
+            var beforeCounts = ReadCleanupCounts();
+            db.Ado.BeginTran();
+            try
+            {
+                db.Deleteable<Record>().ExecuteCommand();
+                db.Deleteable<Stock>().ExecuteCommand();
+                db.Ado.ExecuteCommand("""
+                    delete statementImport
+                    from `StatementImports` statementImport
+                    left join (
+                        select `provider`, min(`time`) as `time`
+                        from `StatementImports`
+                        where `provider` in ('IBKRReportMail', 'ICBCBillMail')
+                        group by `provider`
+                    ) fixedImport
+                        on statementImport.`provider` = fixedImport.`provider`
+                        and statementImport.`time` = fixedImport.`time`
+                    where fixedImport.`provider` is null
+                    """);
+                db.Ado.CommitTran();
+            }
+            catch
+            {
+                db.Ado.RollbackTran();
+                throw;
+            }
+
+            return new DatabaseCleanupResult(
+                beforeCounts,
+                ReadCleanupCounts(),
+                db.Queryable<StatementImport>()
+                    .OrderBy(it => it.provider)
+                    .OrderBy(it => it.time)
+                    .ToList());
+        }
+
+        private Dictionary<string, int> ReadCleanupCounts()
+        {
+            return new Dictionary<string, int>
+            {
+                ["Accounts"] = db.Queryable<Account>().Count(),
+                ["StatementImports"] = db.Queryable<StatementImport>().Count(),
+                ["Records"] = db.Queryable<Record>().Count(),
+                ["Stocks"] = db.Queryable<Stock>().Count()
+            };
+        }
+
         public void SaveStock(Stock stock)
         {
             if (stock.Account is not null)
@@ -344,6 +395,19 @@ namespace MyBook
             RenameColumnIfNeeded("StatementImports", "month", "date", "varchar(255) not null default ''");
             MigrateStatementImportProviderEnum();
             MigrateStatementImportTime();
+            MigrateRecordStatementImportRequired();
+        }
+
+        private void MigrateRecordStatementImportRequired()
+        {
+            if (!ColumnExists("Records", "_statementImport_Id"))
+                return;
+
+            var nullRecords = db.Ado.SqlQuery<int>("select count(*) from `Records` where `_statementImport_Id` is null").FirstOrDefault();
+            if (nullRecords > 0)
+                throw new InvalidOperationException($"Database schema mismatch: Records._statementImport_Id contains {nullRecords} null rows");
+
+            db.Ado.ExecuteCommand("alter table `Records` modify column `_statementImport_Id` int not null");
         }
 
         private void MigrateStatementImportProviderEnum()
@@ -431,8 +495,44 @@ namespace MyBook
         {
             AddForeignKeyIfMissing("Accounts", "_primaryAccount_Id", "Accounts", "Id", "fk_Accounts_Accounts_primaryAccount_Id");
             AddForeignKeyIfMissing("Records", "_account_Id", "Accounts", "Id", "fk_Records_Accounts_account_Id");
-            AddForeignKeyIfMissing("Records", "_statementImport_Id", "StatementImports", "Id", "fk_Records_StatementImports_statementImport_Id");
+            AddRequiredForeignKeyIfMissing("Records", "_statementImport_Id", "StatementImports", "Id", "fk_Records_StatementImports_statementImport_Id");
             AddForeignKeyIfMissing("Stocks", "_account_Id", "Accounts", "Id", "fk_Stocks_Accounts_account_Id");
+        }
+
+        private void AddRequiredForeignKeyIfMissing(
+            string tableName,
+            string columnName,
+            string referencedTableName,
+            string referencedColumnName,
+            string foreignKeyName)
+        {
+            if (!db.DbMaintenance.IsAnyTable(tableName, false) ||
+                !db.DbMaintenance.IsAnyTable(referencedTableName, false) ||
+                !ColumnExists(tableName, columnName) ||
+                !ColumnExists(referencedTableName, referencedColumnName) ||
+                ForeignKeyExists(foreignKeyName))
+            {
+                return;
+            }
+
+            var orphanRows = db.Ado.SqlQuery<int>($"""
+                select count(*)
+                from `{tableName}` child
+                left join `{referencedTableName}` parent
+                  on child.`{columnName}` = parent.`{referencedColumnName}`
+                where parent.`{referencedColumnName}` is null
+                """).FirstOrDefault();
+            if (orphanRows > 0)
+                throw new InvalidOperationException($"Database schema mismatch: {tableName}.{columnName} contains {orphanRows} rows without {referencedTableName}.{referencedColumnName}");
+
+            db.Ado.ExecuteCommand($"""
+                alter table `{tableName}`
+                add constraint `{foreignKeyName}`
+                foreign key (`{columnName}`)
+                references `{referencedTableName}`(`{referencedColumnName}`)
+                on delete restrict
+                on update cascade
+                """);
         }
 
         private void AddForeignKeyIfMissing(
@@ -666,5 +766,22 @@ namespace MyBook
         {
             return $"{stock.code}\t{stock.stockType}";
         }
+    }
+
+    class DatabaseCleanupResult
+    {
+        public DatabaseCleanupResult(
+            Dictionary<string, int> beforeCounts,
+            Dictionary<string, int> afterCounts,
+            List<StatementImport> fixedStatementImports)
+        {
+            BeforeCounts = beforeCounts;
+            AfterCounts = afterCounts;
+            FixedStatementImports = fixedStatementImports;
+        }
+
+        public Dictionary<string, int> BeforeCounts { get; }
+        public Dictionary<string, int> AfterCounts { get; }
+        public List<StatementImport> FixedStatementImports { get; }
     }
 }

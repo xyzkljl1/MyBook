@@ -217,8 +217,7 @@ namespace MyBook
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType? _descCurrency_t { get; set; }
 
-        [SugarColumn(IsNullable = true)]
-        public int? _statementImport_Id { get; set; }
+        public int _statementImport_Id { get; set; }
 
         private Currency? _descCurrency;
     }
