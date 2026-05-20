@@ -87,9 +87,14 @@ namespace MyBook
             }
         }
 
-        public bool SaveStatementRecordsOnce(StatementImportProvider provider, DateTime time, IEnumerable<Record> records)
+        public bool SaveStatementRecordsOnce(
+            StatementImportProvider provider,
+            DateTime time,
+            IEnumerable<Record> records,
+            IEnumerable<Account>? accountBalances = null)
         {
             var recordList = records.ToList();
+            var accountBalanceList = accountBalances?.ToList() ?? [];
             db.Ado.BeginTran();
             try
             {
@@ -100,6 +105,7 @@ namespace MyBook
                 }
 
                 var statementImportId = InsertStatementImport(provider, time);
+                SaveAccountBalancesCore(accountBalanceList);
                 SaveRecordsCore(recordList, statementImportId);
                 db.Ado.CommitTran();
                 return true;
@@ -214,6 +220,16 @@ namespace MyBook
 
             if (recordList.Count > 0)
                 db.Insertable(recordList).ExecuteCommand();
+        }
+
+        private void SaveAccountBalancesCore(List<Account> accounts)
+        {
+            foreach (var account in accounts)
+            {
+                var existing = GetExistingAccountByName(account);
+                existing._v_v = account._v_v;
+                db.Updateable(existing).ExecuteCommand();
+            }
         }
 
         public void SaveAccountStocks(Account account, IEnumerable<Stock> stocks)

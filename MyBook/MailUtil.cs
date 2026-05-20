@@ -76,7 +76,6 @@ namespace MyBook
         {
             // 按月份搜索
             var reportDate = FirstDayOfMonth(date);
-            var monthText = reportDate.ToString("yyyy-MM");
             if (database.IsStatementImported(ICBCProvider, reportDate))
                 return true;
 
@@ -84,6 +83,7 @@ namespace MyBook
             if (!String.IsNullOrEmpty(billText))
             {
                 Records records = new();
+                var accountBalances = new List<Account>();
                 try
                 {
                     var tables = FormUtil.ReadFromHTML(billText);
@@ -98,70 +98,15 @@ namespace MyBook
                         if (line.Count < 5 || line[0] == "合计")
                             continue;
                         var balance = Currency.Parse(line[4]);
-                        _ = GetICBCPostingAccount(line[0], balance.t);
-                        //else
-                        //    account.v = balance;
+                        var account = GetICBCPostingAccount(line[0], balance.t);
+                        account.v = balance;
+                        accountBalances.Add(account);
                     }
 
-                    {
-                        var table = tables[2];
-                        if (table.Headers.Count!= 7
-                            || table.Headers[0] != "卡号后四位"
-                            || table.Headers[1] != "交易日"
-                            || table.Headers[3] != "交易类型"
-                            || table.Headers[4] != "商户名称/城市"
-                            || table.Headers[6] != "记账金额/币种")
-                            throw new MailParseException("Parse ICBC Bill Fail, Invalid Headers");
-                        foreach (var line in table.Rows)
-                        {
-                            var record = new Record();
-                            var cardAccount = GetICBCCardAccount(line[0], CurrencyType.RMB);
-                            record.updateTime = DateTime.Now;
-                            record.Account = database.GetPostingAccount(cardAccount);
-                            record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
-                            if (line[6].Contains("存入"))
-                                record.isIn = true;
-                            else if (line[6].Contains("支出"))
-                                record.isIn = false;
-                            else
-                                throw new MailParseException("Parse ICBC Bill Fail");
-                            record.Source = $"ICBC对账单邮件({monthText})/人民币明细/{DateTime.Now}/{string.Join(",", line)}";
-                            record.DestAccount = line[4];
-                            record.DescCurrency = Currency.Parse(line[5]);
-                            record.CopyFrom(Currency.Parse(line[6]));
-                            if (line[3]== "消费" || line[3] == "跨行消费" || line[3] == "境外消费")
-                            {
-                                record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账
-                                records.Add(record);
-                            }
-                            else if (line[3] =="退款" || line[3] == "境外退货")
-                            {
-                                if (!record.isIn)
-                                    throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
-                                // 副卡消费产生的退款仍会显示在副卡卡号下；当前主副卡币种不同，因此按最终入账账户用 IsSameAccount 匹配不会误消除其它卡。
-                                // 在同一个月内向前搜索对应的消费，尝试消除；比较 DescCurrency 因为退款是按交易金额退的。
-                                Record? destRecord = records.FindLast(destRecord => 
-                                                            destRecord.DestAccount == record.DestAccount && destRecord.isIn == false
-                                                            && IsSameAccount(destRecord.Account, record.Account) && destRecord.DescCurrency == record.DescCurrency);
-                                if (destRecord is not null)
-                                    records.Remove(destRecord);
-                                else // 不能消除则入账
-                                {
-                                    record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账
-                                    records.Add(record);
-                                }
-                            }
-                            else if (line[3] == "人民币自动转账还款" || line[3] == "自动购汇还款")
-                            {
-                                record.isInternal = true;
-                                record.Reason = "信用卡还款";
-                                records.Add(record);
-                            }
-                        }
+                    records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细
+                    records.AddRange(ParseICBCTransactionRecords(tables[3])); // 外币交易明细
 
-                    }
-
-                    database.SaveStatementRecordsOnce(ICBCProvider, reportDate, records);
+                    database.SaveStatementRecordsOnce(ICBCProvider, reportDate, records, accountBalances);
                     return true;
                 }
                 catch (Exception e)
@@ -173,6 +118,69 @@ namespace MyBook
 
             return false;
         }
+
+        private Records ParseICBCTransactionRecords(FormUtil.FormTable table)
+        {
+            if (table.Headers.Count != 7
+                || table.Headers[0] != "卡号后四位"
+                || table.Headers[1] != "交易日"
+                || table.Headers[3] != "交易类型"
+                || table.Headers[4] != "商户名称/城市"
+                || table.Headers[6] != "记账金额/币种")
+                throw new MailParseException("Parse ICBC Bill Fail, Invalid Headers");
+
+            Records records = new();
+            foreach (var line in table.Rows)
+            {
+                var record = new Record();
+                var postingCurrency = Currency.Parse(line[6]);
+                var cardAccount = GetICBCCardAccount(line[0], postingCurrency.t);
+                record.updateTime = DateTime.Now;
+                record.Account = database.GetPostingAccount(cardAccount);
+                record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                if (line[6].Contains("存入"))
+                    record.isIn = true;
+                else if (line[6].Contains("支出"))
+                    record.isIn = false;
+                else
+                    throw new MailParseException("Parse ICBC Bill Fail");
+                record.Source = $"ICBC对账单邮件/{table.Title}/{DateTime.Now}/{string.Join(",", line)}";
+                record.DestAccount = line[4];
+                record.DescCurrency = Currency.Parse(line[5]);
+                record.CopyFrom(postingCurrency);
+                if (line[3] == "消费" || line[3] == "跨行消费" || line[3] == "境外消费")
+                {
+                    record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账
+                    records.Add(record);
+                }
+                else if (line[3] == "退款" || line[3] == "境外退货")
+                {
+                    if (!record.isIn)
+                        throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
+                    // 副卡消费产生的退款仍会显示在副卡卡号下；当前主副卡币种不同，因此按最终入账账户用 IsSameAccount 匹配不会误消除其它卡。
+                    // 在同一个月内向前搜索对应的消费，尝试消除；比较 DescCurrency 因为退款是按交易金额退的。
+                    Record? destRecord = records.FindLast(destRecord =>
+                                                destRecord.DestAccount == record.DestAccount && destRecord.isIn == false
+                                                && IsSameAccount(destRecord.Account, record.Account) && destRecord.DescCurrency == record.DescCurrency);
+                    if (destRecord is not null)
+                        records.Remove(destRecord);
+                    else // 不能消除则入账
+                    {
+                        record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账
+                        records.Add(record);
+                    }
+                }
+                else if (line[3] == "人民币自动转账还款" || line[3] == "自动购汇还款")
+                {
+                    record.isInternal = true;
+                    record.Reason = "信用卡还款";
+                    records.Add(record);
+                }
+            }
+
+            return records;
+        }
+
         private async Task FetchIBKRReports()
         {
             var date = GetNextDailyStatementDate(IBKRProvider);
