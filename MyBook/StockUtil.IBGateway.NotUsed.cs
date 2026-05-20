@@ -19,9 +19,9 @@ using Newtonsoft.Json.Linq;
 namespace MyBook
 {
 
-    // Not used. Legacy IB Gateway stock and position fetcher kept for reference.
+    // IB Gateway 来源：历史股票、债券和持仓获取实现，当前不使用，仅保留参考。
     [Obsolete("Not used. Prefer IBKR activity report mail parsing instead.")]
-    class IBGatewayStockUtilNotUsed
+    class StockUtilIBGatewayNotUsed
     {
         private const string IbGatewayHost = "127.0.0.1";
         private const int DefaultIbGatewayPort = 5679;
@@ -35,7 +35,7 @@ namespace MyBook
 
         private readonly int ibGatewayPort;
         private readonly DatabaseUtil? database;
-        public IBGatewayStockUtilNotUsed(IConfigurationRoot config, DatabaseUtil? database = null)
+        public StockUtilIBGatewayNotUsed(IConfigurationRoot config, DatabaseUtil? database = null)
         {
             // 为了支持gbk编码
             System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
