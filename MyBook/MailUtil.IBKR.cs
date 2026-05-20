@@ -110,10 +110,6 @@ namespace MyBook
             if (candidates.Count == 1)
                 return candidates[0];
 
-            var usdCandidates = candidates.Where(account => account._v_t == CurrencyType.USD).ToList();
-            if (usdCandidates.Count == 1)
-                return usdCandidates[0];
-
             if (candidates.Count > 1)
             {
                 throw new InvalidOperationException(

@@ -108,11 +108,9 @@ namespace MyBook
         public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','Manual')";
     }
 
-    // 账户
-    // 一个账户下的不同币种余额视作多个账户。
-    // 主副卡关系也按账户行存储，因此同卡不同币种需要分别设置主卡。
-    // Account.v 表示该账户中现金、股票、负债等所有种类资产的总和余额。
-    [SugarIndex("unique_Accounts_name_currency", nameof(Account.name), OrderByType.Asc, nameof(Account._v_t), OrderByType.Asc, true)]
+    // 账户。一个账户可以同时拥有多个币种余额，具体余额保存在 AccountBalances 中。
+    // 主副卡关系按账户存储；副卡账户指向对应主卡账户。
+    [SugarIndex("unique_Accounts_name", nameof(Account.name), OrderByType.Asc, true)]
     [SugarTable("Accounts")]
     public class Account
     {
@@ -123,31 +121,39 @@ namespace MyBook
         [Navigate(NavigateType.ManyToOne, nameof(_primaryAccount_Id), nameof(MyBook.Account.Id))]
         public Account? PrimaryAccount { get; set; }
 
-        [SugarColumn(IsIgnore = true)]
-        public Currency v
-        {
-            get { return new Currency(_v_v, _v_t); }
-            set
-            {
-                _v_v = value.v;
-                _v_t = value.t;
-            }
-        } // 余额
-
         [SugarColumn(DefaultValue = "''")]
         public string name { get; set; } = "";
 
         [SugarColumn(DefaultValue = "''")]
         public string desc { get; set; } = "";
 
-        [SugarColumn(DefaultValue = "0")]
-        public decimal _v_v { get; set; } = 0;
-
-        [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
-        public CurrencyType _v_t { get; set; } = CurrencyType.RMB;
-
         [SugarColumn(IsNullable = true)]
         public int? _primaryAccount_Id { get; set; }
+    }
+
+    // 单个账户在一种币种下的余额。
+    [SugarIndex("unique_AccountBalances_account_currency", nameof(AccountBalance._account_Id), OrderByType.Asc, nameof(AccountBalance.t), OrderByType.Asc, true)]
+    [SugarTable("AccountBalances")]
+    public class AccountBalance : Currency
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(MyBook.Account.Id))]
+        public Account? Account { get; set; }
+
+        public AccountBalance()
+        {
+        }
+
+        public AccountBalance(Account account, Currency balance)
+        {
+            Account = account;
+            CopyFrom(balance);
+        }
+
+        [SugarColumn(DefaultValue = "0")]
+        public int _account_Id { get; set; } = 0;
     }
     // 无论出还是入，只记录本次变动所影响的账户，而不是记录Src和Dest账户
     // 一方面大多数交易是流向外部，不需要记录对方账户状况，只是有时需要记录对方账户名以区分原因

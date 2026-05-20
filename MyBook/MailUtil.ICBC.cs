@@ -11,14 +11,14 @@ namespace MyBook
         private const string ICBCAccountType = "ICBC";
         private const StatementImportProvider ICBCProvider = StatementImportProvider.ICBCBillMail;
 
-        private Account GetICBCCardAccount(string name, CurrencyType currencyType)
+        private Account GetICBCCardAccount(string name)
         {
-            return database.GetAccountByTypeAndId(ICBCAccountType, name.Substring(0, 4), currencyType);
+            return database.GetAccountByTypeAndId(ICBCAccountType, name.Substring(0, 4));
         }
 
-        private Account GetICBCPostingAccount(string name, CurrencyType currencyType)
+        private Account GetICBCPostingAccount(string name)
         {
-            return database.GetPostingAccount(GetICBCCardAccount(name, currencyType));
+            return database.GetPostingAccount(GetICBCCardAccount(name));
         }
 
         public async Task FetchICBCBills()
@@ -51,7 +51,7 @@ namespace MyBook
             if (!String.IsNullOrEmpty(billText))
             {
                 Records records = new();
-                var accountBalances = new List<Account>();
+                var accountBalances = new List<AccountBalance>();
                 try
                 {
                     var tables = FormUtil.ReadFromHTML(billText);
@@ -66,9 +66,8 @@ namespace MyBook
                         if (line.Count < 5 || line[0] == "合计")
                             continue;
                         var balance = Currency.Parse(line[4]);
-                        var account = GetICBCPostingAccount(line[0], balance.t);
-                        account.v = balance;
-                        accountBalances.Add(account);
+                        var account = GetICBCPostingAccount(line[0]);
+                        accountBalances.Add(new AccountBalance(account, balance));
                     }
 
                     records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细。
@@ -102,7 +101,7 @@ namespace MyBook
             {
                 var record = new Record();
                 var postingCurrency = Currency.Parse(line[6]);
-                var cardAccount = GetICBCCardAccount(line[0], postingCurrency.t);
+                var cardAccount = GetICBCCardAccount(line[0]);
                 record.updateTime = DateTime.Now;
                 record.Account = database.GetPostingAccount(cardAccount);
                 record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -119,8 +118,8 @@ namespace MyBook
                 {
                     if (record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
-                    // 副卡消费产生的退款仍会显示在副卡卡号下；当前主副卡币种不同，因此按最终入账账户用 IsSameAccount 匹配不会误消除其它卡。
-                    // 在同一个月内向前搜索对应的消费，尝试消除；比较 DescCurrency 因为退款是按交易金额退的。
+                    // 副卡消费产生的退款仍会显示在副卡卡号下；在同一个月内向前搜索对应的消费，尝试消除。
+                    // 比较 DescCurrency 因为退款是按交易金额退的，IsSameAccount 则保证不会跨入账账户匹配。
                     Record? destRecord = records.FindLast(destRecord =>
                         destRecord.DestAccount == record.DestAccount && destRecord.v < 0
                         && IsSameAccount(destRecord.Account, record.Account) && destRecord.DescCurrency == record.DescCurrency);

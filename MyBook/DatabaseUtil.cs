@@ -8,7 +8,7 @@ namespace MyBook
     {
         private const string DefaultConnectionString = "server=localhost;port=3306;database=mybook;uid=root;pwd=;charset=utf8mb4;";
         private readonly SqlSugarClient db;
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(Record), typeof(Stock), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountBalance), typeof(Record), typeof(Stock), typeof(StatementImport)];
 
         public DatabaseUtil(IConfigurationRoot config)
         {
@@ -85,7 +85,7 @@ namespace MyBook
             StatementImportProvider provider,
             DateTime time,
             IEnumerable<Record> records,
-            IEnumerable<Account>? accountBalances = null)
+            IEnumerable<AccountBalance>? accountBalances = null)
         {
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
@@ -113,19 +113,16 @@ namespace MyBook
             }
         }
 
-        public Account GetAccountByTypeAndId(string? accountType, string id, CurrencyType currencyType)
+        public Account GetAccountByTypeAndId(string? accountType, string id)
         {
-            return GetAccountByName(BuildAccountName(accountType, id), currencyType);
+            return GetAccountByName(BuildAccountName(accountType, id));
         }
 
-        public Account GetAccountByName(string accountName, CurrencyType? currencyType = null)
+        public Account GetAccountByName(string accountName)
         {
-            var account = FindAccountByName(accountName, currencyType);
+            var account = FindAccountByName(accountName);
             if (account is null)
-            {
-                var currencyText = currencyType.HasValue ? currencyType.Value.ToString() : "Any";
-                throw new InvalidOperationException($"Account not found: {accountName}/{currencyText}");
-            }
+                throw new InvalidOperationException($"Account not found: {accountName}");
 
             return account;
         }
@@ -135,15 +132,11 @@ namespace MyBook
             return db.Queryable<Account>().ToList();
         }
 
-        private Account? FindAccountByName(string accountName, CurrencyType? currencyType)
+        private Account? FindAccountByName(string accountName)
         {
-            var accountQuery = db.Queryable<Account>()
-                .Where(it => it.name == accountName);
-
-            if (currencyType.HasValue)
-                accountQuery = accountQuery.Where(it => it._v_t == currencyType.Value);
-
-            return accountQuery.First();
+            return db.Queryable<Account>()
+                .Where(it => it.name == accountName)
+                .First();
         }
 
         public static string BuildAccountName(string? accountType, string id)
@@ -156,7 +149,7 @@ namespace MyBook
 
         private Account GetExistingAccountByName(Account account)
         {
-            var existing = GetAccountByName(account.name, account._v_t);
+            var existing = GetAccountByName(account.name);
             account.Id = existing.Id;
             return existing;
         }
@@ -168,17 +161,15 @@ namespace MyBook
                 return current;
 
             if (current._primaryAccount_Id.Value == current.Id)
-                throw new InvalidOperationException($"Invalid account primary relation: {current.name}/{current._v_t} points to itself");
+                throw new InvalidOperationException($"Invalid account primary relation: {current.name} points to itself");
 
             var primary = db.Queryable<Account>()
                 .Where(it => it.Id == current._primaryAccount_Id.Value)
                 .First();
             if (primary is null)
-                throw new InvalidOperationException($"Invalid account primary relation: {current.name}/{current._v_t} points to missing account {current._primaryAccount_Id.Value}");
+                throw new InvalidOperationException($"Invalid account primary relation: {current.name} points to missing account {current._primaryAccount_Id.Value}");
             if (primary._primaryAccount_Id is not null)
-                throw new InvalidOperationException($"Invalid account primary relation: primary account {primary.name}/{primary._v_t} is also a supplementary account");
-            if (primary._v_t != current._v_t)
-                throw new InvalidOperationException($"Invalid account primary relation: {current.name}/{current._v_t} points to {primary.name}/{primary._v_t}");
+                throw new InvalidOperationException($"Invalid account primary relation: primary account {primary.name} is also a supplementary account");
 
             return primary;
         }
@@ -212,19 +203,34 @@ namespace MyBook
                 db.Insertable(recordList).ExecuteCommand();
         }
 
-        private void SaveAccountBalancesCore(List<Account> accounts)
+        private void SaveAccountBalancesCore(List<AccountBalance> accountBalances)
         {
-            foreach (var account in accounts)
+            foreach (var accountBalance in accountBalances)
             {
-                var existing = GetExistingAccountByName(account);
-                existing._v_v = account._v_v;
+                if (accountBalance.Account is null)
+                    throw new InvalidOperationException("Account balance account is required.");
+
+                var account = GetPostingAccount(accountBalance.Account);
+                accountBalance.Account = account;
+                accountBalance._account_Id = account.Id;
+
+                var existing = db.Queryable<AccountBalance>()
+                    .Where(it => it._account_Id == account.Id && it.t == accountBalance.t)
+                    .First();
+                if (existing is null)
+                {
+                    db.Insertable(accountBalance).ExecuteCommand();
+                    continue;
+                }
+
+                existing.v = accountBalance.v;
                 db.Updateable(existing).ExecuteCommand();
             }
         }
 
         public void SaveAccountStocks(Account account, IEnumerable<Stock> stocks)
         {
-            account = GetAccountByName(account.name, account._v_t);
+            account = GetAccountByName(account.name);
 
             var stockList = stocks.ToList();
             foreach (var stock in stockList)
@@ -291,6 +297,7 @@ namespace MyBook
             {
                 db.Deleteable<Record>().ExecuteCommand();
                 db.Deleteable<Stock>().ExecuteCommand();
+                db.Deleteable<AccountBalance>().ExecuteCommand();
                 db.Ado.ExecuteCommand("""
                     delete statementImport
                     from `StatementImports` statementImport
@@ -326,6 +333,7 @@ namespace MyBook
             return new Dictionary<string, int>
             {
                 ["Accounts"] = db.Queryable<Account>().Count(),
+                ["AccountBalances"] = db.Queryable<AccountBalance>().Count(),
                 ["StatementImports"] = db.Queryable<StatementImport>().Count(),
                 ["Records"] = db.Queryable<Record>().Count(),
                 ["Stocks"] = db.Queryable<Stock>().Count()
@@ -395,16 +403,13 @@ namespace MyBook
             {
                 var primaryAccountId = account._primaryAccount_Id!.Value;
                 if (primaryAccountId == account.Id)
-                    throw new InvalidOperationException($"Invalid account primary relation: {account.name}/{account._v_t} points to itself");
+                    throw new InvalidOperationException($"Invalid account primary relation: {account.name} points to itself");
 
                 if (!accountsById.TryGetValue(primaryAccountId, out var primaryAccount))
-                    throw new InvalidOperationException($"Invalid account primary relation: {account.name}/{account._v_t} points to missing account {primaryAccountId}");
+                    throw new InvalidOperationException($"Invalid account primary relation: {account.name} points to missing account {primaryAccountId}");
 
                 if (primaryAccount._primaryAccount_Id.HasValue)
-                    throw new InvalidOperationException($"Invalid account primary relation: primary account {primaryAccount.name}/{primaryAccount._v_t} is also a supplementary account");
-
-                if (primaryAccount._v_t != account._v_t)
-                    throw new InvalidOperationException($"Invalid account primary relation: {account.name}/{account._v_t} points to {primaryAccount.name}/{primaryAccount._v_t}");
+                    throw new InvalidOperationException($"Invalid account primary relation: primary account {primaryAccount.name} is also a supplementary account");
             }
         }
 
@@ -412,6 +417,8 @@ namespace MyBook
         {
             if (type == typeof(Account))
                 return "Accounts";
+            if (type == typeof(AccountBalance))
+                return "AccountBalances";
             if (type == typeof(Record))
                 return "Records";
             if (type == typeof(Stock))

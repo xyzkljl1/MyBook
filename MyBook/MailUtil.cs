@@ -40,7 +40,7 @@ namespace MyBook
             if (left.Id > 0 && right.Id > 0)
                 return left.Id == right.Id;
 
-            return left.name == right.name && left._v_t == right._v_t;
+            return left.name == right.name;
         }
 
         private DateTime GetNextMonthlyStatementDate(StatementImportProvider provider)
