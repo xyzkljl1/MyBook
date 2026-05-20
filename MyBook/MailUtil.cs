@@ -138,17 +138,10 @@ namespace MyBook
                 record.updateTime = DateTime.Now;
                 record.Account = database.GetPostingAccount(cardAccount);
                 record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
-                if (line[6].EndsWith("(存入)", StringComparison.Ordinal))
-                    record.isIn = true;
-                else if (line[6].EndsWith("(支出)", StringComparison.Ordinal))
-                    record.isIn = false;
-                else
-                    throw new MailParseException("Parse ICBC Bill Fail");
                 record.Source = $"ICBC对账单邮件/{table.Title}/{DateTime.Now}/{string.Join(",", line)}";
                 record.DestAccount = line[4];
                 record.DescCurrency = Currency.Parse(line[5]);
                 record.CopyFrom(postingCurrency);
-                record.v = Math.Abs(record.v) * (record.isIn ? 1 : -1);
                 if (line[3] == "消费" || line[3] == "跨行消费" || line[3] == "境外消费" || line[3] == "缴费")
                 {
                     record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账
@@ -156,12 +149,12 @@ namespace MyBook
                 }
                 else if (line[3] == "退款" || line[3] == "境外退货")
                 {
-                    if (!record.isIn)
+                    if (record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
                     // 副卡消费产生的退款仍会显示在副卡卡号下；当前主副卡币种不同，因此按最终入账账户用 IsSameAccount 匹配不会误消除其它卡。
                     // 在同一个月内向前搜索对应的消费，尝试消除；比较 DescCurrency 因为退款是按交易金额退的。
                     Record? destRecord = records.FindLast(destRecord =>
-                                                destRecord.DestAccount == record.DestAccount && destRecord.isIn == false
+                                                destRecord.DestAccount == record.DestAccount && destRecord.v < 0
                                                 && IsSameAccount(destRecord.Account, record.Account) && destRecord.DescCurrency == record.DescCurrency);
                     if (destRecord is not null)
                         records.Remove(destRecord);

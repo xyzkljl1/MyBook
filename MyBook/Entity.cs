@@ -169,9 +169,6 @@ namespace MyBook
         public string DestAccount { get; set; } = ""; // 对方账户描述
 
         [SugarColumn(DefaultValue = "0")]
-        public bool isIn {  get; set; } = false; // 存入/支出
-
-        [SugarColumn(DefaultValue = "0")]
         public bool isInternal { get; set; } = false; // 是否自己账户间的交易
         public DateTime date { get; set; } // 发生时间
         public DateTime updateTime { get; set; }
@@ -295,12 +292,29 @@ namespace MyBook
         {
             return !(left == right);
         }
-        // 形如 123.2/RMB 或 123.2/RMB(存入)
+        // 形如 123.2/RMB、123.2/RMB(存入) 或 123.2/RMB(支出)，支出会被解析为负数。
         public static Currency Parse(string _t)
         {
             var list = _t.Split(seperator);
             if(list.Length >= 2)
-                return new Currency(list[0], list[1]);
+            {
+                var currency = new Currency(list[0], list[1]);
+                if (_t.EndsWith("(存入)", StringComparison.Ordinal))
+                {
+                    if (currency.v < 0)
+                        throw new CurrencyParseException($"Parse Fail:{_t}");
+                    currency.v = Math.Abs(currency.v);
+                }
+                else if (_t.EndsWith("(支出)", StringComparison.Ordinal))
+                {
+                    if (currency.v < 0)
+                        throw new CurrencyParseException($"Parse Fail:{_t}");
+                    currency.v = -Math.Abs(currency.v);
+                }
+                else if (_t.Contains('(') || _t.Contains(')'))
+                    throw new CurrencyParseException($"Parse Fail:{_t}");
+                return currency;
+            }
             throw new CurrencyParseException($"Parse Fail:{_t}");
         }
 

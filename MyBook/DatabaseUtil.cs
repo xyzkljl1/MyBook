@@ -396,6 +396,7 @@ namespace MyBook
             MigrateStatementImportProviderEnum();
             MigrateStatementImportTime();
             MigrateRecordStatementImportRequired();
+            DropColumnIfExists("Records", "isIn");
         }
 
         private void MigrateRecordStatementImportRequired()
@@ -613,6 +614,12 @@ namespace MyBook
             }
 
             db.Ado.ExecuteCommand($"alter table `{tableName}` change column `{oldColumnName}` `{newColumnName}` {columnDefinition}");
+        }
+
+        private void DropColumnIfExists(string tableName, string columnName)
+        {
+            if (ColumnExists(tableName, columnName))
+                db.Ado.ExecuteCommand($"alter table `{tableName}` drop column `{columnName}`");
         }
 
         private bool ColumnExists(string tableName, string columnName)
