@@ -27,26 +27,6 @@ namespace MyBook
             ValidateAccountPrimaryRelations();
         }
 
-        public void SaveRecords(IEnumerable<Record> records)
-        {
-            var recordList = records.ToList();
-            if (recordList.Count == 0)
-                return;
-
-            db.Ado.BeginTran();
-            try
-            {
-                var statementImportId = InsertStatementImport(StatementImportProvider.Manual, DateTime.Now, "");
-                SaveRecordsCore(recordList, statementImportId);
-                db.Ado.CommitTran();
-            }
-            catch
-            {
-                db.Ado.RollbackTran();
-                throw;
-            }
-        }
-
         public bool IsStatementImported(StatementImportProvider provider, DateTime time)
         {
             return IsStatementImported(provider, time, "");
@@ -81,24 +61,6 @@ namespace MyBook
                 .OrderByDescending(it => it.statementKey)
                 .First();
             return latestImport?.statementKey;
-        }
-
-        public bool SaveStatementImportOnce(StatementImportProvider provider, DateTime time)
-        {
-            try
-            {
-                if (IsStatementImported(provider, time))
-                    return false;
-
-                InsertStatementImport(provider, time, "");
-                return true;
-            }
-            catch (Exception e)
-            {
-                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time))
-                    return false;
-                throw;
-            }
         }
 
         public bool SaveStatementRecordsOnce(
@@ -138,28 +100,6 @@ namespace MyBook
                     return false;
                 throw;
             }
-        }
-
-        public bool SaveStatementRecordsAndHoldingsOnce(
-            StatementImportProvider provider,
-            DateTime time,
-            Account holdingAccount,
-            IEnumerable<Record> records,
-            IEnumerable<Holding> holdings,
-            IEnumerable<AccountBalance>? accountBalances = null)
-        {
-            return SaveStatementRecordsAndHoldingsOnce(
-                [
-                    new StatementRecordHoldingImport(
-                        provider,
-                        time,
-                        "",
-                        holdingAccount,
-                        records.ToList(),
-                        holdings.ToList(),
-                        accountBalances?.ToList() ?? [],
-                        [])
-                ])[0];
         }
 
         public List<bool> SaveStatementRecordsAndHoldingsOnce(IEnumerable<StatementRecordHoldingImport> imports)
@@ -437,21 +377,6 @@ namespace MyBook
             };
         }
 
-        public void SaveHolding(Holding holding)
-        {
-            NormalizeHolding(holding);
-            if (holding.Account is not null)
-                holding._account_Id = GetExistingAccountByName(holding.Account).Id;
-
-            if (holding.Id <= 0)
-            {
-                holding.Id = db.Insertable(holding).ExecuteReturnIdentity();
-                return;
-            }
-
-            db.Updateable(holding).ExecuteCommand();
-        }
-
         public void SaveFinance(Finance finance)
         {
             if (finance.currentPriceTime <= 0)
@@ -585,6 +510,8 @@ namespace MyBook
                 holding._account_Id = account.Id;
             }
 
+            ValidateAccountHoldingsBalance(account, holdingList);
+
             var existingHoldings = db.Queryable<Holding>()
                 .Where(it => it._account_Id == account.Id)
                 .ToList();
@@ -621,6 +548,36 @@ namespace MyBook
         {
             if (holding.stockType == StockType.Cash)
                 holding.quantity = 1;
+        }
+
+        private void ValidateAccountHoldingsBalance(Account account, List<Holding> holdings)
+        {
+            var accountBalances = db.Queryable<AccountBalance>()
+                .Where(it => it._account_Id == account.Id)
+                .ToList();
+            if (accountBalances.Count == 0)
+                throw new InvalidOperationException($"Missing account balance for holdings: {account.name}");
+
+            var balanceSums = accountBalances
+                .GroupBy(balance => balance.t)
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(balance => balance.v)));
+            var holdingSums = holdings
+                .GroupBy(holding => holding.currentPrice.t)
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(holding => holding.totalPrice.v)));
+            var currencies = balanceSums.Keys
+                .Union(holdingSums.Keys)
+                .ToList();
+
+            foreach (var currency in currencies)
+            {
+                var accountBalance = balanceSums.TryGetValue(currency, out var balance) ? balance : 0;
+                var holdingTotal = holdingSums.TryGetValue(currency, out var total) ? total : 0;
+                if (accountBalance != holdingTotal)
+                {
+                    throw new InvalidOperationException(
+                        $"Holding balance mismatch for {account.name}/{currency}: accountBalance={accountBalance}, holdings={holdingTotal}");
+                }
+            }
         }
     }
 
