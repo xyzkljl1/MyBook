@@ -934,11 +934,20 @@ namespace MyBook
                     _account_Id = account.Id > 0 ? account.Id : null,
                     code = code,
                     stockType = stockType.Value,
-                    quantity = (decimal)pos,
+                    quantity = ToHoldingQuantity(pos),
                     desc = $"IB Gateway {contract.SecType} {exchange} avgCost={avgCost.ToString(CultureInfo.InvariantCulture)}",
                     displayText = displayText,
                     _currentPrice_t = currencyType
                 };
+            }
+
+            private static int ToHoldingQuantity(double quantity)
+            {
+                var rounded = Math.Round(quantity);
+                if (Math.Abs(quantity - rounded) > 0.0000001)
+                    throw new InvalidOperationException($"IB Gateway holding quantity is not an integer: {quantity.ToString(CultureInfo.InvariantCulture)}");
+
+                return checked((int)rounded);
             }
 
             private static StockType? GetStockType(Contract contract)

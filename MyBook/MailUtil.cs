@@ -45,6 +45,10 @@ namespace MyBook
 
         private DateTime GetNextMonthlyStatementDate(StatementImportProvider provider)
         {
+            var latestKey = database.GetLatestStatementImportKey(provider);
+            if (DateTime.TryParseExact(latestKey, "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out var latestKeyDate))
+                return FirstDayOfMonth(latestKeyDate).AddMonths(1);
+
             var latestTime = database.GetLatestStatementImportTime(provider);
             if (latestTime is null)
                 throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
@@ -64,6 +68,11 @@ namespace MyBook
         private static DateTime FirstDayOfMonth(DateTime date)
         {
             return new DateTime(date.Year, date.Month, 1);
+        }
+
+        private static DateTime GetMailDate(MimeMessage message)
+        {
+            return message.Date.LocalDateTime.Date;
         }
 
         private static string GetMessageText(MimeMessage message)
@@ -92,6 +101,11 @@ namespace MyBook
 
         private async Task<MimeMessage?> SearchBill(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
         {
+            return (await SearchBills(sender, subject, date, messageFilter)).FirstOrDefault();
+        }
+
+        private async Task<List<MimeMessage>> SearchBills(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
+        {
             try
             {
                 using MailKit.Net.Imap.ImapClient client = new();
@@ -110,20 +124,23 @@ namespace MyBook
                 var uids = await client.Inbox.SearchAsync(query);
                 if (uids.Count > 1)
                     Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
+                var messages = new List<MimeMessage>();
                 foreach (var uid in uids)
                 {
                     var message = await client.Inbox.GetMessageAsync(uid);
                     if (messageFilter is not null && !messageFilter(message))
                         continue;
 
-                    return message;
+                    messages.Add(message);
                 }
+
+                return messages.OrderBy(GetMailDate).ToList();
             }
             catch (Exception e)
             {
                 Console.WriteLine($"fetch mail fail :{e.Message}");
             }
-            return null;
+            return [];
         }
     }
 }

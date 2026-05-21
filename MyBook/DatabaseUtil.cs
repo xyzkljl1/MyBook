@@ -36,7 +36,7 @@ namespace MyBook
             db.Ado.BeginTran();
             try
             {
-                var statementImportId = InsertStatementImport(StatementImportProvider.Manual, DateTime.Now);
+                var statementImportId = InsertStatementImport(StatementImportProvider.Manual, DateTime.Now, "");
                 SaveRecordsCore(recordList, statementImportId);
                 db.Ado.CommitTran();
             }
@@ -49,9 +49,20 @@ namespace MyBook
 
         public bool IsStatementImported(StatementImportProvider provider, DateTime time)
         {
+            return IsStatementImported(provider, time, "");
+        }
+
+        public bool IsStatementImported(StatementImportProvider provider, DateTime time, string statementKey)
+        {
             var importTime = NormalizeStatementImportTime(time);
             return db.Queryable<StatementImport>()
-                .Any(it => it.provider == provider && it.time == importTime);
+                .Any(it => it.provider == provider && it.time == importTime && it.statementKey == statementKey);
+        }
+
+        public bool IsStatementKeyImported(StatementImportProvider provider, string statementKey)
+        {
+            return db.Queryable<StatementImport>()
+                .Any(it => it.provider == provider && it.statementKey == statementKey);
         }
 
         public DateTime? GetLatestStatementImportTime(StatementImportProvider provider)
@@ -63,6 +74,15 @@ namespace MyBook
             return latestImport?.time;
         }
 
+        public string? GetLatestStatementImportKey(StatementImportProvider provider)
+        {
+            var latestImport = db.Queryable<StatementImport>()
+                .Where(it => it.provider == provider && it.statementKey != "")
+                .OrderByDescending(it => it.statementKey)
+                .First();
+            return latestImport?.statementKey;
+        }
+
         public bool SaveStatementImportOnce(StatementImportProvider provider, DateTime time)
         {
             try
@@ -70,7 +90,7 @@ namespace MyBook
                 if (IsStatementImported(provider, time))
                     return false;
 
-                InsertStatementImport(provider, time);
+                InsertStatementImport(provider, time, "");
                 return true;
             }
             catch (Exception e)
@@ -85,20 +105,21 @@ namespace MyBook
             StatementImportProvider provider,
             DateTime time,
             IEnumerable<Record> records,
-            IEnumerable<AccountBalance>? accountBalances = null)
+            IEnumerable<AccountBalance>? accountBalances = null,
+            string statementKey = "")
         {
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
             db.Ado.BeginTran();
             try
             {
-                if (IsStatementImported(provider, time))
+                if (IsStatementImported(provider, time, statementKey))
                 {
                     db.Ado.CommitTran();
                     return false;
                 }
 
-                var statementImportId = InsertStatementImport(provider, time);
+                var statementImportId = InsertStatementImport(provider, time, statementKey);
                 SaveAccountBalancesCore(accountBalanceList);
                 SaveRecordsCore(recordList, statementImportId);
                 db.Ado.CommitTran();
@@ -107,8 +128,61 @@ namespace MyBook
             catch (Exception e)
             {
                 db.Ado.RollbackTran();
-                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time))
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
                     return false;
+                throw;
+            }
+        }
+
+        public bool SaveStatementRecordsAndHoldingsOnce(
+            StatementImportProvider provider,
+            DateTime time,
+            Account holdingAccount,
+            IEnumerable<Record> records,
+            IEnumerable<Holding> holdings,
+            IEnumerable<AccountBalance>? accountBalances = null)
+        {
+            return SaveStatementRecordsAndHoldingsOnce(
+                [
+                    new StatementRecordHoldingImport(
+                        provider,
+                        time,
+                        "",
+                        holdingAccount,
+                        records.ToList(),
+                        holdings.ToList(),
+                        accountBalances?.ToList() ?? [])
+                ])[0];
+        }
+
+        public List<bool> SaveStatementRecordsAndHoldingsOnce(IEnumerable<StatementRecordHoldingImport> imports)
+        {
+            var importList = imports.ToList();
+            var saved = new List<bool>();
+            db.Ado.BeginTran();
+            try
+            {
+                foreach (var import in importList)
+                {
+                    if (IsStatementImported(import.Provider, import.Time, import.StatementKey))
+                    {
+                        saved.Add(false);
+                        continue;
+                    }
+
+                    var statementImportId = InsertStatementImport(import.Provider, import.Time, import.StatementKey);
+                    SaveAccountBalancesCore(import.AccountBalances);
+                    SaveAccountHoldingsCore(import.HoldingAccount, import.Holdings);
+                    SaveRecordsCore(import.Records, statementImportId);
+                    saved.Add(true);
+                }
+
+                db.Ado.CommitTran();
+                return saved;
+            }
+            catch
+            {
+                db.Ado.RollbackTran();
                 throw;
             }
         }
@@ -174,12 +248,13 @@ namespace MyBook
             return primary;
         }
 
-        private int InsertStatementImport(StatementImportProvider provider, DateTime time)
+        private int InsertStatementImport(StatementImportProvider provider, DateTime time, string statementKey)
         {
             return db.Insertable(new StatementImport
             {
                 provider = provider,
-                time = NormalizeStatementImportTime(time)
+                time = NormalizeStatementImportTime(time),
+                statementKey = statementKey
             }).ExecuteReturnIdentity();
         }
 
@@ -230,51 +305,11 @@ namespace MyBook
 
         public void SaveAccountHoldings(Account account, IEnumerable<Holding> holdings)
         {
-            account = GetAccountByName(account.name);
-
             var holdingList = holdings.ToList();
-            foreach (var holding in holdingList)
-            {
-                NormalizeHolding(holding);
-                holding.Account = account;
-                holding._account_Id = account.Id;
-            }
-
             db.Ado.BeginTran();
             try
             {
-                var existingHoldings = db.Queryable<Holding>()
-                    .Where(it => it._account_Id == account.Id &&
-                        (it.stockType == StockType.NASDAQ || it.stockType == StockType.ARCA || it.stockType == StockType.UST))
-                    .ToList();
-                var currentKeys = holdingList.Select(GetHoldingKey)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var deletedIds = existingHoldings
-                    .Where(holding => !currentKeys.Contains(GetHoldingKey(holding)))
-                    .Select(holding => holding.Id)
-                    .ToList();
-                if (deletedIds.Count > 0)
-                    db.Deleteable<Holding>().In(deletedIds).ExecuteCommand();
-
-                foreach (var holding in holdingList)
-                {
-                    var existing = existingHoldings.FirstOrDefault(it =>
-                        it.code == holding.code && it.stockType == holding.stockType);
-                    if (existing is null)
-                    {
-                        db.Insertable(holding).ExecuteCommand();
-                        continue;
-                    }
-
-                    existing.quantity = holding.quantity;
-                    existing.desc = holding.desc;
-                    existing.displayText = holding.displayText;
-                    existing._currentPrice_v = holding._currentPrice_v;
-                    existing._currentPrice_t = holding._currentPrice_t;
-                    existing._account_Id = account.Id;
-                    db.Updateable(existing).ExecuteCommand();
-                }
-
+                SaveAccountHoldingsCore(account, holdingList);
                 db.Ado.CommitTran();
             }
             catch
@@ -386,7 +421,7 @@ namespace MyBook
 
         public static DateTime NormalizeStatementImportTime(DateTime time)
         {
-            return new DateTime(time.Ticks - time.Ticks % 10, time.Kind);
+            return time.Date;
         }
 
         private static bool IsDuplicateKeyException(Exception exception)
@@ -486,6 +521,49 @@ namespace MyBook
             return $"{holding.code}\t{holding.stockType}";
         }
 
+        private void SaveAccountHoldingsCore(Account account, List<Holding> holdingList)
+        {
+            account = GetAccountByName(account.name);
+
+            foreach (var holding in holdingList)
+            {
+                NormalizeHolding(holding);
+                holding.Account = account;
+                holding._account_Id = account.Id;
+            }
+
+            var existingHoldings = db.Queryable<Holding>()
+                .Where(it => it._account_Id == account.Id)
+                .ToList();
+            var currentKeys = holdingList.Select(GetHoldingKey)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var deletedIds = existingHoldings
+                .Where(holding => !currentKeys.Contains(GetHoldingKey(holding)))
+                .Select(holding => holding.Id)
+                .ToList();
+            if (deletedIds.Count > 0)
+                db.Deleteable<Holding>().In(deletedIds).ExecuteCommand();
+
+            foreach (var holding in holdingList)
+            {
+                var existing = existingHoldings.FirstOrDefault(it =>
+                    it.code == holding.code && it.stockType == holding.stockType);
+                if (existing is null)
+                {
+                    db.Insertable(holding).ExecuteCommand();
+                    continue;
+                }
+
+                existing.quantity = holding.quantity;
+                existing.desc = holding.desc;
+                existing.displayText = holding.displayText;
+                existing._currentPrice_v = holding._currentPrice_v;
+                existing._currentPrice_t = holding._currentPrice_t;
+                existing._account_Id = account.Id;
+                db.Updateable(existing).ExecuteCommand();
+            }
+        }
+
         private static void NormalizeHolding(Holding holding)
         {
             if (holding.stockType == StockType.Cash)
@@ -508,5 +586,34 @@ namespace MyBook
         public Dictionary<string, int> BeforeCounts { get; }
         public Dictionary<string, int> AfterCounts { get; }
         public List<StatementImport> FixedStatementImports { get; }
+    }
+
+    class StatementRecordHoldingImport
+    {
+        public StatementRecordHoldingImport(
+            StatementImportProvider provider,
+            DateTime time,
+            string statementKey,
+            Account holdingAccount,
+            List<Record> records,
+            List<Holding> holdings,
+            List<AccountBalance> accountBalances)
+        {
+            Provider = provider;
+            Time = time;
+            StatementKey = statementKey;
+            HoldingAccount = holdingAccount;
+            Records = records;
+            Holdings = holdings;
+            AccountBalances = accountBalances;
+        }
+
+        public StatementImportProvider Provider { get; }
+        public DateTime Time { get; }
+        public string StatementKey { get; }
+        public Account HoldingAccount { get; }
+        public List<Record> Records { get; }
+        public List<Holding> Holdings { get; }
+        public List<AccountBalance> AccountBalances { get; }
     }
 }

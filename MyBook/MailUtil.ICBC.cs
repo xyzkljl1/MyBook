@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace MyBook
@@ -42,48 +43,60 @@ namespace MyBook
         // 工行对账单，按卡号区分用途。
         public async Task<bool> FetchICBCBill(DateTime date)
         {
-            // 按月份搜索。
-            var reportDate = FirstDayOfMonth(date);
-            if (database.IsStatementImported(ICBCProvider, reportDate))
-                return true;
+            var reportMonth = FirstDayOfMonth(date);
+            var message = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", reportMonth, null);
+            if (message is null)
+                return false;
 
-            var billText = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", reportDate);
-            if (!String.IsNullOrEmpty(billText))
+            var billText = message.HtmlBody ?? message.TextBody ?? "";
+            if (String.IsNullOrEmpty(billText))
+                return false;
+
+            Records records = new();
+            var accountBalances = new List<AccountBalance>();
+            try
             {
-                Records records = new();
-                var accountBalances = new List<AccountBalance>();
-                try
-                {
-                    var tables = FormUtil.ReadFromHTML(billText);
-                    if (tables.Count < 4
-                        || tables[0].Title != "需 还 款 明 细"
-                        || tables[1].Title != "本 期 交 易 汇 总"
-                        || tables[2].Title != "人民币(本位币) 交 易 明 细"
-                        || tables[3].Title != "外 币 交 易 明 细")
-                        throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
-                    foreach (var line in tables[1].Rows)
-                    {
-                        if (line.Count < 5 || line[0] == "合计")
-                            continue;
-                        var balance = Currency.Parse(line[4]);
-                        var account = GetICBCPostingAccount(line[0]);
-                        accountBalances.Add(new AccountBalance(account, balance));
-                    }
-
-                    records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细。
-                    records.AddRange(ParseICBCTransactionRecords(tables[3])); // 外币交易明细。
-
-                    database.SaveStatementRecordsOnce(ICBCProvider, reportDate, records, accountBalances);
+                var statementEndDate = ParseICBCStatementEndDate(billText);
+                var statementKey = statementEndDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                if (database.IsStatementKeyImported(ICBCProvider, statementKey))
                     return true;
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine($"parse mail fail :{e.Message}");
-                    throw;
-                }
-            }
 
-            return false;
+                var tables = FormUtil.ReadFromHTML(billText);
+                if (tables.Count < 4
+                    || tables[0].Title != "需 还 款 明 细"
+                    || tables[1].Title != "本 期 交 易 汇 总"
+                    || tables[2].Title != "人民币(本位币) 交 易 明 细"
+                    || tables[3].Title != "外 币 交 易 明 细")
+                    throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
+                foreach (var line in tables[1].Rows)
+                {
+                    if (line.Count < 5 || line[0] == "合计")
+                        continue;
+                    var balance = Currency.Parse(line[4]);
+                    var account = GetICBCPostingAccount(line[0]);
+                    accountBalances.Add(new AccountBalance(account, balance));
+                }
+
+                records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细。
+                records.AddRange(ParseICBCTransactionRecords(tables[3])); // 外币交易明细。
+                database.SaveStatementRecordsOnce(ICBCProvider, GetMailDate(message), records, accountBalances, statementKey);
+                return true;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"parse mail fail :{e.Message}");
+                throw;
+            }
+        }
+
+        private static DateTime ParseICBCStatementEndDate(string billText)
+        {
+            var text = NormalizeMailText(Regex.Replace(System.Net.WebUtility.HtmlDecode(billText), "<[^>]+>", " "));
+            var match = Regex.Match(text, @"账单周期\s*\d{4}年\d{1,2}月\d{1,2}日\s*[—\-－~至到]\s*(?<end>\d{4}年\d{1,2}月\d{1,2}日)");
+            if (!match.Success)
+                throw new MailParseException("Parse ICBC Bill Fail, Missing Statement Period");
+
+            return DateTime.ParseExact(match.Groups["end"].Value, "yyyy年M月d日", CultureInfo.InvariantCulture);
         }
 
         private Records ParseICBCTransactionRecords(FormUtil.FormTable table)
@@ -105,7 +118,7 @@ namespace MyBook
                 record.updateTime = DateTime.Now;
                 record.Account = database.GetPostingAccount(cardAccount);
                 record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
-                record.Source = $"ICBC对账单邮件/{table.Title}/{DateTime.Now}/{string.Join(",", line)}";
+                record.Source = $"ICBC对账单邮件{table.Title}/{DateTime.Now}/{string.Join(",", line)}";
                 record.DestAccount = line[4];
                 record.DescCurrency = Currency.Parse(line[5]);
                 record.CopyFrom(postingCurrency);
@@ -119,7 +132,7 @@ namespace MyBook
                     if (record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
                     // 副卡消费产生的退款仍会显示在副卡卡号下；在同一个月内向前搜索对应的消费，尝试消除。
-                    // 比较 DescCurrency 因为退款是按交易金额退的，IsSameAccount 则保证不会跨入账账户匹配。
+                    // 比较 DescCurrency 因为退款是按交易金额退的，IsSameAccount 则保证不会跨入账户匹配。
                     Record? destRecord = records.FindLast(destRecord =>
                         destRecord.DestAccount == record.DestAccount && destRecord.v < 0
                         && IsSameAccount(destRecord.Account, record.Account) && destRecord.DescCurrency == record.DescCurrency);

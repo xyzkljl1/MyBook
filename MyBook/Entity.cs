@@ -56,7 +56,7 @@ namespace MyBook
         public StockType stockType { get; set; } = StockType.NASDAQ;
 
         [SugarColumn(DefaultValue = "0")]
-        public decimal quantity
+        public int quantity
         {
             get => stockType == StockType.Cash ? 1 : _quantity;
             set => _quantity = stockType == StockType.Cash ? 1 : value;
@@ -98,7 +98,7 @@ namespace MyBook
         }
 
         // 用于存储
-        [SugarColumn(DefaultValue = "0")]
+        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(18,6)")]
         public decimal _currentPrice_v { get; set; } = 0;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -107,7 +107,7 @@ namespace MyBook
         [SugarColumn(IsNullable = true)]
         public int? _account_Id { get; set; }
 
-        private decimal _quantity = 0;
+        private int _quantity = 0;
     }
 
     // 从互联网获取的最新股票价格或汇率，不关联 Account。
@@ -157,7 +157,7 @@ namespace MyBook
         }
 
         // 用于存储
-        [SugarColumn(DefaultValue = "0")]
+        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(18,6)")]
         public decimal _currentPrice_v { get; set; } = 0;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -299,7 +299,7 @@ namespace MyBook
         Manual,
     }
 
-    [SugarIndex("unique_StatementImports_provider_time", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.time), OrderByType.Asc, true)]
+    [SugarIndex("unique_StatementImports_provider_time_key", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.time), OrderByType.Asc, nameof(StatementImport.statementKey), OrderByType.Asc, true)]
     [SugarTable("StatementImports")]
     public class StatementImport
     {
@@ -311,6 +311,9 @@ namespace MyBook
 
         [SugarColumn(ColumnDataType = "datetime(6)")]
         public DateTime time { get; set; }
+
+        [SugarColumn(DefaultValue = "''")]
+        public string statementKey { get; set; } = "";
     }
 
     //币种

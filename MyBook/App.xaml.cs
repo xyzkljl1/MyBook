@@ -19,6 +19,16 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--debug-fetch-local-ibkr-reports", StringComparison.OrdinalIgnoreCase)))
+            {
+                var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                var database = new DatabaseUtil(config);
+                var mail = new MailUtil(config, database);
+                mail.DebugFetchLocalIBKRReports();
+                Shutdown();
+                return;
+            }
+
             MainWindow = new MainWindow();
             MainWindow.Show();
         }
