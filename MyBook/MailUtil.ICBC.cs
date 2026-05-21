@@ -53,7 +53,6 @@ namespace MyBook
                 return false;
 
             Records records = new();
-            var accountBalances = new List<AccountBalance>();
             try
             {
                 var statementEndDate = ParseICBCStatementEndDate(billText);
@@ -68,18 +67,18 @@ namespace MyBook
                     || tables[2].Title != "人民币(本位币) 交 易 明 细"
                     || tables[3].Title != "外 币 交 易 明 细")
                     throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
-                foreach (var line in tables[1].Rows)
-                {
-                    if (line.Count < 5 || line[0] == "合计")
-                        continue;
-                    var balance = Currency.Parse(line[4]);
-                    var account = GetICBCPostingAccount(line[0]);
-                    accountBalances.Add(new AccountBalance(account, balance));
-                }
+                var beginningAccountBalances = ParseICBCAccountBalances(tables[1], 1);
+                var accountBalances = ParseICBCAccountBalances(tables[1], 4);
 
                 records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细。
                 records.AddRange(ParseICBCTransactionRecords(tables[3])); // 外币交易明细。
-                database.SaveStatementRecordsOnce(ICBCProvider, GetMailDate(message), records, accountBalances, statementKey);
+                database.SaveStatementRecordsOnce(
+                    ICBCProvider,
+                    GetMailDate(message),
+                    records,
+                    accountBalances,
+                    statementKey,
+                    beginningAccountBalances);
                 return true;
             }
             catch (Exception e)
@@ -97,6 +96,22 @@ namespace MyBook
                 throw new MailParseException("Parse ICBC Bill Fail, Missing Statement Period");
 
             return DateTime.ParseExact(match.Groups["end"].Value, "yyyy年M月d日", CultureInfo.InvariantCulture);
+        }
+
+        private List<AccountBalance> ParseICBCAccountBalances(FormUtil.FormTable table, int balanceColumn)
+        {
+            var accountBalances = new List<AccountBalance>();
+            foreach (var line in table.Rows)
+            {
+                if (line.Count <= balanceColumn || line[0] == "合计")
+                    continue;
+
+                var balance = Currency.Parse(line[balanceColumn]);
+                var account = GetICBCPostingAccount(line[0]);
+                accountBalances.Add(new AccountBalance(account, balance));
+            }
+
+            return accountBalances;
         }
 
         private Records ParseICBCTransactionRecords(FormUtil.FormTable table)

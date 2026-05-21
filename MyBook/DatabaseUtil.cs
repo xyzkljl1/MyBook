@@ -106,10 +106,12 @@ namespace MyBook
             DateTime time,
             IEnumerable<Record> records,
             IEnumerable<AccountBalance>? accountBalances = null,
-            string statementKey = "")
+            string statementKey = "",
+            IEnumerable<AccountBalance>? beginningAccountBalances = null)
         {
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
+            var beginningAccountBalanceList = beginningAccountBalances?.ToList() ?? [];
             db.Ado.BeginTran();
             try
             {
@@ -119,6 +121,10 @@ namespace MyBook
                     return false;
                 }
 
+                ValidateBeginningAccountBalances(
+                    provider,
+                    beginningAccountBalanceList,
+                    ShouldValidateBeginningAccountBalances(provider));
                 var statementImportId = InsertStatementImport(provider, time, statementKey);
                 SaveAccountBalancesCore(accountBalanceList);
                 SaveRecordsCore(recordList, statementImportId);
@@ -151,7 +157,8 @@ namespace MyBook
                         holdingAccount,
                         records.ToList(),
                         holdings.ToList(),
-                        accountBalances?.ToList() ?? [])
+                        accountBalances?.ToList() ?? [],
+                        [])
                 ])[0];
         }
 
@@ -159,6 +166,10 @@ namespace MyBook
         {
             var importList = imports.ToList();
             var saved = new List<bool>();
+            var shouldValidateBeginningBalances = importList
+                .Select(import => import.Provider)
+                .Distinct()
+                .ToDictionary(provider => provider, ShouldValidateBeginningAccountBalances);
             db.Ado.BeginTran();
             try
             {
@@ -170,6 +181,10 @@ namespace MyBook
                         continue;
                     }
 
+                    ValidateBeginningAccountBalances(
+                        import.Provider,
+                        import.BeginningAccountBalances,
+                        shouldValidateBeginningBalances[import.Provider]);
                     var statementImportId = InsertStatementImport(import.Provider, import.Time, import.StatementKey);
                     SaveAccountBalancesCore(import.AccountBalances);
                     SaveAccountHoldingsCore(import.HoldingAccount, import.Holdings);
@@ -276,6 +291,44 @@ namespace MyBook
 
             if (recordList.Count > 0)
                 db.Insertable(recordList).ExecuteCommand();
+        }
+
+        private bool ShouldValidateBeginningAccountBalances(StatementImportProvider provider)
+        {
+            return db.Queryable<StatementImport>()
+                .Where(it => it.provider == provider)
+                .Count() > 1;
+        }
+
+        private void ValidateBeginningAccountBalances(
+            StatementImportProvider provider,
+            List<AccountBalance> beginningAccountBalances,
+            bool shouldValidate)
+        {
+            if (!shouldValidate || beginningAccountBalances.Count == 0)
+                return;
+
+            foreach (var beginningAccountBalance in beginningAccountBalances)
+            {
+                if (beginningAccountBalance.Account is null)
+                    throw new InvalidOperationException("Beginning account balance account is required.");
+
+                var account = GetPostingAccount(beginningAccountBalance.Account);
+                var existing = db.Queryable<AccountBalance>()
+                    .Where(it => it._account_Id == account.Id && it.t == beginningAccountBalance.t)
+                    .First();
+                if (existing is null)
+                {
+                    throw new InvalidOperationException(
+                        $"Missing current account balance for {provider}: {account.name}/{beginningAccountBalance.t}");
+                }
+
+                if (existing.v != beginningAccountBalance.v)
+                {
+                    throw new InvalidOperationException(
+                        $"Beginning account balance mismatch for {provider}: {account.name}/{beginningAccountBalance.t}, current={existing.v}, beginning={beginningAccountBalance.v}");
+                }
+            }
         }
 
         private void SaveAccountBalancesCore(List<AccountBalance> accountBalances)
@@ -597,7 +650,8 @@ namespace MyBook
             Account holdingAccount,
             List<Record> records,
             List<Holding> holdings,
-            List<AccountBalance> accountBalances)
+            List<AccountBalance> accountBalances,
+            List<AccountBalance> beginningAccountBalances)
         {
             Provider = provider;
             Time = time;
@@ -606,6 +660,7 @@ namespace MyBook
             Records = records;
             Holdings = holdings;
             AccountBalances = accountBalances;
+            BeginningAccountBalances = beginningAccountBalances;
         }
 
         public StatementImportProvider Provider { get; }
@@ -615,5 +670,6 @@ namespace MyBook
         public List<Record> Records { get; }
         public List<Holding> Holdings { get; }
         public List<AccountBalance> AccountBalances { get; }
+        public List<AccountBalance> BeginningAccountBalances { get; }
     }
 }

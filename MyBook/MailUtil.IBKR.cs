@@ -149,7 +149,8 @@ namespace MyBook
                     report.Account,
                     report.Records,
                     report.Holdings,
-                    report.AccountBalances)));
+                    report.AccountBalances,
+                    report.BeginningAccountBalances)));
 
             for (var i = 0; i < reports.Count; i++)
             {
@@ -176,6 +177,7 @@ namespace MyBook
             var account = GetIBKRAccount(accountId);
             var contractInfos = ParseIBKRContractInfos(doc);
             var holdings = ParseIBKRHoldings(doc, account, baseCurrency, contractInfos, sourceName);
+            var startingNav = ParseIBKRStartingNav(doc);
             var endingNav = ParseIBKREndingNav(doc);
             var navChange = ParseIBKRNavChange(doc);
             var records = ParseIBKRRecords(doc, account, baseCurrency, contractInfos, reportDate.Date, sourceName, navChange);
@@ -188,7 +190,8 @@ namespace MyBook
                 account,
                 records,
                 holdings,
-                [new AccountBalance(account, new Currency(endingNav, baseCurrency))]);
+                [new AccountBalance(account, new Currency(endingNav, baseCurrency))],
+                [new AccountBalance(account, new Currency(startingNav, baseCurrency))]);
         }
 
         private static string BuildIBKRStatementKey(Account account, DateTime reportDate)
@@ -1101,7 +1104,18 @@ namespace MyBook
             return ParseIBKRDecimalAt(row, 4, "ending NAV");
         }
 
+        private static decimal ParseIBKRStartingNav(HtmlDocument doc)
+        {
+            return ParseIBKRNavChangeValues(doc).Start;
+        }
+
         private static decimal ParseIBKRNavChange(HtmlDocument doc)
+        {
+            var (start, end) = ParseIBKRNavChangeValues(doc);
+            return end - start;
+        }
+
+        private static (decimal Start, decimal End) ParseIBKRNavChangeValues(HtmlDocument doc)
         {
             var tables = ReadIBKRSectionTables(doc, "tblNAV_");
             if (tables.Count < 2)
@@ -1121,7 +1135,7 @@ namespace MyBook
 
             if (start is null || end is null)
                 throw new MailParseException("Parse IBKR Report Fail, Invalid NAV Change Table");
-            return end.Value - start.Value;
+            return (start.Value, end.Value);
         }
 
         private static decimal ParseIBKRNavChangeComponent(HtmlDocument doc, string componentName)
@@ -1501,7 +1515,8 @@ namespace MyBook
             Account Account,
             Records Records,
             List<Holding> Holdings,
-            List<AccountBalance> AccountBalances);
+            List<AccountBalance> AccountBalances,
+            List<AccountBalance> BeginningAccountBalances);
 
         private sealed record IBKRContractInfo(string Code, string Description, StockType StockType, string DisplayText);
 
