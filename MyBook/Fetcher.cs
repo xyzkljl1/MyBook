@@ -23,8 +23,8 @@ namespace MyBook
             mail = new(config, database);
             stock = new(config, database);
             _ = mail.FetchICBCBills();
-            //stock.Fetch(new Finance("QQQ", StockType.NASDAQ));
-            //stock.Fetch(new Finance("021282", StockType.CNFUND));
+            //stock.Fetch(new Finance("QQQ", HoldingType.NASDAQ));
+            //stock.Fetch(new Finance("021282", HoldingType.CNFUND));
         }
     }
 }

@@ -1,4 +1,4 @@
-﻿using MailKit.Net.Proxy;
+using MailKit.Net.Proxy;
 using Microsoft.Extensions.Configuration;
 using System;
 using System.Collections;
@@ -46,25 +46,27 @@ namespace MyBook
         public async Task<Currency?> Fetch(Holding holding)
         {
             Currency? ret = null;
-            switch(holding.stockType)
+            switch(holding.holdingType)
             {
-                case StockType.NASDAQ:
+                case HoldingType.NASDAQ:
                     ret = new Currency(await FetchIbGatewayStock(holding.code, "NASDAQ"), CurrencyType.USD);
                     break;
-                case StockType.ARCA:
+                case HoldingType.ARCA:
                     ret = new Currency(await FetchIbGatewayStock(holding.code, "ARCA"), CurrencyType.USD);
                     break;
-                case StockType.UST:
+                case HoldingType.UST:
                     ret = new Currency(await FetchIbGatewayBond(holding.code), CurrencyType.USD);
                     break;
-                case StockType.SHANGHAI:
+                case HoldingType.SHANGHAI:
                     ret = new Currency(await FetchShanghaiStock(holding.code), CurrencyType.RMB);
                     break;
-                case StockType.CNFUND:
+                case HoldingType.CNFUND:
                     ret = new Currency(await FetchCNFund(holding.code), CurrencyType.RMB);
                     break;
-                case StockType.Cash:
+                case HoldingType.Cash:
                     ret = await FetchCurrencyToRmb(holding.currentPrice.t);
+                    break;
+                case HoldingType.Accrued:
                     break;
             }
             ret = ret==null||ret.v < 0 ? null : ret;
@@ -354,7 +356,7 @@ namespace MyBook
                 if (completedTask != wrapper.PositionsTask)
                     Console.WriteLine("fail to fetch IB Gateway positions: timeout");
 
-                foreach (var holding in wrapper.Holdings.Where(it => it.stockType == StockType.UST))
+                foreach (var holding in wrapper.Holdings.Where(it => it.holdingType == HoldingType.UST))
                     holding.displayText = await FetchIbGatewayBondDisplayText(holding.code) ?? holding.displayText;
 
                 return wrapper.Holdings;
@@ -910,11 +912,11 @@ namespace MyBook
 
             private Holding? CreateHolding(Contract contract, double pos, double avgCost)
             {
-                var stockType = GetStockType(contract);
-                if (stockType is null)
+                var holdingType = GetHoldingType(contract);
+                if (holdingType is null)
                     return null;
 
-                var code = GetStockCode(contract, stockType.Value);
+                var code = GetStockCode(contract, holdingType.Value);
                 if (String.IsNullOrWhiteSpace(code))
                     return null;
 
@@ -924,7 +926,7 @@ namespace MyBook
                 var exchange = !String.IsNullOrWhiteSpace(contract.PrimaryExch)
                     ? contract.PrimaryExch
                     : contract.Exchange;
-                var displayText = stockType.Value == StockType.UST
+                var displayText = holdingType.Value == HoldingType.UST
                     ? FirstNonBlank(contract.LocalSymbol, contract.Symbol, code)
                     : code;
 
@@ -933,7 +935,7 @@ namespace MyBook
                     Account = account,
                     _account_Id = account.Id > 0 ? account.Id : null,
                     code = code,
-                    stockType = stockType.Value,
+                    holdingType = holdingType.Value,
                     quantity = ToHoldingQuantity(pos),
                     desc = $"IB Gateway {contract.SecType} {exchange} avgCost={avgCost.ToString(CultureInfo.InvariantCulture)}",
                     displayText = displayText,
@@ -950,24 +952,24 @@ namespace MyBook
                 return checked((int)rounded);
             }
 
-            private static StockType? GetStockType(Contract contract)
+            private static HoldingType? GetHoldingType(Contract contract)
             {
                 if (String.Equals(contract.SecType, "BOND", StringComparison.OrdinalIgnoreCase))
-                    return StockType.UST;
+                    return HoldingType.UST;
 
                 if (!String.Equals(contract.SecType, "STK", StringComparison.OrdinalIgnoreCase))
                     return null;
 
                 var exchange = $"{contract.PrimaryExch} {contract.Exchange}";
                 if (exchange.Contains("ARCA", StringComparison.OrdinalIgnoreCase))
-                    return StockType.ARCA;
+                    return HoldingType.ARCA;
 
-                return StockType.NASDAQ;
+                return HoldingType.NASDAQ;
             }
 
-            private static string GetStockCode(Contract contract, StockType stockType)
+            private static string GetStockCode(Contract contract, HoldingType holdingType)
             {
-                if (stockType == StockType.UST)
+                if (holdingType == HoldingType.UST)
                 {
                     if (contract.ConId > 0)
                         return contract.ConId.ToString(CultureInfo.InvariantCulture);

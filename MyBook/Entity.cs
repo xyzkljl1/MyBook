@@ -21,7 +21,7 @@ namespace MyBook
         {
         }
     }
-    public enum StockType
+    public enum HoldingType
     {
         // 纳斯达克交易所上市资产。
         NASDAQ,
@@ -34,12 +34,14 @@ namespace MyBook
         // 国内基金。
         CNFUND,
         // 现金类持仓。
-        Cash
+        Cash,
+        // 应计、待结算、或还未实际入账但已计入账户净资产的项目。
+        Accrued
     };
 
-    // 账户持有的股票、现金或其它类型资产，使用 code + stockType 区分具体资产。
-    // currentPrice 表示账单/报表导入时记录的价格；现金持仓的 quantity 固定为 1，currentPrice 表示现金余额。
-    [SugarIndex("unique_Holdings_account_code_type", nameof(Holding._account_Id), OrderByType.Asc, nameof(Holding.code), OrderByType.Asc, nameof(Holding.stockType), OrderByType.Asc, true)]
+    // 账户持有的股票、债券、现金、应计项目或其它资产，使用 code + holdingType 区分具体资产。
+    // currentPrice 表示账单/报表导入时记录的价格；单值资产的 quantity 固定为 1，currentPrice 表示该项总额。
+    [SugarIndex("unique_Holdings_account_code_holding_type", nameof(Holding._account_Id), OrderByType.Asc, nameof(Holding.code), OrderByType.Asc, nameof(Holding.holdingType), OrderByType.Asc, true)]
     [SugarTable("Holdings")]
     public class Holding
     {
@@ -52,14 +54,14 @@ namespace MyBook
         [SugarColumn(DefaultValue = "''")]
         public string code { get; set; } = "";
 
-        [SugarColumn(DefaultValue = "NASDAQ", ColumnDataType = MySqlEnumColumnTypes.StockType, SqlParameterDbType = typeof(EnumToStringConvert))]
-        public StockType stockType { get; set; } = StockType.NASDAQ;
+        [SugarColumn(DefaultValue = "NASDAQ", ColumnDataType = MySqlEnumColumnTypes.HoldingType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public HoldingType holdingType { get; set; } = HoldingType.NASDAQ;
 
         [SugarColumn(DefaultValue = "0")]
         public int quantity
         {
-            get => stockType == StockType.Cash ? 1 : _quantity;
-            set => _quantity = stockType == StockType.Cash ? 1 : value;
+            get => IsSingleValueAsset(holdingType) ? 1 : _quantity;
+            set => _quantity = IsSingleValueAsset(holdingType) ? 1 : value;
         }
 
         [SugarColumn(DefaultValue = "''")]
@@ -76,7 +78,7 @@ namespace MyBook
             get { return new Currency(_currentPrice_v, _currentPrice_t); }
             set
             {
-                _currentPrice_v = stockType == StockType.Cash ? Currency.RoundMoney(value.v) : value.v;
+                _currentPrice_v = IsSingleValueAsset(holdingType) ? Currency.RoundMoney(value.v) : value.v;
                 _currentPrice_t = value.t;
             }
         }
@@ -91,10 +93,15 @@ namespace MyBook
         {
         }
 
-        public Holding(string _c, StockType _t)
+        public Holding(string _c, HoldingType _t)
         {
             code = _c;
-            stockType = _t;
+            holdingType = _t;
+        }
+
+        public static bool IsSingleValueAsset(HoldingType holdingType)
+        {
+            return holdingType is HoldingType.Cash or HoldingType.Accrued;
         }
 
         // 用于存储
@@ -111,7 +118,7 @@ namespace MyBook
     }
 
     // 从互联网获取的最新股票价格或汇率，不关联 Account。
-    [SugarIndex("unique_Finance_code_type", nameof(Finance.code), OrderByType.Asc, nameof(Finance.stockType), OrderByType.Asc, true)]
+    [SugarIndex("unique_Finance_code_holding_type", nameof(Finance.code), OrderByType.Asc, nameof(Finance.holdingType), OrderByType.Asc, true)]
     [SugarTable("Finance")]
     public class Finance
     {
@@ -121,8 +128,8 @@ namespace MyBook
         [SugarColumn(DefaultValue = "''")]
         public string code { get; set; } = "";
 
-        [SugarColumn(DefaultValue = "NASDAQ", ColumnDataType = MySqlEnumColumnTypes.StockType, SqlParameterDbType = typeof(EnumToStringConvert))]
-        public StockType stockType { get; set; } = StockType.NASDAQ;
+        [SugarColumn(DefaultValue = "NASDAQ", ColumnDataType = MySqlEnumColumnTypes.HoldingType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public HoldingType holdingType { get; set; } = HoldingType.NASDAQ;
 
         [SugarColumn(IsIgnore = true)]
         public Currency currentPrice
@@ -142,18 +149,18 @@ namespace MyBook
         {
         }
 
-        public Finance(string _c, StockType _t)
+        public Finance(string _c, HoldingType _t)
         {
             code = _c;
-            stockType = _t;
+            holdingType = _t;
         }
 
         public static Finance FromHolding(Holding holding)
         {
-            var code = holding.stockType == StockType.Cash
+            var code = holding.holdingType == HoldingType.Cash
                 ? holding.currentPrice.t.ToString()
                 : holding.code;
-            return new Finance(code, holding.stockType);
+            return new Finance(code, holding.holdingType);
         }
 
         // 用于存储
@@ -168,7 +175,7 @@ namespace MyBook
     static class MySqlEnumColumnTypes
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
-        public const string StockType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash')";
+        public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued')";
         public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','Manual')";
     }
 
@@ -226,6 +233,20 @@ namespace MyBook
     [SugarTable("Records")]
     public class Record : Currency // 收支记录
     {
+        [SugarColumn(ColumnName = "_Currency_v", DefaultValue = "0")]
+        public new decimal v
+        {
+            get => base.v;
+            set => base.v = value;
+        }
+
+        [SugarColumn(ColumnName = "_Currency_t", DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public new CurrencyType t
+        {
+            get => base.t;
+            set => base.t = value;
+        }
+
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
 
@@ -240,6 +261,10 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "0")]
         public bool isInternal { get; set; } = false; // 是否自己账户间的交易
+
+        [SugarColumn(DefaultValue = "0")]
+        public int HoldingQuantity { get; set; } = 0; // 交易涉及的持仓数量，非持仓交易为 0。
+
         public DateTime date { get; set; } // 发生时间
         public DateTime updateTime { get; set; }
         // 表面交易金额，区别于记账金额，极少使用

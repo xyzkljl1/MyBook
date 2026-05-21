@@ -26,15 +26,15 @@ namespace MyBook
             "外汇"
         };
 
-        private static readonly Dictionary<string, StockType> IBKRFallbackStockTypes = new(StringComparer.OrdinalIgnoreCase)
+        private static readonly Dictionary<string, HoldingType> IBKRFallbackHoldingTypes = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["DIA"] = StockType.ARCA,
-            ["NVDL"] = StockType.NASDAQ,
-            ["NVDA"] = StockType.NASDAQ,
-            ["QQQ"] = StockType.NASDAQ,
-            ["SPY"] = StockType.ARCA,
-            ["TLT"] = StockType.NASDAQ,
-            ["TQQQ"] = StockType.NASDAQ,
+            ["DIA"] = HoldingType.ARCA,
+            ["NVDL"] = HoldingType.NASDAQ,
+            ["NVDA"] = HoldingType.NASDAQ,
+            ["QQQ"] = HoldingType.NASDAQ,
+            ["SPY"] = HoldingType.ARCA,
+            ["TLT"] = HoldingType.NASDAQ,
+            ["TQQQ"] = HoldingType.NASDAQ,
         };
 
         public void DebugFetchLocalIBKRReports()
@@ -283,17 +283,17 @@ namespace MyBook
 
                     if (currentGroup == "股票")
                     {
-                        var stockType = ParseIBKRStockType(row.Count > 5 ? row[5] : "");
+                        var holdingType = ParseIBKRHoldingType(row.Count > 5 ? row[5] : "");
                         AddIBKRContractInfo(
                             contracts,
-                            new IBKRContractInfo(row[0], row[1], stockType, row[0]));
+                            new IBKRContractInfo(row[0], row[1], holdingType, row[0]));
                     }
                     else if (currentGroup == "债券")
                     {
                         var issuer = row.Count > 8 ? row[8] : "";
                         AddIBKRContractInfo(
                             contracts,
-                            new IBKRContractInfo(row[0], row[1], StockType.UST, NormalizeIBKRBondDisplayText(row[0], issuer)));
+                            new IBKRContractInfo(row[0], row[1], HoldingType.UST, NormalizeIBKRBondDisplayText(row[0], issuer)));
                     }
                     else if (!String.IsNullOrWhiteSpace(currentGroup))
                     {
@@ -401,7 +401,7 @@ namespace MyBook
                 var commission = ParseIBKRDecimalAt(row, commissionColumn, "MTM commission");
                 var other = ParseIBKRDecimalAt(row, otherColumn, "MTM other");
                 var contract = ResolveIBKRContract(row[0], currentGroup, contractInfos);
-                var displayText = contract.DisplayText;
+                var code = contract.Code;
 
                 holdingTotal += holding;
                 transactionTotal += transaction;
@@ -409,14 +409,14 @@ namespace MyBook
                 otherTotal += other;
                 builder.Add(
                     new Currency(holding, currentCurrency),
-                    $"IBKR持仓价格变动:{displayText}",
+                    "持仓价格变动",
                     $"MTM/{String.Join(",", row)}",
-                    destAccount: displayText);
+                    destAccount: code);
                 builder.Add(
                     new Currency(transaction, currentCurrency),
-                    $"IBKR交易价格影响:{displayText}",
+                    "交易价格影响",
                     $"MTM/{String.Join(",", row)}",
-                    destAccount: displayText);
+                    destAccount: code);
             }
 
             return new IBKRMtmTotals(true, holdingTotal, transactionTotal, commissionTotal, otherTotal);
@@ -461,9 +461,10 @@ namespace MyBook
                 }
 
                 var contract = ResolveIBKRContract(row[0], currentGroup, contractInfos);
-                var displayText = contract.DisplayText;
+                var code = contract.Code;
                 var tradeTime = ParseIBKRDateTime(row[1]);
-                var quantity = ParseIBKRDecimalAt(row, 2, "transaction quantity");
+                var rawQuantity = ParseIBKRIntegerQuantityAt(row, 2, "transaction quantity");
+                var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity);
                 var proceeds = ParseIBKRDecimalAt(row, 5, "transaction proceeds");
                 var commission = ParseIBKRDecimalAt(row, 6, "transaction commission");
                 var mtm = ParseIBKRDecimalAt(row, 9, "transaction MTM");
@@ -477,21 +478,23 @@ namespace MyBook
 
                 builder.Add(
                     new Currency(proceeds, currentCurrency),
-                    $"{(quantity < 0 ? "IBKR卖出" : "IBKR买入")}:{displayText}",
+                    quantity < 0 ? "卖出" : "买入",
                     $"Transactions/{String.Join(",", row)}",
                     isInternal: true,
                     affectsNetAsset: false,
                     date: tradeTime,
-                    destAccount: displayText);
+                    destAccount: code,
+                    holdingQuantity: quantity);
 
                 if (recordTransactionMtm)
                 {
                     builder.Add(
                         new Currency(mtm, currentCurrency),
-                        $"IBKR交易价格影响:{displayText}",
+                        "交易价格影响",
                         $"Transactions/{String.Join(",", row)}",
                         date: tradeTime,
-                        destAccount: displayText);
+                        destAccount: code,
+                        holdingQuantity: quantity);
                 }
             }
 
@@ -536,9 +539,9 @@ namespace MyBook
                 commissionTotal += commission;
                 builder.Add(
                     new Currency(commission, currentCurrency),
-                    $"IBKR佣金:{contract.DisplayText}",
+                    "佣金",
                     $"Commission/{String.Join(",", row)}",
-                    destAccount: contract.DisplayText);
+                    destAccount: contract.Code);
             }
 
             return new IBKRCommissionTotals(true, commissionTotal);
@@ -574,9 +577,10 @@ namespace MyBook
                 total += amount;
                 builder.Add(
                     new Currency(amount, currentCurrency),
-                    $"IBKR利息:{row[1]}",
+                    $"利息:{row[1]}",
                     $"Interest/{String.Join(",", row)}",
-                    date: ParseIBKRDate(row[0]));
+                    date: ParseIBKRDate(row[0]),
+                    destAccount: currentCurrency.ToString());
             }
 
             return new IBKRInterestTotals(true, total);
@@ -610,8 +614,9 @@ namespace MyBook
                 total += amount;
                 builder.Add(
                     new Currency(amount, baseCurrency),
-                    $"IBKR{label}",
-                    $"InterestAccruals/{String.Join(",", row)}");
+                    label,
+                    $"InterestAccruals/{String.Join(",", row)}",
+                    destAccount: "ACCRUED_INTEREST");
             }
 
             return total;
@@ -664,19 +669,19 @@ namespace MyBook
                 total += net;
                 builder.Add(
                     new Currency(gross, currentCurrency),
-                    $"IBKR应计股息:{row[0]}",
+                    "应计股息",
                     $"DividendAccrual/{String.Join(",", row)}",
                     date: ParseIBKRDate(row[1]),
                     destAccount: row[0]);
                 builder.Add(
                     new Currency(-tax, currentCurrency),
-                    $"IBKR应计股息税:{row[0]}",
+                    "应计股息税",
                     $"DividendAccrual/{String.Join(",", row)}",
                     date: ParseIBKRDate(row[1]),
                     destAccount: row[0]);
                 builder.Add(
                     new Currency(-fee, currentCurrency),
-                    $"IBKR应计股息费用:{row[0]}",
+                    "应计股息费用",
                     $"DividendAccrual/{String.Join(",", row)}",
                     date: ParseIBKRDate(row[1]),
                     destAccount: row[0]);
@@ -695,6 +700,7 @@ namespace MyBook
             if (rows.Count == 0)
                 return 0;
 
+            var quantityColumn = FindIBKRGroupedColumn(rows, "数量", "当前");
             var currentValueColumn = FindIBKRGroupedColumn(rows, "市场价值", "当前");
             var totalMtmColumn = FindIBKRGroupedColumn(rows, "以市值计的盈亏", "总数");
             var currentGroup = "";
@@ -728,14 +734,17 @@ namespace MyBook
                 if (action == "转账")
                 {
                     var contract = ResolveIBKRContract(row[0], currentGroup, contractInfos);
+                    var rawQuantity = ParseIBKRIntegerQuantityAt(row, quantityColumn, "position transfer quantity");
+                    var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity);
                     total += currentValue;
                     builder.Add(
                         new Currency(currentValue, currentCurrency),
-                        $"IBKR持仓转账:{contract.DisplayText}",
+                        "持仓转账",
                         $"PositionTransfer/{String.Join(",", row)}",
                         isInternal: true,
                         date: detailDate,
-                        destAccount: contract.DisplayText);
+                        destAccount: contract.Code,
+                        holdingQuantity: quantity);
                     continue;
                 }
 
@@ -776,7 +785,7 @@ namespace MyBook
                     case "佣金":
                         commission += amount;
                         if (!commissionTotals.HasData)
-                            builder.Add(new Currency(amount, baseCurrency), "IBKR佣金", $"CashReport/{String.Join(",", row)}");
+                            builder.Add(new Currency(amount, baseCurrency), "佣金", $"CashReport/{String.Join(",", row)}", destAccount: baseCurrency.ToString());
                         break;
                     case "交易（买入）":
                         tradeBuy += amount;
@@ -784,10 +793,11 @@ namespace MyBook
                         {
                             builder.Add(
                                 new Currency(amount, baseCurrency),
-                                "IBKR交易买入现金",
+                                "交易买入现金",
                                 $"CashReport/{String.Join(",", row)}",
                                 isInternal: true,
-                                affectsNetAsset: false);
+                                affectsNetAsset: false,
+                                destAccount: baseCurrency.ToString());
                         }
                         break;
                     case "交易（卖出）":
@@ -796,17 +806,18 @@ namespace MyBook
                         {
                             builder.Add(
                                 new Currency(amount, baseCurrency),
-                                "IBKR交易卖出现金",
+                                "交易卖出现金",
                                 $"CashReport/{String.Join(",", row)}",
                                 isInternal: true,
-                                affectsNetAsset: false);
+                                affectsNetAsset: false,
+                                destAccount: baseCurrency.ToString());
                         }
                         break;
                     case "支付和收到的经纪商利息":
                     case "支付和收到的债券利息":
                         interest += amount;
                         if (!interestTotals.HasData)
-                            builder.Add(new Currency(amount, baseCurrency), $"IBKR{label}", $"CashReport/{String.Join(",", row)}");
+                            builder.Add(new Currency(amount, baseCurrency), label, $"CashReport/{String.Join(",", row)}", destAccount: baseCurrency.ToString());
                         break;
                     case "存款":
                     case "取款":
@@ -815,15 +826,16 @@ namespace MyBook
                     case "内部转账":
                         builder.Add(
                             new Currency(amount, baseCurrency),
-                            $"IBKR{label}",
+                            label,
                             $"CashReport/{String.Join(",", row)}",
-                            isInternal: true);
+                            isInternal: true,
+                            destAccount: baseCurrency.ToString());
                         break;
                     case "股息":
                     case "代替股息的支付":
                     case "代扣税款":
                     case "现金外汇换算收益/损失":
-                        builder.Add(new Currency(amount, baseCurrency), $"IBKR{label}", $"CashReport/{String.Join(",", row)}");
+                        builder.Add(new Currency(amount, baseCurrency), label, $"CashReport/{String.Join(",", row)}", destAccount: baseCurrency.ToString());
                         break;
                     default:
                         if (amount != 0)
@@ -863,16 +875,59 @@ namespace MyBook
                 AddIBKRHolding(holdings, seen, holding);
 
             var cash = RoundIBKRMoney(ParseIBKREndingCash(doc));
-            AddIBKRHolding(holdings, seen, new Holding(baseCurrency.ToString(), StockType.Cash)
+            AddIBKRHolding(holdings, seen, new Holding(baseCurrency.ToString(), HoldingType.Cash)
             {
                 Account = account,
                 desc = $"IBKR cash {baseCurrency}",
                 displayText = baseCurrency.ToString(),
                 currentPrice = new Currency(cash, baseCurrency)
             });
+            foreach (var holding in ParseIBKRNavAdjustmentHoldings(doc, account, baseCurrency))
+                AddIBKRHolding(holdings, seen, holding);
 
             if (holdings.Count == 0)
                 throw new MailParseException($"Parse IBKR Report Fail, Missing Holdings: {sourceName}");
+
+            return holdings;
+        }
+
+        private static List<Holding> ParseIBKRNavAdjustmentHoldings(
+            HtmlDocument doc,
+            Account account,
+            CurrencyType baseCurrency)
+        {
+            var rows = ReadIBKRSectionFirstTableRows(doc, "tblNAV_");
+            var holdings = new List<Holding>();
+            foreach (var row in rows)
+            {
+                if (IsIBKRBlankRow(row) || IsIBKRHeaderRow(row) || IsIBKRTotalRow(row) || row.Count <= 4)
+                    continue;
+
+                var component = row[0];
+                if (component is "现金" or "股票" or "债券")
+                    continue;
+
+                if (!TryParseIBKRDecimal(row[4], out var parsedAmount))
+                    continue;
+
+                var amount = RoundIBKRMoney(parsedAmount);
+                if (amount == 0)
+                    continue;
+
+                var (code, holdingType) = component switch
+                {
+                    "应计利息" => ("ACCRUED_INTEREST", HoldingType.Accrued),
+                    "应计股息" => ("ACCRUED_DIVIDEND", HoldingType.Accrued),
+                    _ => throw new MailParseException($"Parse IBKR Report Fail, Unknown NAV Component: {component}/{amount}")
+                };
+                holdings.Add(new Holding(code, holdingType)
+                {
+                    Account = account,
+                    desc = $"IBKR NAV {component}",
+                    displayText = component,
+                    currentPrice = new Currency(amount, baseCurrency)
+                });
+            }
 
             return holdings;
         }
@@ -891,6 +946,7 @@ namespace MyBook
             var quantityColumn = FindIBKRGroupedColumn(rows, "数量", "当前");
             var currentPriceColumn = FindIBKRGroupedColumn(rows, "价格", "当前");
             var currentValueColumn = FindIBKRGroupedColumn(rows, "市场价值", "当前");
+            var precisePrices = ParseIBKRPreciseHoldingPrices(doc, contractInfos);
             var currentGroup = "";
             var currentCurrency = baseCurrency;
             foreach (var row in rows)
@@ -926,10 +982,57 @@ namespace MyBook
                 var currentPrice = ParseIBKRDecimalAt(row, currentPriceColumn, "holding price");
                 var currentValue = ParseIBKRDecimalAt(row, currentValueColumn, "holding value");
                 var contract = ResolveIBKRContract(row[0], currentGroup, contractInfos);
+                if (precisePrices.TryGetValue(GetIBKRHoldingKey(contract), out var precisePrice))
+                {
+                    currentPriceText = precisePrice.PriceText;
+                    currentPrice = precisePrice.Price;
+                }
                 holdings.Add(CreateIBKRHolding(account, contract, quantity, currentPrice, currentPriceText, currentValue, currentCurrency, row.Count > 1 ? row[1] : ""));
             }
 
             return holdings;
+        }
+
+        private Dictionary<string, IBKRPreciseHoldingPrice> ParseIBKRPreciseHoldingPrices(
+            HtmlDocument doc,
+            Dictionary<string, IBKRContractInfo> contractInfos)
+        {
+            var rows = ReadIBKRSectionFirstTableRows(doc, "tblMtmPerfSumByUnderlying_");
+            var prices = new Dictionary<string, IBKRPreciseHoldingPrice>(StringComparer.OrdinalIgnoreCase);
+            if (rows.Count == 0)
+                return prices;
+
+            var currentPriceColumn = FindIBKRGroupedColumn(rows, "价格", "当前");
+            var currentGroup = "";
+            foreach (var row in rows)
+            {
+                if (IsIBKRBlankRow(row) || IsIBKRHeaderRow(row) || IsIBKRTotalRow(row))
+                    continue;
+
+                if (TryReadIBKRSingleValue(row, out var singleValue))
+                {
+                    if (IBKRAssetGroups.Contains(singleValue))
+                    {
+                        currentGroup = singleValue;
+                        continue;
+                    }
+
+                    if (TryParseIBKRCurrencyType(singleValue, out _))
+                        continue;
+                }
+
+                if (currentGroup != "股票" && currentGroup != "债券")
+                    continue;
+
+                var priceText = row[currentPriceColumn];
+                if (!TryParseIBKRDecimal(priceText, out var price))
+                    continue;
+
+                var contract = ResolveIBKRContract(row[0], currentGroup, contractInfos);
+                prices[GetIBKRHoldingKey(contract)] = new IBKRPreciseHoldingPrice(price, priceText);
+            }
+
+            return prices;
         }
 
         private List<Holding> ParseIBKROpenPositionHoldings(
@@ -989,12 +1092,14 @@ namespace MyBook
             CurrencyType currency,
             string rowDescription)
         {
-            var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity, statementPrice, currentValue);
+            var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity);
             var currentPrice = RoundIBKRUnitPrice(statementPrice, GetIBKRUnitPriceDecimals(contract, statementPriceText));
             var roundedCurrentValue = RoundIBKRMoney(currentValue);
+            if (!IsIBKRMoneyEqual(roundedCurrentValue, quantity * currentPrice) && quantity != 0)
+                currentPrice = RoundIBKRUnitPrice(currentValue / quantity, 7);
             AssertIBKRMoneyEquals(roundedCurrentValue, quantity * currentPrice, $"IBKR holding value {contract.Code}");
             var description = String.IsNullOrWhiteSpace(rowDescription) ? contract.Description : rowDescription;
-            return new Holding(contract.Code, contract.StockType)
+            return new Holding(contract.Code, contract.HoldingType)
             {
                 Account = account,
                 quantity = quantity,
@@ -1007,10 +1112,10 @@ namespace MyBook
         private static int GetIBKRUnitPriceDecimals(IBKRContractInfo contract, string statementPriceText)
         {
             var statementDecimals = CountIBKRSignificantDecimalPlaces(statementPriceText);
-            var minimumDecimals = contract.StockType switch
+            var minimumDecimals = contract.HoldingType switch
             {
-                StockType.UST => 6,
-                StockType.NASDAQ or StockType.ARCA => 2,
+                HoldingType.UST => 6,
+                HoldingType.NASDAQ or HoldingType.ARCA => 2,
                 _ => 2
             };
             return Math.Min(7, Math.Max(minimumDecimals, statementDecimals));
@@ -1034,13 +1139,9 @@ namespace MyBook
             return new String(decimals).TrimEnd('0').Length;
         }
 
-        private static int NormalizeIBKRHoldingQuantity(
-            IBKRContractInfo contract,
-            int rawQuantity,
-            decimal statementPrice,
-            decimal currentValue)
+        private static int NormalizeIBKRHoldingQuantity(IBKRContractInfo contract, int rawQuantity)
         {
-            if (contract.StockType == StockType.UST)
+            if (contract.HoldingType == HoldingType.UST)
             {
                 if (rawQuantity % 100 != 0)
                     throw new MailParseException($"Parse IBKR Report Fail, Invalid UST Quantity: {contract.Code}/{rawQuantity}");
@@ -1054,10 +1155,20 @@ namespace MyBook
 
         private static void AddIBKRHolding(List<Holding> holdings, HashSet<string> seen, Holding holding)
         {
-            var key = $"{holding.code}\t{holding.stockType}";
+            var key = GetIBKRHoldingKey(holding);
             if (!seen.Add(key))
-                throw new MailParseException($"Parse IBKR Report Fail, Duplicate Holding: {holding.code}/{holding.stockType}");
+                throw new MailParseException($"Parse IBKR Report Fail, Duplicate Holding: {holding.code}/{holding.holdingType}");
             holdings.Add(holding);
+        }
+
+        private static string GetIBKRHoldingKey(Holding holding)
+        {
+            return $"{holding.code}\t{holding.holdingType}";
+        }
+
+        private static string GetIBKRHoldingKey(IBKRContractInfo contract)
+        {
+            return $"{contract.Code}\t{contract.HoldingType}";
         }
 
         private static IBKRContractInfo ResolveIBKRContract(
@@ -1072,21 +1183,21 @@ namespace MyBook
             if (group == "债券")
             {
                 var matchedBond = contractInfos.Values
-                    .Where(item => item.StockType == StockType.UST && code.Contains(item.Code, StringComparison.OrdinalIgnoreCase))
+                    .Where(item => item.HoldingType == HoldingType.UST && code.Contains(item.Code, StringComparison.OrdinalIgnoreCase))
                     .OrderByDescending(item => item.Code.Length)
                     .FirstOrDefault();
                 if (matchedBond is not null)
                     return matchedBond;
 
                 var normalizedBondCode = ExtractIBKRBondCode(code);
-                return new IBKRContractInfo(normalizedBondCode, normalizedBondCode, StockType.UST, NormalizeIBKRBondDisplayText(normalizedBondCode, ""));
+                return new IBKRContractInfo(normalizedBondCode, normalizedBondCode, HoldingType.UST, NormalizeIBKRBondDisplayText(normalizedBondCode, ""));
             }
 
-            if (group == "股票" && IBKRFallbackStockTypes.TryGetValue(code, out var stockType))
-                return new IBKRContractInfo(code, code, stockType, code);
+            if (group == "股票" && IBKRFallbackHoldingTypes.TryGetValue(code, out var holdingType))
+                return new IBKRContractInfo(code, code, holdingType, code);
 
             if (group == "外汇" && TryParseIBKRCurrencyType(code, out _))
-                return new IBKRContractInfo(code, code, StockType.Cash, code);
+                return new IBKRContractInfo(code, code, HoldingType.Cash, code);
 
             throw new MailParseException($"Parse IBKR Report Fail, Unknown Contract: {rawCode}/{group}");
         }
@@ -1109,15 +1220,15 @@ namespace MyBook
             return normalizedCode;
         }
 
-        private static StockType ParseIBKRStockType(string exchange)
+        private static HoldingType ParseIBKRHoldingType(string exchange)
         {
             return exchange.Trim().ToUpperInvariant() switch
             {
-                "NASDAQ" => StockType.NASDAQ,
-                "ISLAND" => StockType.NASDAQ,
-                "ARCA" => StockType.ARCA,
-                "NYSEARCA" => StockType.ARCA,
-                "NYSE ARCA" => StockType.ARCA,
+                "NASDAQ" => HoldingType.NASDAQ,
+                "ISLAND" => HoldingType.NASDAQ,
+                "ARCA" => HoldingType.ARCA,
+                "NYSEARCA" => HoldingType.ARCA,
+                "NYSE ARCA" => HoldingType.ARCA,
                 _ => throw new MailParseException($"Parse IBKR Report Fail, Unknown Stock Exchange: {exchange}")
             };
         }
@@ -1439,8 +1550,13 @@ namespace MyBook
 
         private static void AssertIBKRMoneyEquals(decimal expected, decimal actual, string context)
         {
-            if (Decimal.Round(expected, 2) != Decimal.Round(actual, 2))
+            if (!IsIBKRMoneyEqual(expected, actual))
                 throw new MailParseException($"Parse IBKR Report Fail, {context} mismatch: expected {expected}, got {actual}");
+        }
+
+        private static bool IsIBKRMoneyEqual(decimal expected, decimal actual)
+        {
+            return RoundIBKRMoney(expected) == RoundIBKRMoney(actual);
         }
 
         private static decimal RoundIBKRMoney(decimal value)
@@ -1557,7 +1673,9 @@ namespace MyBook
             List<AccountBalance> AccountBalances,
             List<AccountBalance> BeginningAccountBalances);
 
-        private sealed record IBKRContractInfo(string Code, string Description, StockType StockType, string DisplayText);
+        private sealed record IBKRContractInfo(string Code, string Description, HoldingType HoldingType, string DisplayText);
+
+        private sealed record IBKRPreciseHoldingPrice(decimal Price, string PriceText);
 
         private sealed record IBKRMtmTotals(bool HasData, decimal Holding, decimal Transaction, decimal Commission, decimal Other);
 
@@ -1609,7 +1727,8 @@ namespace MyBook
                 bool isInternal = false,
                 bool affectsNetAsset = true,
                 DateTime? date = null,
-                string destAccount = "")
+                string destAccount = "",
+                int holdingQuantity = 0)
             {
                 amount = new Currency(RoundIBKRMoney(amount.v), amount.t);
                 if (amount.v == 0)
@@ -1624,6 +1743,7 @@ namespace MyBook
                     updateTime = DateTime.Now,
                     DestAccount = destAccount,
                     isInternal = isInternal,
+                    HoldingQuantity = holdingQuantity,
                     Source = LimitIBKRRecordText($"IBKR HTML {sourceName}/{source}"),
                     Reason = LimitIBKRRecordText(reason)
                 };

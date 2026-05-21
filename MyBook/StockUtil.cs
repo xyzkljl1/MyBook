@@ -27,28 +27,30 @@ namespace MyBook
         public async Task<Currency?> Fetch(Finance finance)
         {
             Currency? ret = null;
-            switch (finance.stockType)
+            switch (finance.holdingType)
             {
-                case StockType.NASDAQ:
+                case HoldingType.NASDAQ:
                     ret = new Currency(await FetchGoogleFinanceStock(finance.code, "NASDAQ"), CurrencyType.USD);
                     break;
-                case StockType.ARCA:
+                case HoldingType.ARCA:
                     ret = new Currency(await FetchGoogleFinanceStock(finance.code, "NYSEARCA"), CurrencyType.USD);
                     break;
-                case StockType.UST:
+                case HoldingType.UST:
                     Console.WriteLine("skip UST price: IB Gateway fetcher is marked Not used");
                     break;
-                case StockType.SHANGHAI:
+                case HoldingType.SHANGHAI:
                     ret = new Currency(await FetchShanghaiStock(finance.code), CurrencyType.RMB);
                     break;
-                case StockType.CNFUND:
+                case HoldingType.CNFUND:
                     ret = new Currency(await FetchCNFund(finance.code), CurrencyType.RMB);
                     break;
-                case StockType.Cash:
+                case HoldingType.Cash:
                     var currencyType = Enum.TryParse<CurrencyType>(finance.code, out var parsedCurrencyType)
                         ? parsedCurrencyType
                         : finance.currentPrice.t;
                     ret = await FetchCurrencyToRmb(currencyType);
+                    break;
+                case HoldingType.Accrued:
                     break;
             }
 

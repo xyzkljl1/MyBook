@@ -87,6 +87,7 @@ namespace MyBook
                     provider,
                     beginningAccountBalanceList,
                     ShouldValidateBeginningAccountBalances(provider));
+                ValidateRecordBalanceChanges(provider, recordList, beginningAccountBalanceList, accountBalanceList);
                 var statementImportId = InsertStatementImport(provider, time, statementKey);
                 SaveAccountBalancesCore(accountBalanceList);
                 SaveRecordsCore(recordList, statementImportId);
@@ -125,6 +126,7 @@ namespace MyBook
                         import.Provider,
                         import.BeginningAccountBalances,
                         shouldValidateBeginningBalances[import.Provider]);
+                    ValidateRecordBalanceChanges(import.Provider, import.Records, import.BeginningAccountBalances, import.AccountBalances);
                     var statementImportId = InsertStatementImport(import.Provider, import.Time, import.StatementKey);
                     SaveAccountBalancesCore(import.AccountBalances);
                     SaveAccountHoldingsCore(import.HoldingAccount, import.Holdings);
@@ -271,6 +273,72 @@ namespace MyBook
             }
         }
 
+        private void ValidateRecordBalanceChanges(
+            StatementImportProvider provider,
+            List<Record> records,
+            List<AccountBalance> beginningAccountBalances,
+            List<AccountBalance> endingAccountBalances)
+        {
+            if (beginningAccountBalances.Count == 0 || endingAccountBalances.Count == 0)
+                throw new InvalidOperationException($"Record balance validation requires beginning and ending account balances for {provider}.");
+
+            var beginningBalances = BuildAccountBalanceMap(beginningAccountBalances, "Beginning account balance");
+            var endingBalances = BuildAccountBalanceMap(endingAccountBalances, "Ending account balance");
+            var recordChanges = SumRecordAmountsByAccountAndCurrency(records);
+            var keys = beginningBalances.Keys
+                .Union(endingBalances.Keys)
+                .Union(recordChanges.Keys)
+                .ToList();
+
+            foreach (var key in keys)
+            {
+                var beginning = beginningBalances.TryGetValue(key, out var beginningValue) ? beginningValue : 0;
+                var ending = endingBalances.TryGetValue(key, out var endingValue) ? endingValue : 0;
+                var change = recordChanges.TryGetValue(key, out var changeValue) ? changeValue : 0;
+                var expectedEnding = Currency.RoundMoney(beginning + change);
+                if (expectedEnding != ending)
+                {
+                    throw new InvalidOperationException(
+                        $"Record balance mismatch for {provider}: accountId={key.AccountId}, currency={key.Currency}, beginning={beginning}, records={change}, ending={ending}");
+                }
+            }
+        }
+
+        public Dictionary<(int AccountId, CurrencyType Currency), decimal> SumRecordAmountsByAccountAndCurrency(IEnumerable<Record> records)
+        {
+            var sums = new Dictionary<(int AccountId, CurrencyType Currency), decimal>();
+            foreach (var record in records)
+            {
+                if (record.Account is null)
+                    throw new InvalidOperationException("Record account is required.");
+
+                var account = GetPostingAccount(record.Account);
+                var key = (account.Id, record.t);
+                sums[key] = sums.TryGetValue(key, out var current)
+                    ? current + record.v
+                    : record.v;
+            }
+
+            return sums.ToDictionary(item => item.Key, item => Currency.RoundMoney(item.Value));
+        }
+
+        private Dictionary<(int AccountId, CurrencyType Currency), decimal> BuildAccountBalanceMap(
+            List<AccountBalance> accountBalances,
+            string context)
+        {
+            var balances = new Dictionary<(int AccountId, CurrencyType Currency), decimal>();
+            foreach (var accountBalance in accountBalances)
+            {
+                if (accountBalance.Account is null)
+                    throw new InvalidOperationException($"{context} account is required.");
+
+                var account = GetPostingAccount(accountBalance.Account);
+                balances[(account.Id, accountBalance.t)] = Currency.RoundMoney(accountBalance.v);
+            }
+
+            return balances;
+        }
+
         private void SaveAccountBalancesCore(List<AccountBalance> accountBalances)
         {
             foreach (var accountBalance in accountBalances)
@@ -383,7 +451,7 @@ namespace MyBook
                 finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
 
             var existing = db.Queryable<Finance>()
-                .Where(it => it.code == finance.code && it.stockType == finance.stockType)
+                .Where(it => it.code == finance.code && it.holdingType == finance.holdingType)
                 .First();
             if (existing is null)
             {
@@ -496,7 +564,7 @@ namespace MyBook
 
         private static string GetHoldingKey(Holding holding)
         {
-            return $"{holding.code}\t{holding.stockType}";
+            return $"{holding.code}\t{holding.holdingType}";
         }
 
         private void SaveAccountHoldingsCore(Account account, List<Holding> holdingList)
@@ -527,7 +595,7 @@ namespace MyBook
             foreach (var holding in holdingList)
             {
                 var existing = existingHoldings.FirstOrDefault(it =>
-                    it.code == holding.code && it.stockType == holding.stockType);
+                    it.code == holding.code && it.holdingType == holding.holdingType);
                 if (existing is null)
                 {
                     db.Insertable(holding).ExecuteCommand();
@@ -546,7 +614,7 @@ namespace MyBook
 
         private static void NormalizeHolding(Holding holding)
         {
-            if (holding.stockType == StockType.Cash)
+            if (Holding.IsSingleValueAsset(holding.holdingType))
                 holding.quantity = 1;
         }
 
