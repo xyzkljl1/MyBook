@@ -43,36 +43,33 @@ namespace MyBook
                 ibGatewayPort = DefaultIbGatewayPort;
             this.database = database;
         }
-        public async Task<Currency?> Fetch(Stock stock)
+        public async Task<Currency?> Fetch(Holding holding)
         {
             Currency? ret = null;
-            switch(stock.stockType)
+            switch(holding.stockType)
             {
                 case StockType.NASDAQ:
-                    ret = new Currency(await FetchIbGatewayStock(stock.code, "NASDAQ"), CurrencyType.USD);
+                    ret = new Currency(await FetchIbGatewayStock(holding.code, "NASDAQ"), CurrencyType.USD);
                     break;
                 case StockType.ARCA:
-                    ret = new Currency(await FetchIbGatewayStock(stock.code, "ARCA"), CurrencyType.USD);
+                    ret = new Currency(await FetchIbGatewayStock(holding.code, "ARCA"), CurrencyType.USD);
                     break;
                 case StockType.UST:
-                    ret = new Currency(await FetchIbGatewayBond(stock.code), CurrencyType.USD);
+                    ret = new Currency(await FetchIbGatewayBond(holding.code), CurrencyType.USD);
                     break;
                 case StockType.SHANGHAI:
-                    ret = new Currency(await FetchShanghaiStock(stock.code), CurrencyType.RMB);
+                    ret = new Currency(await FetchShanghaiStock(holding.code), CurrencyType.RMB);
                     break;
                 case StockType.CNFUND:
-                    ret = new Currency(await FetchCNFund(stock.code), CurrencyType.RMB);
+                    ret = new Currency(await FetchCNFund(holding.code), CurrencyType.RMB);
                     break;
                 case StockType.Cash:
-                    ret = await FetchCurrencyToRmb(stock.currentPrice.t);
+                    ret = await FetchCurrencyToRmb(holding.currentPrice.t);
                     break;
             }
             ret = ret==null||ret.v < 0 ? null : ret;
             if (ret is not null)
-            {
-                stock.currentPrice = ret;
-                stock.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
-            }
+                holding.currentPrice = ret;
             return ret;
         }
         public Task<decimal> FetchIbGatewayStock(string code, string primaryExchange = "NASDAQ")
@@ -290,22 +287,22 @@ namespace MyBook
                     readerThread.Join(1000);
             }
         }
-        public async Task<List<Stock>> Fetch(Account account)
+        public async Task<List<Holding>> Fetch(Account account)
         {
             if (!account.name.Contains("IBKR", StringComparison.OrdinalIgnoreCase))
-                return new List<Stock>();
+                return new List<Holding>();
 
-            var stocks = await FetchIbGatewayPositions(account);
+            var holdings = await FetchIbGatewayPositions(account);
             if (database is null)
             {
                 Console.WriteLine("skip saving IB Gateway positions: database is not configured for StockUtil");
-                return stocks;
+                return holdings;
             }
 
-            database.SaveAccountStocks(account, stocks);
-            return stocks;
+            database.SaveAccountHoldings(account, holdings);
+            return holdings;
         }
-        private async Task<List<Stock>> FetchIbGatewayPositions(Account account)
+        private async Task<List<Holding>> FetchIbGatewayPositions(Account account)
         {
             var requestId = Interlocked.Increment(ref nextIbGatewayRequestId);
             var wrapper = new IbGatewayPositionsWrapper(account);
@@ -320,13 +317,13 @@ namespace MyBook
             catch (Exception e)
             {
                 Console.WriteLine($"fail to connect IB Gateway {IbGatewayHost}:{ibGatewayPort}: {e.Message}");
-                return new List<Stock>();
+                return new List<Holding>();
             }
 
             if (!client.IsConnected())
             {
                 Console.WriteLine($"fail to connect IB Gateway {IbGatewayHost}:{ibGatewayPort}");
-                return new List<Stock>();
+                return new List<Holding>();
             }
 
             try
@@ -349,7 +346,7 @@ namespace MyBook
                 if (readyTask != wrapper.ReadyTask)
                 {
                     Console.WriteLine($"fail to connect IB Gateway {IbGatewayHost}:{ibGatewayPort}: timeout waiting for API ready");
-                    return new List<Stock>();
+                    return new List<Holding>();
                 }
 
                 client.reqPositions();
@@ -357,15 +354,15 @@ namespace MyBook
                 if (completedTask != wrapper.PositionsTask)
                     Console.WriteLine("fail to fetch IB Gateway positions: timeout");
 
-                foreach (var stock in wrapper.Stocks.Where(it => it.stockType == StockType.UST))
-                    stock.displayText = await FetchIbGatewayBondDisplayText(stock.code) ?? stock.displayText;
+                foreach (var holding in wrapper.Holdings.Where(it => it.stockType == StockType.UST))
+                    holding.displayText = await FetchIbGatewayBondDisplayText(holding.code) ?? holding.displayText;
 
-                return wrapper.Stocks;
+                return wrapper.Holdings;
             }
             catch (Exception e)
             {
                 Console.WriteLine($"fail to fetch IB Gateway positions: {e.Message}");
-                return new List<Stock>();
+                return new List<Holding>();
             }
             finally
             {
@@ -843,7 +840,7 @@ namespace MyBook
             public Task<bool> ReadyTask => readyResult.Task;
             public Task<bool> PositionsTask => positionsResult.Task;
             public bool IsCompleted => positionsResult.Task.IsCompleted;
-            public List<Stock> Stocks { get; } = new();
+            public List<Holding> Holdings { get; } = new();
 
             public override void nextValidId(int orderId)
             {
@@ -860,9 +857,9 @@ namespace MyBook
                 if (pos == 0 || !ShouldUsePosition(ibAccount))
                     return;
 
-                var stock = CreateStock(contract, pos, avgCost);
-                if (stock is not null)
-                    Stocks.Add(stock);
+                var holding = CreateHolding(contract, pos, avgCost);
+                if (holding is not null)
+                    Holdings.Add(holding);
             }
 
             public override void positionEnd()
@@ -911,7 +908,7 @@ namespace MyBook
                 return !Regex.IsMatch(accountFilterText, @"\d{4,}");
             }
 
-            private Stock? CreateStock(Contract contract, double pos, double avgCost)
+            private Holding? CreateHolding(Contract contract, double pos, double avgCost)
             {
                 var stockType = GetStockType(contract);
                 if (stockType is null)
@@ -931,7 +928,7 @@ namespace MyBook
                     ? FirstNonBlank(contract.LocalSymbol, contract.Symbol, code)
                     : code;
 
-                return new Stock
+                return new Holding
                 {
                     Account = account,
                     _account_Id = account.Id > 0 ? account.Id : null,

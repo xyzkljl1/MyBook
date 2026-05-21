@@ -7,54 +7,66 @@ using System.Text;
 
 namespace MyBook
 {
-    // 持仓价格获取的调度入口与各来源共用的 HTTP 辅助逻辑。
+    // 最新行情/汇率获取的调度入口与各来源共用的 HTTP 辅助逻辑。
     partial class StockUtil
     {
+        private readonly DatabaseUtil? database;
+
         public StockUtil(IConfigurationRoot config, DatabaseUtil? database = null)
         {
             // 为了支持 gbk 编码。
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            this.database = database;
         }
 
-        public async Task<Currency?> Fetch(Stock stock)
+        public Task<Currency?> Fetch(Holding holding)
+        {
+            return Fetch(Finance.FromHolding(holding));
+        }
+
+        public async Task<Currency?> Fetch(Finance finance)
         {
             Currency? ret = null;
-            switch (stock.stockType)
+            switch (finance.stockType)
             {
                 case StockType.NASDAQ:
-                    ret = new Currency(await FetchGoogleFinanceStock(stock.code, "NASDAQ"), CurrencyType.USD);
+                    ret = new Currency(await FetchGoogleFinanceStock(finance.code, "NASDAQ"), CurrencyType.USD);
                     break;
                 case StockType.ARCA:
-                    ret = new Currency(await FetchGoogleFinanceStock(stock.code, "NYSEARCA"), CurrencyType.USD);
+                    ret = new Currency(await FetchGoogleFinanceStock(finance.code, "NYSEARCA"), CurrencyType.USD);
                     break;
                 case StockType.UST:
                     Console.WriteLine("skip UST price: IB Gateway fetcher is marked Not used");
                     break;
                 case StockType.SHANGHAI:
-                    ret = new Currency(await FetchShanghaiStock(stock.code), CurrencyType.RMB);
+                    ret = new Currency(await FetchShanghaiStock(finance.code), CurrencyType.RMB);
                     break;
                 case StockType.CNFUND:
-                    ret = new Currency(await FetchCNFund(stock.code), CurrencyType.RMB);
+                    ret = new Currency(await FetchCNFund(finance.code), CurrencyType.RMB);
                     break;
                 case StockType.Cash:
-                    ret = await FetchCurrencyToRmb(stock.currentPrice.t);
+                    var currencyType = Enum.TryParse<CurrencyType>(finance.code, out var parsedCurrencyType)
+                        ? parsedCurrencyType
+                        : finance.currentPrice.t;
+                    ret = await FetchCurrencyToRmb(currencyType);
                     break;
             }
 
             ret = ret is null || ret.v < 0 ? null : ret;
             if (ret is not null)
             {
-                stock.currentPrice = ret;
-                stock.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
+                finance.currentPrice = ret;
+                finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
+                database?.SaveFinance(finance);
             }
 
             return ret;
         }
 
-        public Task<List<Stock>> Fetch(Account account)
+        public Task<List<Holding>> Fetch(Account account)
         {
-            Console.WriteLine("skip account stock fetch: IB Gateway fetcher is marked Not used");
-            return Task.FromResult(new List<Stock>());
+            Console.WriteLine("skip account holding fetch: IB Gateway fetcher is marked Not used");
+            return Task.FromResult(new List<Holding>());
         }
 
         public async Task<JObject?> HttpGetJson(string url)

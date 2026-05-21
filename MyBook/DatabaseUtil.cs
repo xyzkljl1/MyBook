@@ -8,7 +8,7 @@ namespace MyBook
     {
         private const string DefaultConnectionString = "server=localhost;port=3306;database=mybook;uid=root;pwd=;charset=utf8mb4;";
         private readonly SqlSugarClient db;
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountBalance), typeof(Record), typeof(Stock), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(StatementImport)];
 
         public DatabaseUtil(IConfigurationRoot config)
         {
@@ -228,47 +228,49 @@ namespace MyBook
             }
         }
 
-        public void SaveAccountStocks(Account account, IEnumerable<Stock> stocks)
+        public void SaveAccountHoldings(Account account, IEnumerable<Holding> holdings)
         {
             account = GetAccountByName(account.name);
 
-            var stockList = stocks.ToList();
-            foreach (var stock in stockList)
+            var holdingList = holdings.ToList();
+            foreach (var holding in holdingList)
             {
-                stock.Account = account;
-                stock._account_Id = account.Id;
+                NormalizeHolding(holding);
+                holding.Account = account;
+                holding._account_Id = account.Id;
             }
 
             db.Ado.BeginTran();
             try
             {
-                var existingStocks = db.Queryable<Stock>()
+                var existingHoldings = db.Queryable<Holding>()
                     .Where(it => it._account_Id == account.Id &&
                         (it.stockType == StockType.NASDAQ || it.stockType == StockType.ARCA || it.stockType == StockType.UST))
                     .ToList();
-                var currentKeys = stockList.Select(GetStockKey)
+                var currentKeys = holdingList.Select(GetHoldingKey)
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var deletedIds = existingStocks
-                    .Where(stock => !currentKeys.Contains(GetStockKey(stock)))
-                    .Select(stock => stock.Id)
+                var deletedIds = existingHoldings
+                    .Where(holding => !currentKeys.Contains(GetHoldingKey(holding)))
+                    .Select(holding => holding.Id)
                     .ToList();
                 if (deletedIds.Count > 0)
-                    db.Deleteable<Stock>().In(deletedIds).ExecuteCommand();
+                    db.Deleteable<Holding>().In(deletedIds).ExecuteCommand();
 
-                foreach (var stock in stockList)
+                foreach (var holding in holdingList)
                 {
-                    var existing = existingStocks.FirstOrDefault(it =>
-                        it.code == stock.code && it.stockType == stock.stockType);
+                    var existing = existingHoldings.FirstOrDefault(it =>
+                        it.code == holding.code && it.stockType == holding.stockType);
                     if (existing is null)
                     {
-                        db.Insertable(stock).ExecuteCommand();
+                        db.Insertable(holding).ExecuteCommand();
                         continue;
                     }
 
-                    existing.quantity = stock.quantity;
-                    existing.desc = stock.desc;
-                    existing.displayText = stock.displayText;
-                    existing._currentPrice_t = stock._currentPrice_t;
+                    existing.quantity = holding.quantity;
+                    existing.desc = holding.desc;
+                    existing.displayText = holding.displayText;
+                    existing._currentPrice_v = holding._currentPrice_v;
+                    existing._currentPrice_t = holding._currentPrice_t;
                     existing._account_Id = account.Id;
                     db.Updateable(existing).ExecuteCommand();
                 }
@@ -282,11 +284,16 @@ namespace MyBook
             }
         }
 
-        public List<Stock> GetStocks()
+        public List<Holding> GetHoldings()
         {
-            return db.Queryable<Stock>()
+            return db.Queryable<Holding>()
                 .Includes(it => it.Account)
                 .ToList();
+        }
+
+        public List<Finance> GetFinances()
+        {
+            return db.Queryable<Finance>().ToList();
         }
 
         public DatabaseCleanupResult CleanVolatileData()
@@ -296,7 +303,8 @@ namespace MyBook
             try
             {
                 db.Deleteable<Record>().ExecuteCommand();
-                db.Deleteable<Stock>().ExecuteCommand();
+                db.Deleteable<Holding>().ExecuteCommand();
+                db.Deleteable<Finance>().ExecuteCommand();
                 db.Deleteable<AccountBalance>().ExecuteCommand();
                 db.Ado.ExecuteCommand("""
                     delete statementImport
@@ -336,22 +344,44 @@ namespace MyBook
                 ["AccountBalances"] = db.Queryable<AccountBalance>().Count(),
                 ["StatementImports"] = db.Queryable<StatementImport>().Count(),
                 ["Records"] = db.Queryable<Record>().Count(),
-                ["Stocks"] = db.Queryable<Stock>().Count()
+                ["Holdings"] = db.Queryable<Holding>().Count(),
+                ["Finance"] = db.Queryable<Finance>().Count()
             };
         }
 
-        public void SaveStock(Stock stock)
+        public void SaveHolding(Holding holding)
         {
-            if (stock.Account is not null)
-                stock._account_Id = GetExistingAccountByName(stock.Account).Id;
+            NormalizeHolding(holding);
+            if (holding.Account is not null)
+                holding._account_Id = GetExistingAccountByName(holding.Account).Id;
 
-            if (stock.Id <= 0)
+            if (holding.Id <= 0)
             {
-                stock.Id = db.Insertable(stock).ExecuteReturnIdentity();
+                holding.Id = db.Insertable(holding).ExecuteReturnIdentity();
                 return;
             }
 
-            db.Updateable(stock).ExecuteCommand();
+            db.Updateable(holding).ExecuteCommand();
+        }
+
+        public void SaveFinance(Finance finance)
+        {
+            if (finance.currentPriceTime <= 0)
+                finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
+
+            var existing = db.Queryable<Finance>()
+                .Where(it => it.code == finance.code && it.stockType == finance.stockType)
+                .First();
+            if (existing is null)
+            {
+                finance.Id = db.Insertable(finance).ExecuteReturnIdentity();
+                return;
+            }
+
+            existing._currentPrice_v = finance._currentPrice_v;
+            existing._currentPrice_t = finance._currentPrice_t;
+            existing.currentPriceTime = finance.currentPriceTime;
+            db.Updateable(existing).ExecuteCommand();
         }
 
         public static DateTime NormalizeStatementImportTime(DateTime time)
@@ -421,8 +451,10 @@ namespace MyBook
                 return "AccountBalances";
             if (type == typeof(Record))
                 return "Records";
-            if (type == typeof(Stock))
-                return "Stocks";
+            if (type == typeof(Holding))
+                return "Holdings";
+            if (type == typeof(Finance))
+                return "Finance";
             if (type == typeof(StatementImport))
                 return "StatementImports";
 
@@ -449,9 +481,15 @@ namespace MyBook
                 .Any(attribute => attribute.GetType().Name is "Navigate" or "NavigateAttribute");
         }
 
-        private static string GetStockKey(Stock stock)
+        private static string GetHoldingKey(Holding holding)
         {
-            return $"{stock.code}\t{stock.stockType}";
+            return $"{holding.code}\t{holding.stockType}";
+        }
+
+        private static void NormalizeHolding(Holding holding)
+        {
+            if (holding.stockType == StockType.Cash)
+                holding.quantity = 1;
         }
     }
 

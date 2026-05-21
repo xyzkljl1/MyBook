@@ -37,10 +37,11 @@ namespace MyBook
         Cash
     };
 
-    // 股票、基金、现金等持仓状态，使用 code + stockType 区分具体资产。
-    [SugarIndex("unique_Stocks_account_code_type", nameof(Stock._account_Id), OrderByType.Asc, nameof(Stock.code), OrderByType.Asc, nameof(Stock.stockType), OrderByType.Asc, true)]
-    [SugarTable("Stocks")]
-    public class Stock
+    // 账户持有的股票、现金或其它类型资产，使用 code + stockType 区分具体资产。
+    // currentPrice 表示账单/报表导入时记录的价格；现金持仓的 quantity 固定为 1，currentPrice 表示现金余额。
+    [SugarIndex("unique_Holdings_account_code_type", nameof(Holding._account_Id), OrderByType.Asc, nameof(Holding.code), OrderByType.Asc, nameof(Holding.stockType), OrderByType.Asc, true)]
+    [SugarTable("Holdings")]
+    public class Holding
     {
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
@@ -55,7 +56,11 @@ namespace MyBook
         public StockType stockType { get; set; } = StockType.NASDAQ;
 
         [SugarColumn(DefaultValue = "0")]
-        public decimal quantity { get; set; } = 0;
+        public decimal quantity
+        {
+            get => stockType == StockType.Cash ? 1 : _quantity;
+            set => _quantity = stockType == StockType.Cash ? 1 : value;
+        }
 
         [SugarColumn(DefaultValue = "''")]
         public string desc { get; set; } = "";
@@ -65,7 +70,7 @@ namespace MyBook
         public string displayText { get; set; } = "";
 
         [SugarColumn(IsIgnore = true)]
-        // 当前单价，金额和币种分别存储。
+        // 账单/报表导入时记录的价格，金额和币种分别存储。
         public Currency currentPrice
         {
             get { return new Currency(_currentPrice_v, _currentPrice_t); }
@@ -76,14 +81,17 @@ namespace MyBook
             }
         }
 
-        [SugarColumn(DefaultValue = "0")]
-        public long currentPriceTime { get; set; } = 0;
+        [SugarColumn(IsIgnore = true)]
+        public Currency totalPrice
+        {
+            get { return new Currency(quantity * currentPrice.v, currentPrice.t); }
+        }
 
-        public Stock()
+        public Holding()
         {
         }
 
-        public Stock(string _c, StockType _t)
+        public Holding(string _c, StockType _t)
         {
             code = _c;
             stockType = _t;
@@ -98,6 +106,62 @@ namespace MyBook
 
         [SugarColumn(IsNullable = true)]
         public int? _account_Id { get; set; }
+
+        private decimal _quantity = 0;
+    }
+
+    // 从互联网获取的最新股票价格或汇率，不关联 Account。
+    [SugarIndex("unique_Finance_code_type", nameof(Finance.code), OrderByType.Asc, nameof(Finance.stockType), OrderByType.Asc, true)]
+    [SugarTable("Finance")]
+    public class Finance
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [SugarColumn(DefaultValue = "''")]
+        public string code { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "NASDAQ", ColumnDataType = MySqlEnumColumnTypes.StockType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public StockType stockType { get; set; } = StockType.NASDAQ;
+
+        [SugarColumn(IsIgnore = true)]
+        public Currency currentPrice
+        {
+            get { return new Currency(_currentPrice_v, _currentPrice_t); }
+            set
+            {
+                _currentPrice_v = value.v;
+                _currentPrice_t = value.t;
+            }
+        }
+
+        [SugarColumn(DefaultValue = "0")]
+        public long currentPriceTime { get; set; } = 0;
+
+        public Finance()
+        {
+        }
+
+        public Finance(string _c, StockType _t)
+        {
+            code = _c;
+            stockType = _t;
+        }
+
+        public static Finance FromHolding(Holding holding)
+        {
+            var code = holding.stockType == StockType.Cash
+                ? holding.currentPrice.t.ToString()
+                : holding.code;
+            return new Finance(code, holding.stockType);
+        }
+
+        // 用于存储
+        [SugarColumn(DefaultValue = "0")]
+        public decimal _currentPrice_v { get; set; } = 0;
+
+        [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public CurrencyType _currentPrice_t { get; set; } = CurrencyType.RMB;
     }
 
     // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
