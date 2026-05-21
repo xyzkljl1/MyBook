@@ -76,7 +76,7 @@ namespace MyBook
             get { return new Currency(_currentPrice_v, _currentPrice_t); }
             set
             {
-                _currentPrice_v = value.v;
+                _currentPrice_v = stockType == StockType.Cash ? Currency.RoundMoney(value.v) : value.v;
                 _currentPrice_t = value.t;
             }
         }
@@ -84,7 +84,7 @@ namespace MyBook
         [SugarColumn(IsIgnore = true)]
         public Currency totalPrice
         {
-            get { return new Currency(quantity * currentPrice.v, currentPrice.t); }
+            get { return new Currency(Currency.RoundMoney(quantity * currentPrice.v), currentPrice.t); }
         }
 
         public Holding()
@@ -98,7 +98,7 @@ namespace MyBook
         }
 
         // 用于存储
-        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(18,6)")]
+        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(18,7)")]
         public decimal _currentPrice_v { get; set; } = 0;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -157,7 +157,7 @@ namespace MyBook
         }
 
         // 用于存储
-        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(18,6)")]
+        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(18,7)")]
         public decimal _currentPrice_v { get; set; } = 0;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -420,6 +420,11 @@ namespace MyBook
         {
             v = decimal.Parse(_v, NumberStyles.Currency);
             t = _t;
+        }
+
+        public static decimal RoundMoney(decimal value)
+        {
+            return Decimal.Round(value, 2, MidpointRounding.ToEven);
         }
     }
 }

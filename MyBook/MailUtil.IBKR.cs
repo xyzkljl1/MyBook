@@ -862,7 +862,7 @@ namespace MyBook
             foreach (var holding in parsedPositionHoldings)
                 AddIBKRHolding(holdings, seen, holding);
 
-            var cash = ParseIBKREndingCash(doc);
+            var cash = RoundIBKRMoney(ParseIBKREndingCash(doc));
             AddIBKRHolding(holdings, seen, new Holding(baseCurrency.ToString(), StockType.Cash)
             {
                 Account = account,
@@ -922,10 +922,11 @@ namespace MyBook
                 if (quantity == 0)
                     continue;
 
+                var currentPriceText = row[currentPriceColumn];
                 var currentPrice = ParseIBKRDecimalAt(row, currentPriceColumn, "holding price");
                 var currentValue = ParseIBKRDecimalAt(row, currentValueColumn, "holding value");
                 var contract = ResolveIBKRContract(row[0], currentGroup, contractInfos);
-                holdings.Add(CreateIBKRHolding(account, contract, quantity, currentPrice, currentValue, currentCurrency, row.Count > 1 ? row[1] : ""));
+                holdings.Add(CreateIBKRHolding(account, contract, quantity, currentPrice, currentPriceText, currentValue, currentCurrency, row.Count > 1 ? row[1] : ""));
             }
 
             return holdings;
@@ -968,10 +969,11 @@ namespace MyBook
                 if (quantity == 0)
                     continue;
 
+                var currentPriceText = row[5];
                 var currentPrice = ParseIBKRDecimalAt(row, 5, "holding price");
                 var currentValue = ParseIBKRDecimalAt(row, 6, "holding value");
                 var contract = ResolveIBKRContract(row[0], currentGroup, contractInfos);
-                holdings.Add(CreateIBKRHolding(account, contract, quantity, currentPrice, currentValue, currentCurrency, ""));
+                holdings.Add(CreateIBKRHolding(account, contract, quantity, currentPrice, currentPriceText, currentValue, currentCurrency, ""));
             }
 
             return holdings;
@@ -982,13 +984,15 @@ namespace MyBook
             IBKRContractInfo contract,
             int rawQuantity,
             decimal statementPrice,
+            string statementPriceText,
             decimal currentValue,
             CurrencyType currency,
             string rowDescription)
         {
             var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity, statementPrice, currentValue);
-            var currentPrice = quantity == 0 ? 0 : currentValue / quantity;
-            AssertIBKRMoneyEquals(statementPrice, currentPrice, $"IBKR holding price {contract.Code}");
+            var currentPrice = RoundIBKRUnitPrice(statementPrice, GetIBKRUnitPriceDecimals(contract, statementPriceText));
+            var roundedCurrentValue = RoundIBKRMoney(currentValue);
+            AssertIBKRMoneyEquals(roundedCurrentValue, quantity * currentPrice, $"IBKR holding value {contract.Code}");
             var description = String.IsNullOrWhiteSpace(rowDescription) ? contract.Description : rowDescription;
             return new Holding(contract.Code, contract.StockType)
             {
@@ -998,6 +1002,36 @@ namespace MyBook
                 displayText = contract.DisplayText,
                 currentPrice = new Currency(currentPrice, currency)
             };
+        }
+
+        private static int GetIBKRUnitPriceDecimals(IBKRContractInfo contract, string statementPriceText)
+        {
+            var statementDecimals = CountIBKRSignificantDecimalPlaces(statementPriceText);
+            var minimumDecimals = contract.StockType switch
+            {
+                StockType.UST => 6,
+                StockType.NASDAQ or StockType.ARCA => 2,
+                _ => 2
+            };
+            return Math.Min(7, Math.Max(minimumDecimals, statementDecimals));
+        }
+
+        private static decimal RoundIBKRUnitPrice(decimal value, int decimals)
+        {
+            return Decimal.Round(value, decimals, MidpointRounding.ToEven);
+        }
+
+        private static int CountIBKRSignificantDecimalPlaces(string text)
+        {
+            var normalized = text.Trim().Replace(",", "");
+            var decimalPoint = normalized.IndexOf('.');
+            if (decimalPoint < 0)
+                return 0;
+
+            var decimals = normalized[(decimalPoint + 1)..]
+                .TakeWhile(Char.IsDigit)
+                .ToArray();
+            return new String(decimals).TrimEnd('0').Length;
         }
 
         private static int NormalizeIBKRHoldingQuantity(
@@ -1093,7 +1127,7 @@ namespace MyBook
             var rows = ReadIBKRSectionFirstTableRows(doc, "tblCashReport_");
             var row = rows.FirstOrDefault(row => row.Count > 1 && row[0] == "期末现金")
                 ?? throw new MailParseException("Parse IBKR Report Fail, Missing Ending Cash");
-            return ParseIBKRDecimalAt(row, 1, "ending cash");
+            return RoundIBKRMoney(ParseIBKRDecimalAt(row, 1, "ending cash"));
         }
 
         private static decimal ParseIBKREndingNav(HtmlDocument doc)
@@ -1101,7 +1135,7 @@ namespace MyBook
             var rows = ReadIBKRSectionFirstTableRows(doc, "tblNAV_");
             var row = rows.FirstOrDefault(row => row.Count > 4 && row[0] == "总数")
                 ?? throw new MailParseException("Parse IBKR Report Fail, Missing Ending NAV");
-            return ParseIBKRDecimalAt(row, 4, "ending NAV");
+            return RoundIBKRMoney(ParseIBKRDecimalAt(row, 4, "ending NAV"));
         }
 
         private static decimal ParseIBKRStartingNav(HtmlDocument doc)
@@ -1135,7 +1169,7 @@ namespace MyBook
 
             if (start is null || end is null)
                 throw new MailParseException("Parse IBKR Report Fail, Invalid NAV Change Table");
-            return (start.Value, end.Value);
+            return (RoundIBKRMoney(start.Value), RoundIBKRMoney(end.Value));
         }
 
         private static decimal ParseIBKRNavChangeComponent(HtmlDocument doc, string componentName)
@@ -1409,6 +1443,11 @@ namespace MyBook
                 throw new MailParseException($"Parse IBKR Report Fail, {context} mismatch: expected {expected}, got {actual}");
         }
 
+        private static decimal RoundIBKRMoney(decimal value)
+        {
+            return Currency.RoundMoney(value);
+        }
+
         private static string LimitIBKRRecordText(string text)
         {
             if (text.Length <= 1024)
@@ -1572,6 +1611,7 @@ namespace MyBook
                 DateTime? date = null,
                 string destAccount = "")
             {
+                amount = new Currency(RoundIBKRMoney(amount.v), amount.t);
                 if (amount.v == 0)
                     return;
                 if (affectsNetAsset && amount.t != baseCurrency)
