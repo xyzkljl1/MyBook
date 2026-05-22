@@ -78,7 +78,8 @@ namespace MyBook
                     records,
                     accountBalances,
                     statementKey,
-                    beginningAccountBalances);
+                    beginningAccountBalances,
+                    afterSaveInTransaction: statementImportId => OffsetMatchedICBCRefundRecords(statementImportId));
                 return true;
             }
             catch (Exception e)
@@ -174,6 +175,84 @@ namespace MyBook
             }
 
             return records;
+        }
+
+        private int OffsetMatchedICBCRefundRecords(int targetStatementImportId)
+        {
+            var refunds = database.GetRecordsByStatementImport(targetStatementImportId)
+                .Where(record => !record.isOffset)
+                .Where(IsICBCRefundRecord)
+                .OrderBy(record => record.date)
+                .ThenBy(record => record.Id)
+                .ToList();
+            if (refunds.Count == 0)
+                return 0;
+
+            var minDate = refunds.Min(record => record.date.Date.AddMonths(-2));
+            var maxDate = refunds.Max(record => record.date);
+            var expenses = database.GetStatementRecords(ICBCProvider, minDate, maxDate)
+                .Where(record => !record.isOffset
+                    && record._statementImport_Id != targetStatementImportId
+                    && record.v < 0)
+                .Where(IsICBCExpenseRecord)
+                .OrderBy(record => record.date)
+                .ThenBy(record => record.Id)
+                .ToList();
+            var matchedRecordIds = new HashSet<int>();
+            var pairCount = 0;
+
+            foreach (var refund in refunds)
+            {
+                if (matchedRecordIds.Contains(refund.Id))
+                    continue;
+
+                var matchStart = refund.date.Date.AddMonths(-2);
+                var expense = expenses
+                    .Where(record => !matchedRecordIds.Contains(record.Id)
+                        && record.date >= matchStart
+                        && record.date < refund.date
+                        && IsICBCRefundExpenseMatch(refund, record))
+                    .OrderByDescending(record => record.date)
+                    .ThenByDescending(record => record.Id)
+                    .FirstOrDefault();
+                if (expense is null)
+                    continue;
+
+                matchedRecordIds.Add(refund.Id);
+                matchedRecordIds.Add(expense.Id);
+                pairCount++;
+            }
+
+            if (matchedRecordIds.Count == 0)
+                return 0;
+
+            database.MarkRecordsAsOffset(refunds
+                .Concat(expenses)
+                .Where(record => matchedRecordIds.Contains(record.Id)));
+            Console.WriteLine($"offset ICBC refund records: {pairCount} pairs");
+            return pairCount;
+        }
+
+        private static bool IsICBCRefundRecord(Record record)
+        {
+            return record.v > 0
+                && (record.Source.Contains("退款", StringComparison.Ordinal)
+                    || record.Source.Contains("境外退货", StringComparison.Ordinal));
+        }
+
+        private static bool IsICBCExpenseRecord(Record record)
+        {
+            return record.v < 0
+                && (record.Source.Contains("消费", StringComparison.Ordinal)
+                    || record.Source.Contains("缴费", StringComparison.Ordinal));
+        }
+
+        private static bool IsICBCRefundExpenseMatch(Record refund, Record expense)
+        {
+            return refund._account_Id == expense._account_Id
+                && refund.DestAccount == expense.DestAccount
+                && refund.DescCurrency is not null
+                && refund.DescCurrency == expense.DescCurrency;
         }
     }
 }

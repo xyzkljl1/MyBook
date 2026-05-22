@@ -143,7 +143,8 @@ namespace MyBook
             IEnumerable<Record> records,
             IEnumerable<AccountBalance>? accountBalances = null,
             string statementKey = "",
-            IEnumerable<AccountBalance>? beginningAccountBalances = null)
+            IEnumerable<AccountBalance>? beginningAccountBalances = null,
+            Action<int>? afterSaveInTransaction = null)
         {
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
@@ -163,6 +164,7 @@ namespace MyBook
                     var statementImportId = InsertStatementImport(provider, time, statementKey);
                     SaveAccountBalancesCore(accountBalanceList);
                     SaveRecordsCore(recordList, statementImportId);
+                    afterSaveInTransaction?.Invoke(statementImportId);
                     return true;
                 });
             }
@@ -704,7 +706,7 @@ namespace MyBook
                 .Select(firstMonth.AddMonths)
                 .ToList();
             var records = db.Queryable<Record>()
-                .Where(record => !record.isInternal && record.date >= firstMonth && record.date < nextMonth)
+                .Where(record => !record.isInternal && !record.isOffset && record.date >= firstMonth && record.date < nextMonth)
                 .ToList();
             var balances = db.Queryable<AccountBalance>()
                 .Where(balance => balance.v != 0)
@@ -715,7 +717,7 @@ namespace MyBook
                 .Distinct()
                 .ToHashSet();
             var investmentRecords = db.Queryable<Record>()
-                .Where(record => !record.isInternal && record.v > 0 && record.date < today.Date.AddDays(1))
+                .Where(record => !record.isInternal && !record.isOffset && record.v > 0 && record.date < today.Date.AddDays(1))
                 .ToList()
                 .Where(record => investmentAccountIds.Contains(record._account_Id))
                 .ToList();
@@ -748,6 +750,13 @@ namespace MyBook
                     today,
                     exchangeRates,
                     record => BuildHoldingInvestmentKey(record, holdingNames)),
+                InvestmentAccounts = BuildInvestmentAccountStatistics(
+                    accounts,
+                    investmentAccountIds,
+                    investmentRecords,
+                    today,
+                    exchangeRates,
+                    holdingNames),
                 TotalAssetsRmb = Currency.RoundMoney(balances
                     .Select(balance => TryConvertToRmb(balance.v, balance.t, exchangeRates))
                     .Where(value => value.HasValue)
@@ -1050,6 +1059,63 @@ namespace MyBook
                 : record.DestAccount;
         }
 
+        private static List<InvestmentAccountStatistics> BuildInvestmentAccountStatistics(
+            Dictionary<int, string> accounts,
+            IEnumerable<int> investmentAccountIds,
+            List<Record> investmentRecords,
+            DateTime today,
+            Dictionary<CurrencyType, decimal> exchangeRates,
+            Dictionary<(int AccountId, string Code), string> holdingNames)
+        {
+            var statistics = new List<InvestmentAccountStatistics>
+            {
+                new()
+                {
+                    DisplayName = "所有账户",
+                    ByReason = BuildInvestmentStatistics(
+                        investmentRecords,
+                        today,
+                        exchangeRates,
+                        record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason),
+                    ByHolding = BuildInvestmentStatistics(
+                        investmentRecords,
+                        today,
+                        exchangeRates,
+                        record => BuildHoldingInvestmentKey(record, holdingNames))
+                }
+            };
+
+            statistics.AddRange(investmentAccountIds
+                .Select(accountId => new
+                {
+                    AccountId = accountId,
+                    AccountName = accounts.TryGetValue(accountId, out var accountName) ? accountName : $"Account {accountId}"
+                })
+                .OrderBy(account => account.AccountName)
+                .Select(account =>
+                {
+                    var accountRecords = investmentRecords
+                        .Where(record => record._account_Id == account.AccountId)
+                        .ToList();
+                    return new InvestmentAccountStatistics
+                    {
+                        DisplayName = account.AccountName,
+                        ByReason = BuildInvestmentStatistics(
+                            accountRecords,
+                            today,
+                            exchangeRates,
+                            record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason),
+                        ByHolding = BuildInvestmentStatistics(
+                            accountRecords,
+                            today,
+                            exchangeRates,
+                            record => BuildHoldingInvestmentKey(record, holdingNames))
+                    };
+                }));
+
+            return statistics;
+        }
+
         private static InvestmentStatistics BuildInvestmentStatistics(
             List<Record> records,
             DateTime today,
@@ -1062,8 +1128,7 @@ namespace MyBook
                 Periods =
                 [
                     BuildInvestmentStatisticsPeriod("过去一个月", records, today.Date.AddMonths(-1), end, exchangeRates, keySelector),
-                    BuildInvestmentStatisticsPeriod("年初至今", records, new DateTime(today.Year, 1, 1), end, exchangeRates, keySelector),
-                    BuildInvestmentStatisticsPeriod("开始至今", records, DateTime.MinValue, end, exchangeRates, keySelector)
+                    BuildInvestmentStatisticsPeriod("年初至今", records, new DateTime(today.Year, 1, 1), end, exchangeRates, keySelector)
                 ]
             };
         }
@@ -1094,7 +1159,8 @@ namespace MyBook
             return new InvestmentStatisticsPeriod
             {
                 Title = title,
-                Items = items
+                Items = items,
+                Total = Currency.RoundMoney(items.Sum(item => item.Total))
             };
         }
 
@@ -1169,6 +1235,47 @@ namespace MyBook
                 existing.currentPriceTime = finance.currentPriceTime;
                 db.Updateable(existing).ExecuteCommand();
             });
+        }
+
+        public List<Record> GetRecordsByStatementImport(int statementImportId)
+        {
+            return db.Queryable<Record>()
+                .Where(record => record._statementImport_Id == statementImportId)
+                .ToList();
+        }
+
+        public List<Record> GetStatementRecords(StatementImportProvider provider, DateTime start, DateTime end)
+        {
+            var importIds = db.Queryable<StatementImport>()
+                .Where(statementImport => statementImport.provider == provider)
+                .Select(statementImport => statementImport.Id)
+                .ToList();
+            if (importIds.Count == 0)
+                return [];
+
+            return db.Queryable<Record>()
+                .Where(record => importIds.Contains(record._statementImport_Id)
+                    && record.date >= start
+                    && record.date < end)
+                .ToList();
+        }
+
+        public void MarkRecordsAsOffset(IEnumerable<Record> records)
+        {
+            var updates = records.ToList();
+            if (updates.Count == 0)
+                return;
+
+            var now = DateTime.Now;
+            foreach (var record in updates)
+            {
+                record.isOffset = true;
+                record.updateTime = now;
+            }
+
+            db.Updateable(updates)
+                .UpdateColumns(record => new { record.isOffset, record.updateTime })
+                .ExecuteCommand();
         }
 
         public static DateTime NormalizeStatementImportTime(DateTime time)

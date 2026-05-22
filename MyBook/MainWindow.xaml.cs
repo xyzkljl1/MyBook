@@ -123,6 +123,7 @@ namespace MyBook
         bool showSingleCurrencyMonthly;
         double selectedReasonMonthIndex;
         bool showInvestmentByHolding;
+        InvestmentAccountStatisticsViewModel? selectedInvestmentAccount;
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -133,10 +134,13 @@ namespace MyBook
         public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> RmbMonthlySeries { get; set; } = [];
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
-        public List<InvestmentStatisticsPeriodViewModel> InvestmentByReasonPeriods { get; set; } = [];
-        public List<InvestmentStatisticsPeriodViewModel> InvestmentByHoldingPeriods { get; set; } = [];
+        public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
         public IEnumerable<MonthlyFlowSeriesViewModel> VisibleMonthlySeries => ShowSingleCurrencyMonthly ? MonthlySeries : RmbMonthlySeries;
-        public IEnumerable<InvestmentStatisticsPeriodViewModel> VisibleInvestmentPeriods => ShowInvestmentByHolding ? InvestmentByHoldingPeriods : InvestmentByReasonPeriods;
+        public IEnumerable<InvestmentStatisticsPeriodViewModel> VisibleInvestmentPeriods => SelectedInvestmentAccount is null
+            ? Enumerable.Empty<InvestmentStatisticsPeriodViewModel>()
+            : ShowInvestmentByHolding
+                ? SelectedInvestmentAccount.ByHoldingPeriods
+                : SelectedInvestmentAccount.ByReasonPeriods;
         public double ReasonMonthMaximum => Math.Max(0, ReasonMonthSeries.Count - 1);
         public ReasonFlowSeriesViewModel SelectedReasonSeries => ReasonMonthSeries.Count == 0
             ? new ReasonFlowSeriesViewModel()
@@ -201,11 +205,36 @@ namespace MyBook
             }
         }
 
+        public InvestmentAccountStatisticsViewModel? SelectedInvestmentAccount
+        {
+            get => selectedInvestmentAccount;
+            set
+            {
+                if (ReferenceEquals(selectedInvestmentAccount, value))
+                    return;
+
+                selectedInvestmentAccount = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedInvestmentAccount)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VisibleInvestmentPeriods)));
+            }
+        }
+
         public static DashboardViewModel From(DashboardData data)
         {
             var reasonSeries = data.RmbReasonFlowSeriesByMonth
                 .Select(ReasonFlowSeriesViewModel.From)
                 .ToList();
+            List<InvestmentAccountStatistics> investmentAccounts = data.InvestmentAccounts.Count == 0
+                ?
+                [
+                    new InvestmentAccountStatistics
+                    {
+                        DisplayName = "所有账户",
+                        ByReason = data.InvestmentByReason,
+                        ByHolding = data.InvestmentByHolding
+                    }
+                ]
+                : data.InvestmentAccounts;
             var viewModel = new DashboardViewModel
             {
                 SnapshotTimeText = $"更新于 {DateTime.Now:yyyy-MM-dd HH:mm}",
@@ -217,13 +246,11 @@ namespace MyBook
                     .ToList(),
                 RmbMonthlySeries = [MonthlyFlowSeriesViewModel.From(data.RmbMonthlyFlowSeries)],
                 ReasonMonthSeries = reasonSeries,
-                InvestmentByReasonPeriods = data.InvestmentByReason.Periods
-                    .Select(InvestmentStatisticsPeriodViewModel.From)
-                    .ToList(),
-                InvestmentByHoldingPeriods = data.InvestmentByHolding.Periods
-                    .Select(InvestmentStatisticsPeriodViewModel.From)
+                InvestmentAccounts = investmentAccounts
+                    .Select(InvestmentAccountStatisticsViewModel.From)
                     .ToList()
             };
+            viewModel.SelectedInvestmentAccount = viewModel.InvestmentAccounts.FirstOrDefault();
             viewModel.SelectedReasonMonthIndex = Math.Clamp(data.DefaultReasonMonthIndex, 0, Math.Max(0, reasonSeries.Count - 1));
             return viewModel;
         }
@@ -446,13 +473,36 @@ namespace MyBook
     {
         public string Title { get; set; } = "";
         public List<InvestmentStatisticsItemViewModel> Items { get; set; } = [];
+        public string TotalText { get; set; } = "";
 
         public static InvestmentStatisticsPeriodViewModel From(InvestmentStatisticsPeriod period)
         {
             return new InvestmentStatisticsPeriodViewModel
             {
                 Title = period.Title,
-                Items = period.Items.Select(InvestmentStatisticsItemViewModel.From).ToList()
+                Items = period.Items.Select(InvestmentStatisticsItemViewModel.From).ToList(),
+                TotalText = $"¥{period.Total:N2}"
+            };
+        }
+    }
+
+    public class InvestmentAccountStatisticsViewModel
+    {
+        public string DisplayName { get; set; } = "";
+        public List<InvestmentStatisticsPeriodViewModel> ByReasonPeriods { get; set; } = [];
+        public List<InvestmentStatisticsPeriodViewModel> ByHoldingPeriods { get; set; } = [];
+
+        public static InvestmentAccountStatisticsViewModel From(InvestmentAccountStatistics account)
+        {
+            return new InvestmentAccountStatisticsViewModel
+            {
+                DisplayName = account.DisplayName,
+                ByReasonPeriods = account.ByReason.Periods
+                    .Select(InvestmentStatisticsPeriodViewModel.From)
+                    .ToList(),
+                ByHoldingPeriods = account.ByHolding.Periods
+                    .Select(InvestmentStatisticsPeriodViewModel.From)
+                    .ToList()
             };
         }
     }
@@ -510,11 +560,12 @@ namespace MyBook
             var width = ActualWidth;
             var height = ActualHeight;
             var left = 58.0;
-            var top = 20.0;
-            var right = 18.0;
+            var top = 28.0;
+            var right = 58.0;
             var bottom = 28.0;
             var chartWidth = Math.Max(1, width - left - right);
             var chartHeight = Math.Max(1, height - top - bottom);
+            var chartRight = left + chartWidth;
             var useExpense = String.Equals(FlowKind, "Expense", StringComparison.OrdinalIgnoreCase);
             var maxValue = Math.Max(1, points.Max(point => GetFlowSegments(point, useExpense).Sum(segment => segment.Value)));
             var axisStep = CalculateAxisStep(maxValue);
@@ -524,13 +575,17 @@ namespace MyBook
             for (decimal value = 0; value <= axisMax; value += axisStep)
             {
                 var y = top + chartHeight - chartHeight * (double)(value / axisMax);
-                dc.DrawLine(gridPen, new Point(left, y), new Point(left + chartWidth, y));
+                dc.DrawLine(gridPen, new Point(left, y), new Point(chartRight, y));
+                dc.DrawLine(gridPen, new Point(left - 4, y), new Point(left, y));
+                dc.DrawLine(gridPen, new Point(chartRight, y), new Point(chartRight + 4, y));
                 var label = value.ToString("N0", CultureInfo.InvariantCulture);
-                DrawText(dc, label, 11, "#94A3B8", 0, y - 8);
+                DrawRightAlignedText(dc, label, 11, "#94A3B8", left - 8, y - 8);
+                DrawText(dc, label, 11, "#94A3B8", chartRight + 8, y - 8);
             }
 
             dc.DrawLine(gridPen, new Point(left, top), new Point(left, top + chartHeight));
-            dc.DrawLine(gridPen, new Point(left, top + chartHeight), new Point(left + chartWidth, top + chartHeight));
+            dc.DrawLine(gridPen, new Point(chartRight, top), new Point(chartRight, top + chartHeight));
+            dc.DrawLine(gridPen, new Point(left, top + chartHeight), new Point(chartRight, top + chartHeight));
             DrawBars(dc, points, axisMax, left, top, chartWidth, chartHeight, useExpense);
             DrawLegend(dc, width);
 
@@ -556,8 +611,11 @@ namespace MyBook
             var barWidth = Math.Min(24, Math.Max(8, groupWidth * 0.28));
             for (var i = 0; i < points.Count; i++)
             {
+                var segments = GetFlowSegments(points[i], useExpense);
+                var total = segments.Sum(segment => segment.Value);
                 var center = left + groupWidth * i + groupWidth / 2;
-                DrawStackedBar(dc, GetFlowSegments(points[i], useExpense), center - barWidth / 2, top, chartHeight, barWidth, axisMax);
+                DrawStackedBar(dc, segments, center - barWidth / 2, top, chartHeight, barWidth, axisMax);
+                DrawBarValueLabel(dc, center, top, chartHeight, total, axisMax, useExpense);
             }
         }
 
@@ -589,6 +647,27 @@ namespace MyBook
             }
         }
 
+        private static void DrawBarValueLabel(
+            DrawingContext dc,
+            double centerX,
+            double top,
+            double chartHeight,
+            decimal total,
+            decimal axisMax,
+            bool useExpense)
+        {
+            if (total <= 0)
+                return;
+
+            var barTop = top + chartHeight - chartHeight * (double)(total / axisMax);
+            var textTop = barTop - 17;
+            if (textTop < top + 2)
+                textTop = barTop + 3;
+
+            var color = useExpense ? "#BE123C" : "#047857";
+            DrawCenteredText(dc, total.ToString("N0", CultureInfo.InvariantCulture), 10, color, centerX, textTop);
+        }
+
         private static void DrawLegend(DrawingContext dc, double width)
         {
             var currencies = new[] { "RMB", "USD", "HKD", "JPY", "SGD" };
@@ -614,6 +693,18 @@ namespace MyBook
         private static void DrawText(DrawingContext dc, string text, double size, string color, double x, double y)
         {
             dc.DrawText(CreateText(text, size, ParseBrush(color)), new Point(x, y));
+        }
+
+        private static void DrawCenteredText(DrawingContext dc, string text, double size, string color, double centerX, double y)
+        {
+            var formatted = CreateText(text, size, ParseBrush(color));
+            dc.DrawText(formatted, new Point(centerX - formatted.Width / 2, y));
+        }
+
+        private static void DrawRightAlignedText(DrawingContext dc, string text, double size, string color, double rightX, double y)
+        {
+            var formatted = CreateText(text, size, ParseBrush(color));
+            dc.DrawText(formatted, new Point(rightX - formatted.Width, y));
         }
 
         private static FormattedText CreateText(string text, double size, Brush brush)

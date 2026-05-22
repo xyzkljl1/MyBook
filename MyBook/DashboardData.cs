@@ -9,6 +9,7 @@ namespace MyBook
         public int DefaultReasonMonthIndex { get; set; }
         public InvestmentStatistics InvestmentByReason { get; set; } = new();
         public InvestmentStatistics InvestmentByHolding { get; set; } = new();
+        public List<InvestmentAccountStatistics> InvestmentAccounts { get; set; } = [];
         public decimal TotalAssetsRmb { get; set; }
         public List<CurrencyType> MissingExchangeRateCurrencies { get; set; } = [];
         public DateTime LastMonthStart { get; set; }
@@ -76,10 +77,18 @@ namespace MyBook
         public List<InvestmentStatisticsPeriod> Periods { get; set; } = [];
     }
 
+    public class InvestmentAccountStatistics
+    {
+        public string DisplayName { get; set; } = "";
+        public InvestmentStatistics ByReason { get; set; } = new();
+        public InvestmentStatistics ByHolding { get; set; } = new();
+    }
+
     public class InvestmentStatisticsPeriod
     {
         public string Title { get; set; } = "";
         public List<InvestmentStatisticsItem> Items { get; set; } = [];
+        public decimal Total { get; set; }
     }
 
     public class InvestmentStatisticsItem

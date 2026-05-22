@@ -265,6 +265,9 @@ namespace MyBook
         public bool isInternal { get; set; } = false; // 是否自己账户间的交易
 
         [SugarColumn(DefaultValue = "0")]
+        public bool isOffset { get; set; } = false; // 是否已被退款/消费互相抵消；默认不计入界面统计图表。
+
+        [SugarColumn(DefaultValue = "0")]
         public int HoldingQuantity { get; set; } = 0; // 交易涉及的持仓数量，非持仓交易为 0。
 
         public DateTime date { get; set; } // 发生时间

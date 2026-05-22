@@ -298,23 +298,38 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                        <RadioButton Content="按原因"
-                                     GroupName="InvestmentMode"
-                                     IsChecked="{Binding ShowInvestmentByReason, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                     FontSize="13"
-                                     Foreground="#334155"
-                                     Margin="0,0,18,0"/>
-                        <RadioButton Content="按股票"
-                                     GroupName="InvestmentMode"
-                                     IsChecked="{Binding ShowInvestmentByHolding, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                     FontSize="13"
-                                     Foreground="#334155"/>
-                    </StackPanel>
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <RadioButton Content="按原因"
+                                         GroupName="InvestmentMode"
+                                         IsChecked="{Binding ShowInvestmentByReason, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         FontSize="13"
+                                         Foreground="#334155"
+                                         Margin="0,0,18,0"/>
+                            <RadioButton Content="按股票"
+                                         GroupName="InvestmentMode"
+                                         IsChecked="{Binding ShowInvestmentByHolding, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         FontSize="13"
+                                         Foreground="#334155"/>
+                        </StackPanel>
+                        <ComboBox Grid.Column="2"
+                                  ItemsSource="{Binding InvestmentAccounts}"
+                                  SelectedItem="{Binding SelectedInvestmentAccount, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName"
+                                  MinWidth="180"
+                                  Height="30"
+                                  FontSize="13"
+                                  Foreground="#334155"/>
+                    </Grid>
                     <ItemsControl Grid.Row="1" ItemsSource="{Binding VisibleInvestmentPeriods}">
                         <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
-                                <UniformGrid Columns="3"/>
+                                <UniformGrid Columns="2"/>
                             </ItemsPanelTemplate>
                         </ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
@@ -324,6 +339,7 @@
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
+                                            <RowDefinition Height="Auto"/>
                                         </Grid.RowDefinitions>
                                         <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" Foreground="#334155"/>
                                         <DataGrid Grid.Row="1"
@@ -340,6 +356,21 @@
                                                 <DataGridTextColumn Header="收入" Binding="{Binding TotalText}" Width="Auto"/>
                                             </DataGrid.Columns>
                                         </DataGrid>
+                                        <Border Grid.Row="2" BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="0,8,0,0" Margin="0,8,0,0">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="总计" FontSize="13" FontWeight="SemiBold" Foreground="#334155"/>
+                                                <TextBox Grid.Column="1"
+                                                         Style="{StaticResource SelectableText}"
+                                                         Text="{Binding TotalText}"
+                                                         FontSize="13"
+                                                         FontWeight="SemiBold"
+                                                         Foreground="#047857"/>
+                                            </Grid>
+                                        </Border>
                                     </Grid>
                                 </Border>
                             </DataTemplate>
