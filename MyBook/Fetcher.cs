@@ -60,6 +60,12 @@ namespace MyBook
                 await TryFetchAsync("Wise", mail.FetchWiseReports);
                 if (stock is not null)
                     await TryFetchAsync("exchange rate", stock.FetchExchangeRates);
+                if (database is not null)
+                    await TryFetchAsync("snapshot", () =>
+                    {
+                        database.CreateDailySnapshot();
+                        return Task.CompletedTask;
+                    });
             }
             finally
             {
@@ -82,7 +88,7 @@ namespace MyBook
         private static TimeSpan GetDelayUntilNextDailyRun()
         {
             var now = DateTime.Now;
-            var nextRun = DateTime.Today.AddDays(1).AddHours(3);
+            var nextRun = DateTime.Today.AddDays(1).AddMinutes(5);
             if (now >= nextRun)
                 nextRun = nextRun.AddDays(1);
             return nextRun - now;

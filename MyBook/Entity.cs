@@ -177,6 +177,8 @@ namespace MyBook
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued')";
         public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','WiseMail','Manual')";
+        public const string SnapshotSource = "enum('AutoDaily','Manual')";
+        public const string SnapshotItemType = "enum('AccountBalance','Holding')";
     }
 
     // 账户。一个账户可以同时拥有多个币种余额，具体余额保存在 AccountBalances 中。
@@ -315,6 +317,82 @@ namespace MyBook
     }
     public class Records : List<Record>
     {
+    }
+
+    public enum SnapshotSource
+    {
+        AutoDaily,
+        Manual,
+    }
+
+    public enum SnapshotItemType
+    {
+        AccountBalance,
+        Holding,
+    }
+
+    [SugarIndex("unique_Snapshots_source_key", nameof(Snapshot.source), OrderByType.Asc, nameof(Snapshot.snapshotKey), OrderByType.Asc, true)]
+    [SugarTable("Snapshots")]
+    public class Snapshot
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [SugarColumn(DefaultValue = "AutoDaily", ColumnDataType = MySqlEnumColumnTypes.SnapshotSource, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public SnapshotSource source { get; set; } = SnapshotSource.AutoDaily;
+
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime time { get; set; }
+
+        [SugarColumn(DefaultValue = "1")]
+        public int schemaVersion { get; set; } = 1;
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(128)")]
+        public string snapshotKey { get; set; } = "";
+
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime createdAt { get; set; }
+    }
+
+    // SnapshotItems stores a stable indexed envelope plus versioned JSON payloads.
+    // Old payload versions must stay readable even when current AccountBalance/Holding changes.
+    [SugarIndex("index_SnapshotItems_snapshot_type_key", nameof(SnapshotItem._snapshot_Id), OrderByType.Asc, nameof(SnapshotItem.itemType), OrderByType.Asc, nameof(SnapshotItem.stableKey), OrderByType.Asc)]
+    [SugarTable("SnapshotItems")]
+    public class SnapshotItem
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [Navigate(NavigateType.ManyToOne, nameof(_snapshot_Id), nameof(MyBook.Snapshot.Id))]
+        public Snapshot? Snapshot { get; set; }
+
+        [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(MyBook.Account.Id))]
+        public Account? Account { get; set; }
+
+        [SugarColumn(DefaultValue = "AccountBalance", ColumnDataType = MySqlEnumColumnTypes.SnapshotItemType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public SnapshotItemType itemType { get; set; } = SnapshotItemType.AccountBalance;
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(256)")]
+        public string stableKey { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(256)")]
+        public string accountName { get; set; } = "";
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public CurrencyType? currencyType { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = "decimal(24,12)")]
+        public decimal? amount { get; set; }
+
+        [SugarColumn(ColumnDataType = "longtext")]
+        public string payloadJson { get; set; } = "";
+
+        // 用于存储
+        [SugarColumn(DefaultValue = "0")]
+        public int _snapshot_Id { get; set; } = 0;
+
+        [SugarColumn(IsNullable = true)]
+        public int? _account_Id { get; set; }
     }
 
     public enum StatementImportProvider

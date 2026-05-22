@@ -1,21 +1,29 @@
 using Microsoft.Extensions.Configuration;
 using SqlSugar;
+using System.Globalization;
 using System.Reflection;
+using System.Text.Json;
 
 namespace MyBook
 {
     class DatabaseUtil
     {
         private const string DefaultConnectionString = "server=localhost;port=3306;database=mybook;uid=root;pwd=;charset=utf8mb4;";
+        private const string DatabaseWriteLockName = "MyBook.DatabaseWrite";
+        private const int DatabaseWriteLockTimeoutSeconds = 300;
+        private const int CurrentSnapshotSchemaVersion = 1;
         private readonly SqlSugarClient db;
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(StatementImport)];
+        private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
             new("fk_Accounts_primaryAccount", "Accounts", "_primaryAccount_Id", "Accounts", "Id"),
             new("fk_AccountBalances_account", "AccountBalances", "_account_Id", "Accounts", "Id"),
             new("fk_Holdings_account", "Holdings", "_account_Id", "Accounts", "Id"),
             new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
-            new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id")
+            new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id"),
+            new("fk_SnapshotItems_snapshot", "SnapshotItems", "_snapshot_Id", "Snapshots", "Id"),
+            new("fk_SnapshotItems_account", "SnapshotItems", "_account_Id", "Accounts", "Id")
         ];
 
         public DatabaseUtil(IConfigurationRoot config)
@@ -34,6 +42,63 @@ namespace MyBook
             ValidateSchema();
             ValidateForeignKeys();
             ValidateAccountPrimaryRelations();
+        }
+
+        private T ExecuteLockedTransaction<T>(Func<T> action)
+        {
+            db.Ado.BeginTran();
+            var lockTaken = false;
+            try
+            {
+                AcquireDatabaseWriteLock();
+                lockTaken = true;
+                var result = action();
+                db.Ado.CommitTran();
+                return result;
+            }
+            catch
+            {
+                db.Ado.RollbackTran();
+                throw;
+            }
+            finally
+            {
+                if (lockTaken)
+                    TryReleaseDatabaseWriteLock();
+            }
+        }
+
+        private void ExecuteLockedTransaction(Action action)
+        {
+            ExecuteLockedTransaction(() =>
+            {
+                action();
+                return true;
+            });
+        }
+
+        private void AcquireDatabaseWriteLock()
+        {
+            var result = db.Ado.GetInt(
+                "select get_lock(@lockName, @timeoutSeconds)",
+                new SugarParameter("@lockName", DatabaseWriteLockName),
+                new SugarParameter("@timeoutSeconds", DatabaseWriteLockTimeoutSeconds));
+            if (result != 1)
+                throw new TimeoutException($"Timed out waiting for database write lock: {DatabaseWriteLockName}");
+        }
+
+        private void TryReleaseDatabaseWriteLock()
+        {
+            try
+            {
+                db.Ado.GetInt(
+                    "select release_lock(@lockName)",
+                    new SugarParameter("@lockName", DatabaseWriteLockName));
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"release database write lock fail: {e.Message}");
+            }
         }
 
         public bool IsStatementImported(StatementImportProvider provider, DateTime time)
@@ -83,29 +148,26 @@ namespace MyBook
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
             var beginningAccountBalanceList = beginningAccountBalances?.ToList() ?? [];
-            db.Ado.BeginTran();
             try
             {
-                if (IsStatementImported(provider, time, statementKey))
+                return ExecuteLockedTransaction(() =>
                 {
-                    db.Ado.CommitTran();
-                    return false;
-                }
+                    if (IsStatementImported(provider, time, statementKey))
+                        return false;
 
-                ValidateBeginningAccountBalances(
-                    provider,
-                    beginningAccountBalanceList,
-                    ShouldValidateBeginningAccountBalances(provider));
-                ValidateRecordBalanceChanges(provider, recordList, beginningAccountBalanceList, accountBalanceList);
-                var statementImportId = InsertStatementImport(provider, time, statementKey);
-                SaveAccountBalancesCore(accountBalanceList);
-                SaveRecordsCore(recordList, statementImportId);
-                db.Ado.CommitTran();
-                return true;
+                    ValidateBeginningAccountBalances(
+                        provider,
+                        beginningAccountBalanceList,
+                        ShouldValidateBeginningAccountBalances(provider));
+                    ValidateRecordBalanceChanges(provider, recordList, beginningAccountBalanceList, accountBalanceList);
+                    var statementImportId = InsertStatementImport(provider, time, statementKey);
+                    SaveAccountBalancesCore(accountBalanceList);
+                    SaveRecordsCore(recordList, statementImportId);
+                    return true;
+                });
             }
             catch (Exception e)
             {
-                db.Ado.RollbackTran();
                 if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
                     return false;
                 throw;
@@ -116,13 +178,13 @@ namespace MyBook
         {
             var importList = imports.ToList();
             var saved = new List<bool>();
-            var shouldValidateBeginningBalances = importList
-                .Select(import => import.Provider)
-                .Distinct()
-                .ToDictionary(provider => provider, ShouldValidateBeginningAccountBalances);
-            db.Ado.BeginTran();
-            try
+            return ExecuteLockedTransaction(() =>
             {
+                var shouldValidateBeginningBalances = importList
+                    .Select(import => import.Provider)
+                    .Distinct()
+                    .ToDictionary(provider => provider, ShouldValidateBeginningAccountBalances);
+
                 foreach (var import in importList)
                 {
                     if (IsStatementImported(import.Provider, import.Time, import.StatementKey))
@@ -143,14 +205,8 @@ namespace MyBook
                     saved.Add(true);
                 }
 
-                db.Ado.CommitTran();
                 return saved;
-            }
-            catch
-            {
-                db.Ado.RollbackTran();
-                throw;
-            }
+            });
         }
 
         public bool SaveStatementRecordsWithoutBalanceOnce(
@@ -160,23 +216,20 @@ namespace MyBook
             IEnumerable<Record> records)
         {
             var recordList = records.ToList();
-            db.Ado.BeginTran();
             try
             {
-                if (IsStatementImported(provider, time, statementKey))
+                return ExecuteLockedTransaction(() =>
                 {
-                    db.Ado.CommitTran();
-                    return false;
-                }
+                    if (IsStatementImported(provider, time, statementKey))
+                        return false;
 
-                var statementImportId = InsertStatementImport(provider, time, statementKey);
-                SaveRecordsCore(recordList, statementImportId);
-                db.Ado.CommitTran();
-                return true;
+                    var statementImportId = InsertStatementImport(provider, time, statementKey);
+                    SaveRecordsCore(recordList, statementImportId);
+                    return true;
+                });
             }
             catch (Exception e)
             {
-                db.Ado.RollbackTran();
                 if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
                     return false;
                 throw;
@@ -406,17 +459,10 @@ namespace MyBook
         public void SaveAccountHoldings(Account account, IEnumerable<Holding> holdings)
         {
             var holdingList = holdings.ToList();
-            db.Ado.BeginTran();
-            try
+            ExecuteLockedTransaction(() =>
             {
                 SaveAccountHoldingsCore(account, holdingList);
-                db.Ado.CommitTran();
-            }
-            catch
-            {
-                db.Ado.RollbackTran();
-                throw;
-            }
+            });
         }
 
         public List<Holding> GetHoldings()
@@ -429,6 +475,222 @@ namespace MyBook
         public List<Finance> GetFinances()
         {
             return db.Queryable<Finance>().ToList();
+        }
+
+        public Snapshot CreateDailySnapshot()
+        {
+            return CreateDailySnapshot(DateTime.Today);
+        }
+
+        public Snapshot CreateDailySnapshot(DateTime snapshotDate)
+        {
+            return CreateSnapshot(DateTime.Now, SnapshotSource.AutoDaily, BuildDailySnapshotKey(snapshotDate));
+        }
+
+        public Snapshot CreateSnapshot(DateTime time, SnapshotSource source = SnapshotSource.Manual, string? snapshotKey = null)
+        {
+            var key = String.IsNullOrWhiteSpace(snapshotKey)
+                ? BuildSnapshotKey(source, time)
+                : snapshotKey.Trim();
+
+            return ExecuteLockedTransaction(() =>
+            {
+                var existing = db.Queryable<Snapshot>()
+                    .Where(snapshot => snapshot.source == source && snapshot.snapshotKey == key)
+                    .First();
+                if (existing is not null)
+                    return existing;
+
+                var snapshot = new Snapshot
+                {
+                    source = source,
+                    time = time,
+                    schemaVersion = CurrentSnapshotSchemaVersion,
+                    snapshotKey = key,
+                    createdAt = DateTime.Now
+                };
+                snapshot.Id = db.Insertable(snapshot).ExecuteReturnIdentity();
+
+                var accounts = db.Queryable<Account>()
+                    .ToList()
+                    .ToDictionary(account => account.Id);
+                var items = new List<SnapshotItem>();
+
+                foreach (var balance in db.Queryable<AccountBalance>().ToList())
+                {
+                    if (!accounts.TryGetValue(balance._account_Id, out var account))
+                        throw new InvalidOperationException($"Snapshot account balance points to missing account: {balance._account_Id}");
+
+                    var payload = new SnapshotAccountBalancePayloadV1(
+                        account.Id,
+                        account.name,
+                        balance.t.ToString(),
+                        balance.v);
+                    items.Add(new SnapshotItem
+                    {
+                        Snapshot = snapshot,
+                        Account = account,
+                        itemType = SnapshotItemType.AccountBalance,
+                        stableKey = BuildSnapshotBalanceStableKey(account.name, balance.t),
+                        accountName = account.name,
+                        currencyType = balance.t,
+                        amount = balance.v,
+                        payloadJson = JsonSerializer.Serialize(payload, SnapshotJsonOptions),
+                        _snapshot_Id = snapshot.Id,
+                        _account_Id = account.Id
+                    });
+                }
+
+                foreach (var holding in db.Queryable<Holding>().ToList())
+                {
+                    if (!accounts.TryGetValue(holding._account_Id, out var account))
+                        throw new InvalidOperationException($"Snapshot holding points to missing account: {holding._account_Id}");
+
+                    var totalPrice = holding.totalPrice;
+                    var payload = new SnapshotHoldingPayloadV1(
+                        account.Id,
+                        account.name,
+                        holding.code,
+                        holding.holdingType.ToString(),
+                        holding.quantity,
+                        holding.currentPrice.v,
+                        holding.currentPrice.t.ToString(),
+                        totalPrice.v,
+                        totalPrice.t.ToString(),
+                        holding.displayText,
+                        holding.desc);
+                    items.Add(new SnapshotItem
+                    {
+                        Snapshot = snapshot,
+                        Account = account,
+                        itemType = SnapshotItemType.Holding,
+                        stableKey = BuildSnapshotHoldingStableKey(account.name, holding.code, holding.holdingType),
+                        accountName = account.name,
+                        currencyType = totalPrice.t,
+                        amount = totalPrice.v,
+                        payloadJson = JsonSerializer.Serialize(payload, SnapshotJsonOptions),
+                        _snapshot_Id = snapshot.Id,
+                        _account_Id = account.Id
+                    });
+                }
+
+                if (items.Count > 0)
+                    db.Insertable(items).ExecuteCommand();
+
+                return snapshot;
+            });
+        }
+
+        public SnapshotData? GetDailySnapshot(DateTime date)
+        {
+            var key = BuildDailySnapshotKey(date);
+            var snapshot = db.Queryable<Snapshot>()
+                .Where(it => it.source == SnapshotSource.AutoDaily && it.snapshotKey == key)
+                .First();
+            return snapshot is null ? null : ReadSnapshotData(snapshot);
+        }
+
+        public SnapshotData? GetLatestSnapshotAtOrBefore(DateTime time)
+        {
+            var snapshot = db.Queryable<Snapshot>()
+                .Where(it => it.time <= time)
+                .OrderByDescending(it => it.time)
+                .First();
+            return snapshot is null ? null : ReadSnapshotData(snapshot);
+        }
+
+        public SnapshotData GetSnapshot(int snapshotId)
+        {
+            var snapshot = db.Queryable<Snapshot>()
+                .Where(it => it.Id == snapshotId)
+                .First();
+            if (snapshot is null)
+                throw new InvalidOperationException($"Snapshot not found: {snapshotId}");
+
+            return ReadSnapshotData(snapshot);
+        }
+
+        private SnapshotData ReadSnapshotData(Snapshot snapshot)
+        {
+            if (snapshot.schemaVersion != CurrentSnapshotSchemaVersion)
+                throw new NotSupportedException($"Unsupported snapshot schema version: {snapshot.schemaVersion}");
+
+            var items = db.Queryable<SnapshotItem>()
+                .Where(item => item._snapshot_Id == snapshot.Id)
+                .ToList();
+            var balances = items
+                .Where(item => item.itemType == SnapshotItemType.AccountBalance)
+                .Select(ParseSnapshotAccountBalanceV1)
+                .ToList();
+            var holdings = items
+                .Where(item => item.itemType == SnapshotItemType.Holding)
+                .Select(ParseSnapshotHoldingV1)
+                .ToList();
+            return new SnapshotData(snapshot, balances, holdings);
+        }
+
+        private static SnapshotAccountBalanceData ParseSnapshotAccountBalanceV1(SnapshotItem item)
+        {
+            var payload = DeserializeSnapshotPayload<SnapshotAccountBalancePayloadV1>(item);
+            return new SnapshotAccountBalanceData(
+                payload.AccountId,
+                payload.AccountName,
+                ParseEnum<CurrencyType>(payload.CurrencyType),
+                payload.Amount);
+        }
+
+        private static SnapshotHoldingData ParseSnapshotHoldingV1(SnapshotItem item)
+        {
+            var payload = DeserializeSnapshotPayload<SnapshotHoldingPayloadV1>(item);
+            return new SnapshotHoldingData(
+                payload.AccountId,
+                payload.AccountName,
+                payload.Code,
+                ParseEnum<HoldingType>(payload.HoldingType),
+                payload.Quantity,
+                new Currency(payload.PriceAmount, ParseEnum<CurrencyType>(payload.PriceCurrencyType)),
+                new Currency(payload.TotalAmount, ParseEnum<CurrencyType>(payload.TotalCurrencyType)),
+                payload.DisplayText,
+                payload.Description);
+        }
+
+        private static T DeserializeSnapshotPayload<T>(SnapshotItem item)
+        {
+            var payload = JsonSerializer.Deserialize<T>(item.payloadJson, SnapshotJsonOptions);
+            if (payload is null)
+                throw new InvalidOperationException($"Invalid snapshot payload: {item.Id}");
+
+            return payload;
+        }
+
+        private static T ParseEnum<T>(string value) where T : struct, Enum
+        {
+            if (Enum.TryParse<T>(value, out var parsed))
+                return parsed;
+
+            throw new InvalidOperationException($"Invalid snapshot enum value: {typeof(T).Name}.{value}");
+        }
+
+        private static string BuildSnapshotKey(SnapshotSource source, DateTime time)
+        {
+            return source == SnapshotSource.AutoDaily
+                ? BuildDailySnapshotKey(time)
+                : time.ToString("O", CultureInfo.InvariantCulture);
+        }
+
+        private static string BuildDailySnapshotKey(DateTime date)
+        {
+            return date.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        private static string BuildSnapshotBalanceStableKey(string accountName, CurrencyType currencyType)
+        {
+            return $"{accountName}\t{currencyType}";
+        }
+
+        private static string BuildSnapshotHoldingStableKey(string accountName, string code, HoldingType holdingType)
+        {
+            return $"{accountName}\t{holdingType}\t{code}";
         }
 
         public DashboardData GetDashboardData(DateTime today)
@@ -839,9 +1101,10 @@ namespace MyBook
         public DatabaseCleanupResult CleanVolatileData()
         {
             var beforeCounts = ReadCleanupCounts();
-            db.Ado.BeginTran();
-            try
+            ExecuteLockedTransaction(() =>
             {
+                db.Deleteable<SnapshotItem>().ExecuteCommand();
+                db.Deleteable<Snapshot>().ExecuteCommand();
                 db.Deleteable<Record>().ExecuteCommand();
                 db.Deleteable<Holding>().ExecuteCommand();
                 db.Deleteable<Finance>().ExecuteCommand();
@@ -859,13 +1122,7 @@ namespace MyBook
                         and statementImport.`time` = fixedImport.`time`
                     where fixedImport.`provider` is null
                     """);
-                db.Ado.CommitTran();
-            }
-            catch
-            {
-                db.Ado.RollbackTran();
-                throw;
-            }
+            });
 
             return new DatabaseCleanupResult(
                 beforeCounts,
@@ -885,28 +1142,33 @@ namespace MyBook
                 ["StatementImports"] = db.Queryable<StatementImport>().Count(),
                 ["Records"] = db.Queryable<Record>().Count(),
                 ["Holdings"] = db.Queryable<Holding>().Count(),
-                ["Finance"] = db.Queryable<Finance>().Count()
+                ["Finance"] = db.Queryable<Finance>().Count(),
+                ["Snapshots"] = db.Queryable<Snapshot>().Count(),
+                ["SnapshotItems"] = db.Queryable<SnapshotItem>().Count()
             };
         }
 
         public void SaveFinance(Finance finance)
         {
-            if (finance.currentPriceTime <= 0)
-                finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
-
-            var existing = db.Queryable<Finance>()
-                .Where(it => it.code == finance.code && it.holdingType == finance.holdingType)
-                .First();
-            if (existing is null)
+            ExecuteLockedTransaction(() =>
             {
-                finance.Id = db.Insertable(finance).ExecuteReturnIdentity();
-                return;
-            }
+                if (finance.currentPriceTime <= 0)
+                    finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
 
-            existing._currentPrice_v = finance._currentPrice_v;
-            existing._currentPrice_t = finance._currentPrice_t;
-            existing.currentPriceTime = finance.currentPriceTime;
-            db.Updateable(existing).ExecuteCommand();
+                var existing = db.Queryable<Finance>()
+                    .Where(it => it.code == finance.code && it.holdingType == finance.holdingType)
+                    .First();
+                if (existing is null)
+                {
+                    finance.Id = db.Insertable(finance).ExecuteReturnIdentity();
+                    return;
+                }
+
+                existing._currentPrice_v = finance._currentPrice_v;
+                existing._currentPrice_t = finance._currentPrice_t;
+                existing.currentPriceTime = finance.currentPriceTime;
+                db.Updateable(existing).ExecuteCommand();
+            });
         }
 
         public static DateTime NormalizeStatementImportTime(DateTime time)
@@ -1007,6 +1269,10 @@ namespace MyBook
                 return "Holdings";
             if (type == typeof(Finance))
                 return "Finance";
+            if (type == typeof(Snapshot))
+                return "Snapshots";
+            if (type == typeof(SnapshotItem))
+                return "SnapshotItems";
             if (type == typeof(StatementImport))
                 return "StatementImports";
 
@@ -1119,6 +1385,25 @@ namespace MyBook
             }
         }
 
+        private sealed record SnapshotAccountBalancePayloadV1(
+            int AccountId,
+            string AccountName,
+            string CurrencyType,
+            decimal Amount);
+
+        private sealed record SnapshotHoldingPayloadV1(
+            int AccountId,
+            string AccountName,
+            string Code,
+            string HoldingType,
+            int Quantity,
+            decimal PriceAmount,
+            string PriceCurrencyType,
+            decimal TotalAmount,
+            string TotalCurrencyType,
+            string DisplayText,
+            string Description);
+
         private sealed record ForeignKeyDefinition(
             string ConstraintName,
             string TableName,
@@ -1126,6 +1411,40 @@ namespace MyBook
             string ReferencedTableName,
             string ReferencedColumnName);
     }
+
+    class SnapshotData
+    {
+        public SnapshotData(
+            Snapshot snapshot,
+            List<SnapshotAccountBalanceData> accountBalances,
+            List<SnapshotHoldingData> holdings)
+        {
+            Snapshot = snapshot;
+            AccountBalances = accountBalances;
+            Holdings = holdings;
+        }
+
+        public Snapshot Snapshot { get; }
+        public List<SnapshotAccountBalanceData> AccountBalances { get; }
+        public List<SnapshotHoldingData> Holdings { get; }
+    }
+
+    record SnapshotAccountBalanceData(
+        int AccountId,
+        string AccountName,
+        CurrencyType CurrencyType,
+        decimal Amount);
+
+    record SnapshotHoldingData(
+        int AccountId,
+        string AccountName,
+        string Code,
+        HoldingType HoldingType,
+        int Quantity,
+        Currency CurrentPrice,
+        Currency TotalPrice,
+        string DisplayText,
+        string Description);
 
     class DatabaseCleanupResult
     {
