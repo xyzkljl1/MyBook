@@ -9,6 +9,14 @@ namespace MyBook
         private const string DefaultConnectionString = "server=localhost;port=3306;database=mybook;uid=root;pwd=;charset=utf8mb4;";
         private readonly SqlSugarClient db;
         private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(StatementImport)];
+        private static readonly ForeignKeyDefinition[] ForeignKeys =
+        [
+            new("fk_Accounts_primaryAccount", "Accounts", "_primaryAccount_Id", "Accounts", "Id"),
+            new("fk_AccountBalances_account", "AccountBalances", "_account_Id", "Accounts", "Id"),
+            new("fk_Holdings_account", "Holdings", "_account_Id", "Accounts", "Id"),
+            new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
+            new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id")
+        ];
 
         public DatabaseUtil(IConfigurationRoot config)
         {
@@ -24,6 +32,7 @@ namespace MyBook
                 IsAutoCloseConnection = true
             });
             ValidateSchema();
+            ValidateForeignKeys();
             ValidateAccountPrimaryRelations();
         }
 
@@ -392,6 +401,302 @@ namespace MyBook
             return db.Queryable<Finance>().ToList();
         }
 
+        public DashboardData GetDashboardData(DateTime today)
+        {
+            var currentMonth = new DateTime(today.Year, today.Month, 1);
+            var firstMonth = currentMonth.AddMonths(-11);
+            var nextMonth = currentMonth.AddMonths(1);
+            var lastMonthStart = currentMonth.AddMonths(-1);
+            var lastMonthEnd = currentMonth.AddDays(-1);
+            var records = db.Queryable<Record>()
+                .Where(record => !record.isInternal && record.date >= firstMonth && record.date < nextMonth)
+                .ToList();
+            var balances = db.Queryable<AccountBalance>()
+                .Where(balance => balance.v != 0)
+                .ToList();
+            var exchangeRates = GetCurrencyToRmbRates();
+            var usedCurrencies = balances
+                .Select(balance => balance.t)
+                .Union(records.Select(record => record.t))
+                .Distinct()
+                .ToList();
+
+            return new DashboardData
+            {
+                CurrencySummaries = BuildCurrencySummaries(balances),
+                MonthlyFlowSeries = BuildMonthlyFlowSeries(records, firstMonth),
+                RmbMonthlyFlowSeries = BuildRmbMonthlyFlowSeries(records, firstMonth, exchangeRates),
+                RmbReasonFlowSeries = BuildRmbReasonFlowSeries(records, lastMonthStart, currentMonth, exchangeRates),
+                TotalAssetsRmb = Currency.RoundMoney(balances
+                    .Select(balance => TryConvertToRmb(balance.v, balance.t, exchangeRates))
+                    .Where(value => value.HasValue)
+                    .Sum(value => value!.Value)),
+                MissingExchangeRateCurrencies = usedCurrencies
+                    .Where(currency => currency != CurrencyType.RMB && !exchangeRates.ContainsKey(currency))
+                    .OrderBy(currency => currency)
+                    .ToList(),
+                LastMonthStart = lastMonthStart,
+                LastMonthEnd = lastMonthEnd
+            };
+        }
+
+        private Dictionary<CurrencyType, decimal> GetCurrencyToRmbRates()
+        {
+            var rates = new Dictionary<CurrencyType, decimal>
+            {
+                [CurrencyType.RMB] = 1
+            };
+            var finances = db.Queryable<Finance>()
+                .Where(finance => finance.holdingType == HoldingType.Cash && finance._currentPrice_t == CurrencyType.RMB)
+                .ToList();
+            foreach (var finance in finances)
+            {
+                if (finance._currentPrice_v <= 0 || !Enum.TryParse<CurrencyType>(finance.code, out var currency))
+                    continue;
+
+                rates[currency] = finance._currentPrice_v;
+            }
+
+            return rates;
+        }
+
+        private static List<CurrencyBalanceSummary> BuildCurrencySummaries(List<AccountBalance> balances)
+        {
+            return balances
+                .GroupBy(balance => balance.t)
+                .OrderBy(group => group.Key)
+                .Select(group =>
+                {
+                    var assets = Currency.RoundMoney(group.Where(balance => balance.v > 0).Sum(balance => balance.v));
+                    var liabilities = Currency.RoundMoney(group.Where(balance => balance.v < 0).Sum(balance => balance.v));
+                    return new CurrencyBalanceSummary
+                    {
+                        Currency = group.Key,
+                        Assets = assets,
+                        Liabilities = liabilities,
+                        Net = Currency.RoundMoney(assets + liabilities),
+                        AccountCount = group.Select(balance => balance._account_Id).Distinct().Count()
+                    };
+                })
+                .ToList();
+        }
+
+        private static List<MonthlyFlowSeries> BuildMonthlyFlowSeries(List<Record> records, DateTime firstMonth)
+        {
+            var months = Enumerable.Range(0, 12)
+                .Select(firstMonth.AddMonths)
+                .ToList();
+            return records
+                .Select(record => record.t)
+                .Distinct()
+                .OrderBy(currency => currency)
+                .Select(currency =>
+                {
+                    var points = months
+                        .Select(month =>
+                        {
+                            var monthRecords = records
+                                .Where(record => record.t == currency
+                                    && record.date >= month
+                                    && record.date < month.AddMonths(1))
+                                .ToList();
+                            return new MonthlyFlowPoint
+                            {
+                                Month = month,
+                                MonthLabel = month.ToString("MM月"),
+                                Income = Currency.RoundMoney(monthRecords.Where(record => record.v > 0).Sum(record => record.v)),
+                                Expense = Currency.RoundMoney(-monthRecords.Where(record => record.v < 0).Sum(record => record.v)),
+                                NetChange = Currency.RoundMoney(monthRecords.Sum(record => record.v)),
+                                IncomeSegments = BuildSingleCurrencySegments(currency, monthRecords.Where(record => record.v > 0).Sum(record => record.v)),
+                                ExpenseSegments = BuildSingleCurrencySegments(currency, -monthRecords.Where(record => record.v < 0).Sum(record => record.v))
+                            };
+                        })
+                        .ToList();
+                    return new MonthlyFlowSeries
+                    {
+                        DisplayName = currency.ToString(),
+                        Currency = currency,
+                        Points = points,
+                        TotalIncome = Currency.RoundMoney(points.Sum(point => point.Income)),
+                        TotalExpense = Currency.RoundMoney(points.Sum(point => point.Expense)),
+                        NetChange = Currency.RoundMoney(points.Sum(point => point.NetChange))
+                    };
+                })
+                .ToList();
+        }
+
+        private static MonthlyFlowSeries BuildRmbMonthlyFlowSeries(
+            List<Record> records,
+            DateTime firstMonth,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var months = Enumerable.Range(0, 12)
+                .Select(firstMonth.AddMonths)
+                .ToList();
+            var points = months
+                .Select(month =>
+                {
+                    var convertedRecords = records
+                        .Where(record => record.date >= month && record.date < month.AddMonths(1))
+                        .Select(record => TryConvertToRmb(record.v, record.t, exchangeRates))
+                        .Where(value => value.HasValue)
+                        .Select(value => value!.Value)
+                        .ToList();
+                    return new MonthlyFlowPoint
+                    {
+                        Month = month,
+                        MonthLabel = month.ToString("MM月"),
+                        Income = Currency.RoundMoney(convertedRecords.Where(value => value > 0).Sum()),
+                        Expense = Currency.RoundMoney(-convertedRecords.Where(value => value < 0).Sum()),
+                        NetChange = Currency.RoundMoney(convertedRecords.Sum()),
+                        IncomeSegments = BuildRmbMonthlySegments(
+                            records.Where(record => record.date >= month && record.date < month.AddMonths(1) && record.v > 0),
+                            exchangeRates),
+                        ExpenseSegments = BuildRmbMonthlySegments(
+                            records.Where(record => record.date >= month && record.date < month.AddMonths(1) && record.v < 0),
+                            exchangeRates,
+                            invertSign: true)
+                    };
+                })
+                .ToList();
+            return new MonthlyFlowSeries
+            {
+                DisplayName = "",
+                Currency = CurrencyType.RMB,
+                Points = points,
+                TotalIncome = Currency.RoundMoney(points.Sum(point => point.Income)),
+                TotalExpense = Currency.RoundMoney(points.Sum(point => point.Expense)),
+                NetChange = Currency.RoundMoney(points.Sum(point => point.NetChange))
+            };
+        }
+
+        private static ReasonFlowSeries BuildRmbReasonFlowSeries(
+            List<Record> records,
+            DateTime start,
+            DateTime end,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var lastMonthRecords = records
+                .Where(record => record.date >= start && record.date < end)
+                .ToList();
+            var items = lastMonthRecords
+                .GroupBy(record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason)
+                .SelectMany(group =>
+                {
+                    var result = new List<ReasonFlowItem>();
+                    var expenses = BuildReasonFlowItem(group.Key, false, group.Where(record => record.v < 0), exchangeRates);
+                    var incomes = BuildReasonFlowItem(group.Key, true, group.Where(record => record.v > 0), exchangeRates);
+                    if (expenses is not null)
+                        result.Add(expenses);
+                    if (incomes is not null)
+                        result.Add(incomes);
+                    return result;
+                })
+                .Where(item => item.Total != 0)
+                .OrderBy(item => item.IsIncome)
+                .ThenByDescending(item => item.Total)
+                .ThenBy(item => item.Reason)
+                .ToList();
+            return new ReasonFlowSeries
+            {
+                DisplayName = "",
+                Currency = CurrencyType.RMB,
+                Items = items,
+                TotalIncome = Currency.RoundMoney(items.Where(item => item.IsIncome).Sum(item => item.Total)),
+                TotalExpense = Currency.RoundMoney(items.Where(item => !item.IsIncome).Sum(item => item.Total))
+            };
+        }
+
+        private static List<MonthlyFlowSegment> BuildSingleCurrencySegments(CurrencyType currency, decimal value)
+        {
+            var rounded = Currency.RoundMoney(value);
+            return rounded == 0
+                ? []
+                : [new MonthlyFlowSegment { Currency = currency, Value = rounded, Label = currency.ToString() }];
+        }
+
+        private static List<MonthlyFlowSegment> BuildRmbMonthlySegments(
+            IEnumerable<Record> records,
+            Dictionary<CurrencyType, decimal> exchangeRates,
+            bool invertSign = false)
+        {
+            return records
+                .GroupBy(record => record.t)
+                .OrderBy(group => group.Key)
+                .Select(group =>
+                {
+                    var original = group.Sum(record => record.v);
+                    if (invertSign)
+                        original = -original;
+                    var converted = TryConvertToRmb(original, group.Key, exchangeRates) ?? 0;
+                    return new MonthlyFlowSegment
+                    {
+                        Currency = group.Key,
+                        Value = converted,
+                        Label = group.Key.ToString()
+                    };
+                })
+                .Where(segment => segment.Value != 0)
+                .ToList();
+        }
+
+        private static ReasonFlowItem? BuildReasonFlowItem(
+            string reason,
+            bool isIncome,
+            IEnumerable<Record> records,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var groups = records
+                .GroupBy(record => record.t)
+                .OrderBy(group => group.Key)
+                .Select(group =>
+                {
+                    var original = group.Sum(record => record.v);
+                    if (!isIncome)
+                        original = -original;
+                    var converted = TryConvertToRmb(original, group.Key, exchangeRates);
+                    return new
+                    {
+                        Currency = group.Key,
+                        Original = Currency.RoundMoney(original),
+                        Converted = converted
+                    };
+                })
+                .Where(item => item.Converted.HasValue && item.Converted.Value != 0)
+                .ToList();
+            if (groups.Count == 0)
+                return null;
+
+            var total = Currency.RoundMoney(groups.Sum(item => item.Converted!.Value));
+            var detailSum = Currency.RoundMoney(groups.Sum(item => item.Converted!.Value));
+            if (total != detailSum)
+                throw new InvalidOperationException($"Reason currency conversion mismatch: {reason}/{(isIncome ? "income" : "expense")}");
+
+            return new ReasonFlowItem
+            {
+                Reason = reason,
+                IsIncome = isIncome,
+                Total = total,
+                CurrencyDetails = BuildCurrencyDetailText(groups.Select(item => (item.Currency, item.Original, item.Converted!.Value)))
+            };
+        }
+
+        private static decimal? TryConvertToRmb(decimal value, CurrencyType currency, Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            return exchangeRates.TryGetValue(currency, out var rate)
+                ? Currency.RoundMoney(value * rate)
+                : null;
+        }
+
+        private static string BuildCurrencyDetailText(IEnumerable<(CurrencyType Currency, decimal Original, decimal Converted)> details)
+        {
+            var currencies = details
+                .Where(item => item.Currency != CurrencyType.RMB)
+                .Select(item => $"{item.Currency} ¥{item.Converted:N0}")
+                .ToList();
+            return currencies.Count == 0 ? "" : String.Join("、", currencies);
+        }
+
         public DatabaseCleanupResult CleanVolatileData()
         {
             var beforeCounts = ReadCleanupCounts();
@@ -502,6 +807,33 @@ namespace MyBook
                     var extraText = extraColumns.Count > 0 ? String.Join(",", extraColumns) : "none";
                     throw new InvalidOperationException(
                         $"Database schema mismatch: table {tableName}, missing columns [{missingText}], extra columns [{extraText}]");
+                }
+            }
+        }
+
+        private void ValidateForeignKeys()
+        {
+            foreach (var foreignKey in ForeignKeys)
+            {
+                var exists = db.Ado.GetInt("""
+                    select count(*)
+                    from information_schema.key_column_usage
+                    where table_schema = database()
+                        and constraint_name = @constraintName
+                        and table_name = @tableName
+                        and column_name = @columnName
+                        and referenced_table_name = @referencedTableName
+                        and referenced_column_name = @referencedColumnName
+                    """,
+                    new SugarParameter("@constraintName", foreignKey.ConstraintName),
+                    new SugarParameter("@tableName", foreignKey.TableName),
+                    new SugarParameter("@columnName", foreignKey.ColumnName),
+                    new SugarParameter("@referencedTableName", foreignKey.ReferencedTableName),
+                    new SugarParameter("@referencedColumnName", foreignKey.ReferencedColumnName)) > 0;
+                if (!exists)
+                {
+                    throw new InvalidOperationException(
+                        $"Database schema mismatch: missing foreign key {foreignKey.ConstraintName} on {foreignKey.TableName}.{foreignKey.ColumnName}");
                 }
             }
         }
@@ -647,6 +979,13 @@ namespace MyBook
                 }
             }
         }
+
+        private sealed record ForeignKeyDefinition(
+            string ConstraintName,
+            string TableName,
+            string ColumnName,
+            string ReferencedTableName,
+            string ReferencedColumnName);
     }
 
     class DatabaseCleanupResult

@@ -933,7 +933,7 @@ namespace MyBook
                 return new Holding
                 {
                     Account = account,
-                    _account_Id = account.Id > 0 ? account.Id : null,
+                    _account_Id = account.Id,
                     code = code,
                     holdingType = holdingType.Value,
                     quantity = ToHoldingQuantity(pos),

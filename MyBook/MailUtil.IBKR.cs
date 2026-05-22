@@ -74,7 +74,7 @@ namespace MyBook
             return SaveIBKRParsedReports([ParseIBKRReportHtml(html, attachmentInfo.ReportDate, path)])[0];
         }
 
-        private async Task FetchIBKRReports()
+        public async Task FetchIBKRReports()
         {
             var date = GetNextDailyStatementDate(IBKRProvider);
             var missingDays = 0;

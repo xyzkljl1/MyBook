@@ -65,6 +65,17 @@ namespace MyBook
             return ret;
         }
 
+        public async Task FetchExchangeRates()
+        {
+            await FetchExchangeRates(Enum.GetValues<CurrencyType>());
+        }
+
+        public async Task FetchExchangeRates(IEnumerable<CurrencyType> currencyTypes)
+        {
+            foreach (var currencyType in currencyTypes.Distinct())
+                await Fetch(new Finance(currencyType.ToString(), HoldingType.Cash));
+        }
+
         public Task<List<Holding>> Fetch(Account account)
         {
             Console.WriteLine("skip account holding fetch: IB Gateway fetcher is marked Not used");

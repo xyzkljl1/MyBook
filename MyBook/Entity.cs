@@ -111,8 +111,8 @@ namespace MyBook
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType _currentPrice_t { get; set; } = CurrencyType.RMB;
 
-        [SugarColumn(IsNullable = true)]
-        public int? _account_Id { get; set; }
+        [SugarColumn(DefaultValue = "0")]
+        public int _account_Id { get; set; } = 0;
 
         private int _quantity = 0;
     }
@@ -300,8 +300,8 @@ namespace MyBook
         public string Reason { get; set; } = ""; // 消费/收入原因
 
         // 用于存储
-        [SugarColumn(IsNullable = true)]
-        public int? _account_Id { get; set; }
+        [SugarColumn(DefaultValue = "0")]
+        public int _account_Id { get; set; } = 0;
 
         [SugarColumn(IsNullable = true)]
         public decimal? _descCurrency_v { get; set; }
