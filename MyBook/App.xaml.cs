@@ -90,6 +90,40 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--fetch-ocbc-reports", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    Console.WriteLine("FetchOCBCReports: load config");
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    Console.WriteLine("FetchOCBCReports: open database");
+                    var database = new DatabaseUtil(config);
+                    Console.WriteLine("FetchOCBCReports: create mail util");
+                    var mail = new MailUtil(config, database);
+                    var ocbcMonth = GetArgumentValue(e.Args, "--ocbc-month");
+                    Console.WriteLine(String.IsNullOrWhiteSpace(ocbcMonth)
+                        ? "FetchOCBCReports: start"
+                        : $"FetchOCBCReports: start {ocbcMonth}");
+                    Task.Run(String.IsNullOrWhiteSpace(ocbcMonth)
+                            ? mail.FetchOCBCReports
+                            : () => mail.FetchOCBCReports(ParseMonthArgument(ocbcMonth)))
+                        .WaitAsync(TimeSpan.FromSeconds(300))
+                        .GetAwaiter()
+                        .GetResult();
+                    Console.WriteLine("FetchOCBCReports: done");
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"FetchOCBCReports failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
             MainWindow = new MainWindow();
             MainWindow.Show();
         }

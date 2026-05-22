@@ -20,10 +20,16 @@ namespace MyBook
         private const StatementImportProvider WiseProvider = StatementImportProvider.WiseMail;
         private const string WiseMailSender = "noreply@wise.com";
         private const string WiseAccountName = "WISE";
+        private const string WiseSgdOwnIncomingSourceAccount = "OCBC";
+        private const string WisePaypalSourceAccount = "PAYPAL_US";
+        private const string WiseRmbUnknownRecipientName = "Wise汇款收款方";
+        private const string WiseRmbUnknownRecipientAccount = "Alipay";
+        private const string WiseReceivedFundsDestinationAccount = "OCBC";
         private const int WiseMailClientTimeoutMilliseconds = 30000;
 
         private static readonly DateTime WiseSearchStartDate = new(2025, 1, 1);
         private static readonly TimeSpan WiseMailClientTimeout = TimeSpan.FromMilliseconds(WiseMailClientTimeoutMilliseconds);
+        private static readonly string[] WisePaypalCounterpartyNames = ["PAYPAL"];
         private static readonly string[] WiseTransactionSubjectKeywords =
         [
             "付款",
@@ -210,9 +216,7 @@ namespace MyBook
                     throw new MailParseException($"Invalid Wise fee: {fee.v}/{fee.t}, source={sourceAmount.v}/{sourceAmount.t}");
 
                 var transferAmount = new Currency(sourceAmount.v - fee.v, sourceAmount.t);
-                var counterparty = String.IsNullOrWhiteSpace(settings.ReceivedFundsDestinationAccount)
-                    ? "Wise汇款收款方"
-                    : FormatTransferCounterparty(WiseAccountName, settings.ReceivedFundsDestinationAccount);
+                var counterparty = FormatTransferCounterparty(WiseAccountName, WiseReceivedFundsDestinationAccount);
                 var records = new List<Record>();
                 if (transferAmount.v > 0)
                 {
@@ -535,14 +539,7 @@ namespace MyBook
 
         private WiseSettings ReadWiseSettings()
         {
-            return new WiseSettings(
-                ReadConfigList("wise:own_names"),
-                ReadConfigList("wise:paypal_counterparty_names"),
-                config["wise:sgd_own_incoming_source_account"] ?? "",
-                config["wise:paypal_source_account"] ?? "",
-                config["wise:rmb_unknown_recipient_name"] ?? "",
-                config["wise:rmb_unknown_recipient_account"] ?? "",
-                config["wise:received_funds_destination_account"] ?? "");
+            return new WiseSettings(ReadConfigList("wise:own_names"));
         }
 
         private List<string> ReadConfigList(string key)
@@ -564,19 +561,19 @@ namespace MyBook
             var normalizedCounterparty = NormalizeNameForComparison(counterparty);
             if (settings.OwnNames.Any(name => NormalizeNameForComparison(name) == normalizedCounterparty))
             {
-                var counterpartyText = isIncoming && amount.t == CurrencyType.SGD && !String.IsNullOrWhiteSpace(settings.SgdOwnIncomingSourceAccount)
-                    ? FormatTransferCounterparty(settings.SgdOwnIncomingSourceAccount, WiseAccountName)
+                var counterpartyText = isIncoming && amount.t == CurrencyType.SGD
+                    ? FormatTransferCounterparty(WiseSgdOwnIncomingSourceAccount, WiseAccountName)
                     : counterparty;
                 return new WiseCounterpartyClassification(counterpartyText, true);
             }
 
-            if (settings.PaypalCounterpartyNames.Any(name => NormalizeNameForComparison(name) == normalizedCounterparty))
+            if (WisePaypalCounterpartyNames.Any(name => NormalizeNameForComparison(name) == normalizedCounterparty))
             {
-                if (amount.t == CurrencyType.USD && !String.IsNullOrWhiteSpace(settings.PaypalSourceAccount))
+                if (amount.t == CurrencyType.USD)
                 {
                     var counterpartyText = isIncoming
-                        ? FormatTransferCounterparty(settings.PaypalSourceAccount, WiseAccountName)
-                        : FormatTransferCounterparty(WiseAccountName, settings.PaypalSourceAccount);
+                        ? FormatTransferCounterparty(WisePaypalSourceAccount, WiseAccountName)
+                        : FormatTransferCounterparty(WiseAccountName, WisePaypalSourceAccount);
                     return new WiseCounterpartyClassification(counterpartyText, true);
                 }
 
@@ -585,12 +582,9 @@ namespace MyBook
 
             if (!isIncoming
                 && amount.t == CurrencyType.RMB
-                && !String.IsNullOrWhiteSpace(settings.RmbUnknownRecipientName)
-                && NormalizeNameForComparison(settings.RmbUnknownRecipientName) == normalizedCounterparty)
+                && NormalizeNameForComparison(WiseRmbUnknownRecipientName) == normalizedCounterparty)
             {
-                var counterpartyText = String.IsNullOrWhiteSpace(settings.RmbUnknownRecipientAccount)
-                    ? counterparty
-                    : FormatTransferCounterparty(WiseAccountName, settings.RmbUnknownRecipientAccount);
+                var counterpartyText = FormatTransferCounterparty(WiseAccountName, WiseRmbUnknownRecipientAccount);
                 return new WiseCounterpartyClassification(counterpartyText, true);
             }
 
@@ -727,13 +721,7 @@ namespace MyBook
             WiseImportPriority Priority);
 
         private sealed record WiseSettings(
-            List<string> OwnNames,
-            List<string> PaypalCounterpartyNames,
-            string SgdOwnIncomingSourceAccount,
-            string PaypalSourceAccount,
-            string RmbUnknownRecipientName,
-            string RmbUnknownRecipientAccount,
-            string ReceivedFundsDestinationAccount);
+            List<string> OwnNames);
 
         private sealed record WiseCounterpartyClassification(string CounterpartyText, bool IsInternal);
 
