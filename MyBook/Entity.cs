@@ -78,7 +78,7 @@ namespace MyBook
             get { return new Currency(_currentPrice_v, _currentPrice_t); }
             set
             {
-                _currentPrice_v = IsSingleValueAsset(holdingType) ? Currency.RoundMoney(value.v) : value.v;
+                _currentPrice_v = value.v;
                 _currentPrice_t = value.t;
             }
         }
@@ -86,7 +86,7 @@ namespace MyBook
         [SugarColumn(IsIgnore = true)]
         public Currency totalPrice
         {
-            get { return new Currency(Currency.RoundMoney(quantity * currentPrice.v), currentPrice.t); }
+            get { return new Currency(quantity * currentPrice.v, currentPrice.t); }
         }
 
         public Holding()
@@ -105,7 +105,7 @@ namespace MyBook
         }
 
         // 用于存储
-        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(18,7)")]
+        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(24,12)")]
         public decimal _currentPrice_v { get; set; } = 0;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -164,7 +164,7 @@ namespace MyBook
         }
 
         // 用于存储
-        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(18,7)")]
+        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(24,12)")]
         public decimal _currentPrice_v { get; set; } = 0;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -176,7 +176,7 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','Manual')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','WiseMail','Manual')";
     }
 
     // 账户。一个账户可以同时拥有多个币种余额，具体余额保存在 AccountBalances 中。
@@ -233,7 +233,7 @@ namespace MyBook
     [SugarTable("Records")]
     public class Record : Currency // 收支记录
     {
-        [SugarColumn(ColumnName = "_Currency_v", DefaultValue = "0")]
+        [SugarColumn(ColumnName = "_Currency_v", DefaultValue = "0", ColumnDataType = "decimal(24,12)")]
         public new decimal v
         {
             get => base.v;
@@ -303,7 +303,7 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public int _account_Id { get; set; } = 0;
 
-        [SugarColumn(IsNullable = true)]
+        [SugarColumn(IsNullable = true, ColumnDataType = "decimal(24,12)")]
         public decimal? _descCurrency_v { get; set; }
 
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -321,6 +321,7 @@ namespace MyBook
     {
         IBKRReportMail,
         ICBCBillMail,
+        WiseMail,
         Manual,
     }
 
@@ -358,7 +359,7 @@ namespace MyBook
     // 单个币种
     public class Currency : IEquatable<Currency>
     {
-        [SugarColumn(ColumnName = "amount", DefaultValue = "0")]
+        [SugarColumn(ColumnName = "amount", DefaultValue = "0", ColumnDataType = "decimal(24,12)")]
         public decimal v { get; set; } = 0; // 金额，decimal应当可以避免精度问题
 
         [SugarColumn(ColumnName = "currency_type", DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]

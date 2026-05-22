@@ -17,6 +17,15 @@
             <Setter Property="Padding" Value="18"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
         </Style>
+        <Style x:Key="SelectableText" TargetType="TextBox">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="Cursor" Value="IBeam"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
         <Style TargetType="TabControl">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="BorderBrush" Value="#E2E8F0"/>
@@ -63,33 +72,32 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,18">
-            <Button DockPanel.Dock="Right"
-                    Width="86" Height="34"
-                    Background="#0F766E"
-                    Foreground="White"
-                    BorderThickness="0"
-                    FontSize="13"
-                    Content="刷新"
-                    Click="Refresh_Click"/>
-            <TextBlock Text="{Binding SnapshotTimeText}" FontSize="13" Foreground="#64748B" VerticalAlignment="Center"/>
+        <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,12">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="18,7,0,0">
+                <TextBlock Text="{Binding SnapshotTimeText}" FontSize="12" Foreground="#64748B" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <Button Width="70" Height="30"
+                        Background="#0F766E"
+                        Foreground="White"
+                        BorderThickness="0"
+                        FontSize="12"
+                        Content="刷新"
+                        Click="Refresh_Click"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Top">
+                <TextBox Style="{StaticResource SelectableText}"
+                         Text="{Binding TotalAssets.ValueText}"
+                         FontSize="44"
+                         FontWeight="SemiBold"
+                         Foreground="#047857"/>
+                <TextBox Style="{StaticResource SelectableText}"
+                         Text="{Binding TotalAssets.ExactText}"
+                         FontSize="13"
+                         Foreground="#64748B"
+                         Margin="12,21,0,0"/>
+            </StackPanel>
         </DockPanel>
 
-        <StackPanel Grid.Row="1" Margin="0,0,0,18">
-            <Border Style="{StaticResource Card}" Padding="22" Margin="0,0,0,12">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Border Background="#ECFDF5" CornerRadius="7" Padding="14,7">
-                        <TextBlock Text="{Binding TotalAssets.ValueText}"
-                                   FontSize="32"
-                                   FontWeight="SemiBold"
-                                   Foreground="#047857"/>
-                    </Border>
-                    <TextBlock Text="{Binding TotalAssets.ExactText}"
-                               FontSize="13"
-                               Foreground="#64748B"
-                               Margin="12,13,0,0"/>
-                </StackPanel>
-            </Border>
+        <StackPanel Grid.Row="1" Margin="0,0,0,12">
             <ItemsControl ItemsSource="{Binding CurrencySummaries}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
@@ -100,10 +108,9 @@
                     <DataTemplate>
                         <Border Style="{StaticResource Card}" Width="258" Margin="0,0,12,12">
                             <StackPanel>
-                                <TextBlock Text="{Binding Currency}" FontSize="14" FontWeight="SemiBold" Foreground="#334155"/>
-                                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                                    <TextBlock Text="{Binding NetText}" FontSize="27" FontWeight="SemiBold" Foreground="#0F172A"/>
-                                    <TextBlock Text="{Binding NetExactText}" FontSize="11" Foreground="#64748B" Margin="8,10,0,0"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding NetText}" FontSize="27" FontWeight="SemiBold" Foreground="#0F172A"/>
+                                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding NetExactText}" FontSize="11" Foreground="#64748B" Margin="8,10,0,0"/>
                                 </StackPanel>
                                 <StackPanel Margin="0,14,0,0">
                                     <StackPanel>
@@ -117,8 +124,8 @@
                                             </Style>
                                         </StackPanel.Style>
                                         <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
-                                            <TextBlock Text="{Binding AssetsText}" FontSize="15" Foreground="#047857"/>
-                                            <TextBlock Text="{Binding AssetsExactText}" FontSize="10" Foreground="#94A3B8" Margin="5,3,0,0"/>
+                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding AssetsText}" FontSize="15" Foreground="#047857"/>
+                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding AssetsExactText}" FontSize="10" Foreground="#94A3B8" Margin="5,3,0,0"/>
                                         </StackPanel>
                                     </StackPanel>
                                     <StackPanel Margin="0,5,0,0">
@@ -132,8 +139,8 @@
                                             </Style>
                                         </StackPanel.Style>
                                         <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
-                                            <TextBlock Text="{Binding LiabilitiesText}" FontSize="15" Foreground="#BE123C"/>
-                                            <TextBlock Text="{Binding LiabilitiesExactText}" FontSize="10" Foreground="#94A3B8" Margin="5,3,0,0"/>
+                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding LiabilitiesText}" FontSize="15" Foreground="#BE123C"/>
+                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding LiabilitiesExactText}" FontSize="10" Foreground="#94A3B8" Margin="5,3,0,0"/>
                                         </StackPanel>
                                     </StackPanel>
                                 </StackPanel>
@@ -168,17 +175,25 @@
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto"/>
-                                                <RowDefinition Height="230"/>
+                                                <RowDefinition Height="190"/>
+                                                <RowDefinition Height="190"/>
                                             </Grid.RowDefinitions>
                                             <DockPanel>
                                                 <TextBlock Text="{Binding DisplayName}" FontSize="18" FontWeight="SemiBold" Foreground="#0F172A"/>
                                                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                                                    <TextBlock Text="{Binding TotalIncomeText}" FontSize="13" Foreground="#047857" Margin="0,0,16,0"/>
-                                                    <TextBlock Text="{Binding TotalExpenseText}" FontSize="13" Foreground="#BE123C" Margin="0,0,16,0"/>
-                                                    <TextBlock Text="{Binding NetChangeText}" FontSize="13" Foreground="#334155"/>
+                                                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding TotalIncomeText}" FontSize="13" Foreground="#047857" Margin="0,0,16,0"/>
+                                                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding TotalExpenseText}" FontSize="13" Foreground="#BE123C" Margin="0,0,16,0"/>
+                                                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding NetChangeText}" FontSize="13" Foreground="#334155"/>
                                                 </StackPanel>
                                             </DockPanel>
-                                            <local:MonthlyFlowChart Grid.Row="1" Items="{Binding Points}" Margin="0,12,0,0"/>
+                                            <Grid Grid.Row="1" Margin="0,12,0,0">
+                                                <TextBlock Text="收" FontSize="12" FontWeight="SemiBold" Foreground="#047857" HorizontalAlignment="Right"/>
+                                                <local:MonthlyFlowChart Items="{Binding Points}" FlowKind="Income" Margin="0,14,0,0"/>
+                                            </Grid>
+                                            <Grid Grid.Row="2" Margin="0,12,0,0">
+                                                <TextBlock Text="支" FontSize="12" FontWeight="SemiBold" Foreground="#BE123C" HorizontalAlignment="Right"/>
+                                                <local:MonthlyFlowChart Items="{Binding Points}" FlowKind="Expense" Margin="0,14,0,0"/>
+                                            </Grid>
                                         </Grid>
                                     </Border>
                                 </DataTemplate>
@@ -188,7 +203,7 @@
                 </Grid>
             </TabItem>
 
-            <TabItem Header="{Binding LastMonthTabHeader}">
+            <TabItem Header="月度支出">
                 <Border Style="{StaticResource Card}" Margin="0,16,0,0">
                     <Grid>
                         <Grid.RowDefinitions>
@@ -197,13 +212,140 @@
                         </Grid.RowDefinitions>
                         <DockPanel>
                             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                                <TextBlock Text="{Binding ReasonRmbSeries.TotalIncomeText}" FontSize="13" Foreground="#047857" Margin="0,0,16,0"/>
-                                <TextBlock Text="{Binding ReasonRmbSeries.TotalExpenseText}" FontSize="13" Foreground="#BE123C"/>
+                                <TextBox Style="{StaticResource SelectableText}" Text="{Binding SelectedReasonSeries.TotalIncomeText}" FontSize="13" Foreground="#047857" Margin="0,0,16,0"/>
+                                <TextBox Style="{StaticResource SelectableText}" Text="{Binding SelectedReasonSeries.TotalExpenseText}" FontSize="13" Foreground="#BE123C"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding SelectedReasonMonthLabel}"
+                                           FontSize="15"
+                                           FontWeight="SemiBold"
+                                           Foreground="#334155"
+                                           VerticalAlignment="Center"/>
+                                <Slider Width="260"
+                                        Minimum="0"
+                                        Maximum="{Binding ReasonMonthMaximum}"
+                                        Value="{Binding SelectedReasonMonthIndex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        TickFrequency="1"
+                                        IsSnapToTickEnabled="True"
+                                        IsMoveToPointEnabled="True"
+                                        Margin="16,0,0,0"
+                                        VerticalAlignment="Center"/>
                             </StackPanel>
                         </DockPanel>
-                        <local:ReasonFlowChart Grid.Row="1" Items="{Binding ReasonRmbSeries.Items}" MinHeight="280" Margin="0,12,0,0"/>
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0">
+                            <ItemsControl ItemsSource="{Binding SelectedReasonSeries.Items}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Height="44">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="24"/>
+                                                <ColumnDefinition Width="158"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="210"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding KindText}" FontSize="12" VerticalAlignment="Center">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#BE123C"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsIncome}" Value="True">
+                                                                <Setter Property="Foreground" Value="#047857"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <TextBlock Grid.Column="1" Text="{Binding Reason}" FontSize="12" Foreground="#334155" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                            <ProgressBar Grid.Column="2" Value="{Binding BarPercent}" Maximum="100" Height="7" VerticalAlignment="Center" Background="#F1F5F9" BorderThickness="0">
+                                                <ProgressBar.Style>
+                                                    <Style TargetType="ProgressBar">
+                                                        <Setter Property="Foreground" Value="#BE123C"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsIncome}" Value="True">
+                                                                <Setter Property="Foreground" Value="#047857"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </ProgressBar.Style>
+                                            </ProgressBar>
+                                            <StackPanel Grid.Column="3" Margin="12,0,0,0" VerticalAlignment="Center">
+                                                <TextBox Text="{Binding TotalText}" FontSize="12">
+                                                    <TextBox.Style>
+                                                        <Style BasedOn="{StaticResource SelectableText}" TargetType="TextBox">
+                                                            <Setter Property="Foreground" Value="#BE123C"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsIncome}" Value="True">
+                                                                    <Setter Property="Foreground" Value="#047857"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBox.Style>
+                                                </TextBox>
+                                                <TextBox Style="{StaticResource SelectableText}" Text="{Binding CurrencyDetails}" FontSize="10" Foreground="#94A3B8"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
                     </Grid>
                 </Border>
+            </TabItem>
+
+            <TabItem Header="投资统计">
+                <Grid Margin="0,16,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                        <RadioButton Content="按原因"
+                                     GroupName="InvestmentMode"
+                                     IsChecked="{Binding ShowInvestmentByReason, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     FontSize="13"
+                                     Foreground="#334155"
+                                     Margin="0,0,18,0"/>
+                        <RadioButton Content="按股票"
+                                     GroupName="InvestmentMode"
+                                     IsChecked="{Binding ShowInvestmentByHolding, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     FontSize="13"
+                                     Foreground="#334155"/>
+                    </StackPanel>
+                    <ItemsControl Grid.Row="1" ItemsSource="{Binding VisibleInvestmentPeriods}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <UniformGrid Columns="3"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Style="{StaticResource Card}" Margin="0,0,12,0">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="*"/>
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" Foreground="#334155"/>
+                                        <DataGrid Grid.Row="1"
+                                                  ItemsSource="{Binding Items}"
+                                                  AutoGenerateColumns="False"
+                                                  IsReadOnly="True"
+                                                  CanUserAddRows="False"
+                                                  HeadersVisibility="Column"
+                                                  GridLinesVisibility="None"
+                                                  SelectionUnit="CellOrRowHeader"
+                                                  Margin="0,12,0,0">
+                                            <DataGrid.Columns>
+                                                <DataGridTextColumn Header="项目" Binding="{Binding Name}" Width="*"/>
+                                                <DataGridTextColumn Header="收入" Binding="{Binding TotalText}" Width="Auto"/>
+                                            </DataGrid.Columns>
+                                        </DataGrid>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Grid>
             </TabItem>
         </TabControl>
     </Grid>

@@ -5,6 +5,8 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Media;
+using Drawing = System.Drawing;
+using Forms = System.Windows.Forms;
 
 namespace MyBook
 {
@@ -17,6 +19,8 @@ namespace MyBook
         private static extern bool AllocConsole();
 
         readonly Fetcher fetcher = new();
+        Forms.NotifyIcon? trayIcon;
+        bool isExitRequested;
 
         public MainWindow()
         {
@@ -24,6 +28,7 @@ namespace MyBook
             AllocConsole();
 #endif
             InitializeComponent();
+            InitializeTrayIcon();
             fetcher.RunSchedule();
             _ = LoadDashboardAsync();
         }
@@ -60,8 +65,54 @@ namespace MyBook
             }
         }
 
+        private void InitializeTrayIcon()
+        {
+            var menu = new Forms.ContextMenuStrip();
+            menu.Items.Add("退出", null, (_, _) => ExitFromTray());
+            trayIcon = new Forms.NotifyIcon
+            {
+                Text = "MyBook",
+                Icon = Drawing.SystemIcons.Application,
+                ContextMenuStrip = menu,
+                Visible = true
+            };
+            trayIcon.MouseClick += (_, e) =>
+            {
+                if (e.Button == Forms.MouseButtons.Left)
+                    RestoreFromTray();
+            };
+        }
+
+        private void RestoreFromTray()
+        {
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
+        }
+
+        private void ExitFromTray()
+        {
+            isExitRequested = true;
+            if (trayIcon is not null)
+                trayIcon.Visible = false;
+            Close();
+        }
+
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            if (!isExitRequested)
+            {
+                e.Cancel = true;
+                Hide();
+                return;
+            }
+
+            base.OnClosing(e);
+        }
+
         protected override void OnClosed(EventArgs e)
         {
+            trayIcon?.Dispose();
             fetcher.Dispose();
             base.OnClosed(e);
         }
@@ -70,17 +121,27 @@ namespace MyBook
     public class DashboardViewModel : INotifyPropertyChanged
     {
         bool showSingleCurrencyMonthly;
+        double selectedReasonMonthIndex;
+        bool showInvestmentByHolding;
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public string SnapshotTimeText { get; set; } = "";
-        public string LastMonthTabHeader { get; set; } = "上月分类";
+        public string ReasonTabHeader { get; set; } = "分类";
         public TotalAssetsViewModel TotalAssets { get; set; } = new();
         public List<CurrencySummaryViewModel> CurrencySummaries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> RmbMonthlySeries { get; set; } = [];
-        public ReasonFlowSeriesViewModel ReasonRmbSeries { get; set; } = new();
+        public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
+        public List<InvestmentStatisticsPeriodViewModel> InvestmentByReasonPeriods { get; set; } = [];
+        public List<InvestmentStatisticsPeriodViewModel> InvestmentByHoldingPeriods { get; set; } = [];
         public IEnumerable<MonthlyFlowSeriesViewModel> VisibleMonthlySeries => ShowSingleCurrencyMonthly ? MonthlySeries : RmbMonthlySeries;
+        public IEnumerable<InvestmentStatisticsPeriodViewModel> VisibleInvestmentPeriods => ShowInvestmentByHolding ? InvestmentByHoldingPeriods : InvestmentByReasonPeriods;
+        public double ReasonMonthMaximum => Math.Max(0, ReasonMonthSeries.Count - 1);
+        public ReasonFlowSeriesViewModel SelectedReasonSeries => ReasonMonthSeries.Count == 0
+            ? new ReasonFlowSeriesViewModel()
+            : ReasonMonthSeries[Math.Clamp((int)Math.Round(selectedReasonMonthIndex), 0, ReasonMonthSeries.Count - 1)];
+        public string SelectedReasonMonthLabel => SelectedReasonSeries.MonthLabel;
 
         public bool ShowSingleCurrencyMonthly
         {
@@ -96,20 +157,75 @@ namespace MyBook
             }
         }
 
+        public double SelectedReasonMonthIndex
+        {
+            get => selectedReasonMonthIndex;
+            set
+            {
+                var rounded = Math.Round(value);
+                var normalized = ReasonMonthSeries.Count == 0
+                    ? 0
+                    : Math.Clamp(rounded, 0, ReasonMonthSeries.Count - 1);
+                if (selectedReasonMonthIndex == normalized)
+                    return;
+
+                selectedReasonMonthIndex = normalized;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedReasonMonthIndex)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedReasonSeries)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedReasonMonthLabel)));
+            }
+        }
+
+        public bool ShowInvestmentByReason
+        {
+            get => !showInvestmentByHolding;
+            set
+            {
+                if (value)
+                    ShowInvestmentByHolding = false;
+            }
+        }
+
+        public bool ShowInvestmentByHolding
+        {
+            get => showInvestmentByHolding;
+            set
+            {
+                if (showInvestmentByHolding == value)
+                    return;
+
+                showInvestmentByHolding = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowInvestmentByReason)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowInvestmentByHolding)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VisibleInvestmentPeriods)));
+            }
+        }
+
         public static DashboardViewModel From(DashboardData data)
         {
-            return new DashboardViewModel
+            var reasonSeries = data.RmbReasonFlowSeriesByMonth
+                .Select(ReasonFlowSeriesViewModel.From)
+                .ToList();
+            var viewModel = new DashboardViewModel
             {
                 SnapshotTimeText = $"更新于 {DateTime.Now:yyyy-MM-dd HH:mm}",
-                LastMonthTabHeader = $"{data.LastMonthStart:MM月}分类",
+                ReasonTabHeader = "分类",
                 TotalAssets = TotalAssetsViewModel.From(data.TotalAssetsRmb),
                 CurrencySummaries = data.CurrencySummaries.Select(CurrencySummaryViewModel.From).ToList(),
                 MonthlySeries = data.MonthlyFlowSeries
                     .Select(MonthlyFlowSeriesViewModel.From)
                     .ToList(),
                 RmbMonthlySeries = [MonthlyFlowSeriesViewModel.From(data.RmbMonthlyFlowSeries)],
-                ReasonRmbSeries = ReasonFlowSeriesViewModel.From(data.RmbReasonFlowSeries)
+                ReasonMonthSeries = reasonSeries,
+                InvestmentByReasonPeriods = data.InvestmentByReason.Periods
+                    .Select(InvestmentStatisticsPeriodViewModel.From)
+                    .ToList(),
+                InvestmentByHoldingPeriods = data.InvestmentByHolding.Periods
+                    .Select(InvestmentStatisticsPeriodViewModel.From)
+                    .ToList()
             };
+            viewModel.SelectedReasonMonthIndex = Math.Clamp(data.DefaultReasonMonthIndex, 0, Math.Max(0, reasonSeries.Count - 1));
+            return viewModel;
         }
 
         public static DashboardViewModel FromError(string message)
@@ -133,12 +249,14 @@ namespace MyBook
 
         public static CurrencySummaryViewModel From(CurrencyBalanceSummary summary)
         {
-            var net = FormatSummaryMoney(summary.Net);
-            var assets = FormatSignedMoney(summary.Assets, "+");
-            var liabilities = FormatSignedMoney(summary.Liabilities, "-");
+            var symbol = FormatCurrencySymbol(summary.Currency);
+            var net = FormatSummaryMoney(summary.Net, symbol);
+            var shouldShowBreakdown = summary.Assets != 0 && summary.Liabilities != 0;
+            var assets = shouldShowBreakdown ? FormatSignedMoney(summary.Assets, "+", symbol) : new MoneyText("", "");
+            var liabilities = shouldShowBreakdown ? FormatSignedMoney(summary.Liabilities, "-", symbol) : new MoneyText("", "");
             return new CurrencySummaryViewModel
             {
-                Currency = summary.Currency.ToString(),
+                Currency = symbol,
                 NetText = net.DisplayText,
                 NetExactText = net.ExactText,
                 AssetsText = assets.DisplayText,
@@ -148,17 +266,30 @@ namespace MyBook
             };
         }
 
-        private static MoneyText FormatSummaryMoney(decimal value)
+        private static MoneyText FormatSummaryMoney(decimal value, string prefix)
         {
-            return MoneyText.From(value);
+            return MoneyText.From(value, prefix);
         }
 
-        private static MoneyText FormatSignedMoney(decimal value, string sign)
+        public static string FormatCurrencySymbol(CurrencyType currency)
+        {
+            return currency switch
+            {
+                CurrencyType.RMB => "¥",
+                CurrencyType.USD => "$",
+                CurrencyType.JPY => "JP¥",
+                CurrencyType.SGD => "S$",
+                CurrencyType.HKD => "HK$",
+                _ => currency.ToString()
+            };
+        }
+
+        private static MoneyText FormatSignedMoney(decimal value, string sign, string prefix)
         {
             if (value == 0)
                 return new MoneyText("", "");
 
-            var text = MoneyText.From(Math.Abs(value));
+            var text = MoneyText.From(Math.Abs(value), prefix);
             return new MoneyText(
                 $"{sign}{text.DisplayText}",
                 String.IsNullOrWhiteSpace(text.ExactText) ? "" : $"{sign}{text.ExactText}");
@@ -209,13 +340,14 @@ namespace MyBook
 
         public static MonthlyFlowSeriesViewModel From(MonthlyFlowSeries series)
         {
+            var symbol = CurrencySummaryViewModel.FormatCurrencySymbol(series.Currency);
             return new MonthlyFlowSeriesViewModel
             {
                 Currency = series.Currency.ToString(),
                 DisplayName = series.DisplayName,
-                TotalIncomeText = $"收 {series.TotalIncome:N2}",
-                TotalExpenseText = $"支 {series.TotalExpense:N2}",
-                NetChangeText = $"净变动 {series.NetChange:N2}",
+                TotalIncomeText = $"收 {symbol}{series.TotalIncome:N2}",
+                TotalExpenseText = $"支 {symbol}{series.TotalExpense:N2}",
+                NetChangeText = $"净变动 {MoneyText.From(series.NetChange, symbol).DisplayText}",
                 Points = series.Points.Select(MonthlyFlowPointViewModel.From).ToList()
             };
         }
@@ -261,19 +393,28 @@ namespace MyBook
     {
         public string Currency { get; set; } = "";
         public string DisplayName { get; set; } = "";
+        public string MonthLabel { get; set; } = "";
         public string TotalIncomeText { get; set; } = "";
         public string TotalExpenseText { get; set; } = "";
         public List<ReasonFlowItemViewModel> Items { get; set; } = [];
 
         public static ReasonFlowSeriesViewModel From(ReasonFlowSeries series)
         {
+            var items = series.Items.Select(ReasonFlowItemViewModel.From).ToList();
+            var maxTotal = Math.Max(1, items.Count == 0 ? 1 : items.Max(item => item.Total));
+            foreach (var item in items)
+            {
+                item.BarPercent = 100 * (double)(item.Total / maxTotal);
+            }
+
             return new ReasonFlowSeriesViewModel
             {
                 Currency = series.Currency.ToString(),
                 DisplayName = series.DisplayName,
-                TotalIncomeText = $"+{series.TotalIncome:N2}",
-                TotalExpenseText = $"-{series.TotalExpense:N2}",
-                Items = series.Items.Select(ReasonFlowItemViewModel.From).ToList()
+                MonthLabel = series.MonthLabel,
+                TotalIncomeText = $"+¥{series.TotalIncome:N2}",
+                TotalExpenseText = $"-¥{series.TotalExpense:N2}",
+                Items = items
             };
         }
     }
@@ -283,6 +424,9 @@ namespace MyBook
         public string Reason { get; set; } = "";
         public bool IsIncome { get; set; }
         public decimal Total { get; set; }
+        public string KindText => IsIncome ? "收" : "支";
+        public string TotalText { get; set; } = "";
+        public double BarPercent { get; set; }
         public string CurrencyDetails { get; set; } = "";
 
         public static ReasonFlowItemViewModel From(ReasonFlowItem item)
@@ -292,7 +436,38 @@ namespace MyBook
                 Reason = item.Reason,
                 IsIncome = item.IsIncome,
                 Total = item.Total,
+                TotalText = $"¥{item.Total:N0}",
                 CurrencyDetails = item.CurrencyDetails
+            };
+        }
+    }
+
+    public class InvestmentStatisticsPeriodViewModel
+    {
+        public string Title { get; set; } = "";
+        public List<InvestmentStatisticsItemViewModel> Items { get; set; } = [];
+
+        public static InvestmentStatisticsPeriodViewModel From(InvestmentStatisticsPeriod period)
+        {
+            return new InvestmentStatisticsPeriodViewModel
+            {
+                Title = period.Title,
+                Items = period.Items.Select(InvestmentStatisticsItemViewModel.From).ToList()
+            };
+        }
+    }
+
+    public class InvestmentStatisticsItemViewModel
+    {
+        public string Name { get; set; } = "";
+        public string TotalText { get; set; } = "";
+
+        public static InvestmentStatisticsItemViewModel From(InvestmentStatisticsItem item)
+        {
+            return new InvestmentStatisticsItemViewModel
+            {
+                Name = item.Name,
+                TotalText = $"¥{item.Total:N2}"
             };
         }
     }
@@ -304,11 +479,22 @@ namespace MyBook
             typeof(IEnumerable),
             typeof(MonthlyFlowChart),
             new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+        public static readonly DependencyProperty FlowKindProperty = DependencyProperty.Register(
+            nameof(FlowKind),
+            typeof(string),
+            typeof(MonthlyFlowChart),
+            new FrameworkPropertyMetadata("Income", FrameworkPropertyMetadataOptions.AffectsRender));
 
         public IEnumerable? Items
         {
             get => (IEnumerable?)GetValue(ItemsProperty);
             set => SetValue(ItemsProperty, value);
+        }
+
+        public string FlowKind
+        {
+            get => (string)GetValue(FlowKindProperty);
+            set => SetValue(FlowKindProperty, value);
         }
 
         protected override void OnRender(DrawingContext dc)
@@ -326,12 +512,11 @@ namespace MyBook
             var left = 58.0;
             var top = 20.0;
             var right = 18.0;
-            var bottom = 40.0;
+            var bottom = 28.0;
             var chartWidth = Math.Max(1, width - left - right);
             var chartHeight = Math.Max(1, height - top - bottom);
-            var maxValue = Math.Max(1, points.Max(point => Math.Max(
-                point.IncomeSegments.Sum(segment => segment.Value),
-                point.ExpenseSegments.Sum(segment => segment.Value))));
+            var useExpense = String.Equals(FlowKind, "Expense", StringComparison.OrdinalIgnoreCase);
+            var maxValue = Math.Max(1, points.Max(point => GetFlowSegments(point, useExpense).Sum(segment => segment.Value)));
             var axisStep = CalculateAxisStep(maxValue);
             var axisMax = axisStep * Math.Max(1, (int)Math.Ceiling(maxValue / axisStep));
             var gridPen = new Pen(new SolidColorBrush(Color.FromRgb(226, 232, 240)), 1);
@@ -346,7 +531,7 @@ namespace MyBook
 
             dc.DrawLine(gridPen, new Point(left, top), new Point(left, top + chartHeight));
             dc.DrawLine(gridPen, new Point(left, top + chartHeight), new Point(left + chartWidth, top + chartHeight));
-            DrawBars(dc, points, axisMax, left, top, chartWidth, chartHeight);
+            DrawBars(dc, points, axisMax, left, top, chartWidth, chartHeight, useExpense);
             DrawLegend(dc, width);
 
             for (var i = 0; i < points.Count; i++)
@@ -364,18 +549,21 @@ namespace MyBook
             double left,
             double top,
             double chartWidth,
-            double chartHeight)
+            double chartHeight,
+            bool useExpense)
         {
             var groupWidth = chartWidth / points.Count;
-            var barWidth = Math.Min(18, Math.Max(7, groupWidth * 0.22));
+            var barWidth = Math.Min(24, Math.Max(8, groupWidth * 0.28));
             for (var i = 0; i < points.Count; i++)
             {
                 var center = left + groupWidth * i + groupWidth / 2;
-                DrawStackedBar(dc, points[i].IncomeSegments, center - barWidth - 3, top, chartHeight, barWidth, axisMax);
-                DrawStackedBar(dc, points[i].ExpenseSegments, center + 3, top, chartHeight, barWidth, axisMax);
-                DrawText(dc, "收", 10, "#64748B", center - barWidth - 5, top + chartHeight + 1);
-                DrawText(dc, "支", 10, "#64748B", center + 4, top + chartHeight + 1);
+                DrawStackedBar(dc, GetFlowSegments(points[i], useExpense), center - barWidth / 2, top, chartHeight, barWidth, axisMax);
             }
+        }
+
+        private static List<MonthlyFlowSegmentViewModel> GetFlowSegments(MonthlyFlowPointViewModel point, bool useExpense)
+        {
+            return useExpense ? point.ExpenseSegments : point.IncomeSegments;
         }
 
         private static void DrawStackedBar(

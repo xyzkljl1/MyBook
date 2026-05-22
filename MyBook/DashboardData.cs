@@ -5,7 +5,10 @@ namespace MyBook
         public List<CurrencyBalanceSummary> CurrencySummaries { get; set; } = [];
         public List<MonthlyFlowSeries> MonthlyFlowSeries { get; set; } = [];
         public MonthlyFlowSeries RmbMonthlyFlowSeries { get; set; } = new();
-        public ReasonFlowSeries RmbReasonFlowSeries { get; set; } = new();
+        public List<ReasonFlowSeries> RmbReasonFlowSeriesByMonth { get; set; } = [];
+        public int DefaultReasonMonthIndex { get; set; }
+        public InvestmentStatistics InvestmentByReason { get; set; } = new();
+        public InvestmentStatistics InvestmentByHolding { get; set; } = new();
         public decimal TotalAssetsRmb { get; set; }
         public List<CurrencyType> MissingExchangeRateCurrencies { get; set; } = [];
         public DateTime LastMonthStart { get; set; }
@@ -53,6 +56,8 @@ namespace MyBook
     {
         public string DisplayName { get; set; } = "";
         public CurrencyType Currency { get; set; }
+        public DateTime Month { get; set; }
+        public string MonthLabel { get; set; } = "";
         public List<ReasonFlowItem> Items { get; set; } = [];
         public decimal TotalIncome { get; set; }
         public decimal TotalExpense { get; set; }
@@ -64,5 +69,22 @@ namespace MyBook
         public bool IsIncome { get; set; }
         public decimal Total { get; set; }
         public string CurrencyDetails { get; set; } = "";
+    }
+
+    public class InvestmentStatistics
+    {
+        public List<InvestmentStatisticsPeriod> Periods { get; set; } = [];
+    }
+
+    public class InvestmentStatisticsPeriod
+    {
+        public string Title { get; set; } = "";
+        public List<InvestmentStatisticsItem> Items { get; set; } = [];
+    }
+
+    public class InvestmentStatisticsItem
+    {
+        public string Name { get; set; } = "";
+        public decimal Total { get; set; }
     }
 }

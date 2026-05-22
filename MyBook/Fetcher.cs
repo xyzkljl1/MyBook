@@ -57,6 +57,7 @@ namespace MyBook
             {
                 await TryFetchAsync("ICBC", mail.FetchICBCBills);
                 await TryFetchAsync("IBKR", mail.FetchIBKRReports);
+                await TryFetchAsync("Wise", mail.FetchWiseReports);
                 if (stock is not null)
                     await TryFetchAsync("exchange rate", stock.FetchExchangeRates);
             }

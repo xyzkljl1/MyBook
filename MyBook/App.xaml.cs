@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using System.Globalization;
 using System.Windows;
 
 namespace MyBook
@@ -29,6 +30,66 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--fetch-ibkr-reports", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    Console.WriteLine("FetchIBKRReports: load config");
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    Console.WriteLine("FetchIBKRReports: open database");
+                    var database = new DatabaseUtil(config);
+                    Console.WriteLine("FetchIBKRReports: create mail util");
+                    var mail = new MailUtil(config, database);
+                    Console.WriteLine("FetchIBKRReports: start");
+                    Task.Run(mail.FetchIBKRReports).WaitAsync(TimeSpan.FromSeconds(60)).GetAwaiter().GetResult();
+                    Console.WriteLine("FetchIBKRReports: done");
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"FetchIBKRReports failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
+            if (e.Args.Any(arg => arg.Equals("--fetch-wise-reports", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    Console.WriteLine("FetchWiseReports: load config");
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    Console.WriteLine("FetchWiseReports: open database");
+                    var database = new DatabaseUtil(config);
+                    Console.WriteLine("FetchWiseReports: create mail util");
+                    var mail = new MailUtil(config, database);
+                    var wiseMonth = GetArgumentValue(e.Args, "--wise-month");
+                    Console.WriteLine(String.IsNullOrWhiteSpace(wiseMonth)
+                        ? "FetchWiseReports: start"
+                        : $"FetchWiseReports: start {wiseMonth}");
+                    Task.Run(String.IsNullOrWhiteSpace(wiseMonth)
+                            ? mail.FetchWiseReports
+                            : () => mail.FetchWiseReports(ParseMonthArgument(wiseMonth)))
+                        .WaitAsync(TimeSpan.FromSeconds(300))
+                        .GetAwaiter()
+                        .GetResult();
+                    Console.WriteLine("FetchWiseReports: done");
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"FetchWiseReports failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
             MainWindow = new MainWindow();
             MainWindow.Show();
         }
@@ -45,6 +106,34 @@ namespace MyBook
         private static string FormatCounts(Dictionary<string, int> counts)
         {
             return String.Join(", ", counts.Select(item => $"{item.Key}={item.Value}"));
+        }
+
+        private static string? GetArgumentValue(string[] args, string name)
+        {
+            for (var i = 0; i < args.Length; i++)
+            {
+                if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                    return args[i + 1];
+
+                var prefix = name + "=";
+                if (args[i].StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    return args[i][prefix.Length..];
+            }
+
+            return null;
+        }
+
+        private static DateTime ParseMonthArgument(string value)
+        {
+            if (DateTime.TryParseExact(
+                    value,
+                    ["yyyy-MM", "yyyy/MM", "yyyy-MM-dd", "yyyy/MM/dd"],
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var month))
+                return month;
+
+            throw new ArgumentException($"Invalid month argument: {value}");
         }
     }
 }

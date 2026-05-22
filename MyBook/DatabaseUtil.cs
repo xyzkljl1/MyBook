@@ -153,6 +153,36 @@ namespace MyBook
             }
         }
 
+        public bool SaveStatementRecordsWithoutBalanceOnce(
+            StatementImportProvider provider,
+            DateTime time,
+            string statementKey,
+            IEnumerable<Record> records)
+        {
+            var recordList = records.ToList();
+            db.Ado.BeginTran();
+            try
+            {
+                if (IsStatementImported(provider, time, statementKey))
+                {
+                    db.Ado.CommitTran();
+                    return false;
+                }
+
+                var statementImportId = InsertStatementImport(provider, time, statementKey);
+                SaveRecordsCore(recordList, statementImportId);
+                db.Ado.CommitTran();
+                return true;
+            }
+            catch (Exception e)
+            {
+                db.Ado.RollbackTran();
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
+                    return false;
+                throw;
+            }
+        }
+
         public Account GetAccountByTypeAndId(string? accountType, string id)
         {
             return GetAccountByName(BuildAccountName(accountType, id));
@@ -304,7 +334,7 @@ namespace MyBook
                 var beginning = beginningBalances.TryGetValue(key, out var beginningValue) ? beginningValue : 0;
                 var ending = endingBalances.TryGetValue(key, out var endingValue) ? endingValue : 0;
                 var change = recordChanges.TryGetValue(key, out var changeValue) ? changeValue : 0;
-                var expectedEnding = Currency.RoundMoney(beginning + change);
+                var expectedEnding = beginning + change;
                 if (expectedEnding != ending)
                 {
                     throw new InvalidOperationException(
@@ -328,7 +358,7 @@ namespace MyBook
                     : record.v;
             }
 
-            return sums.ToDictionary(item => item.Key, item => Currency.RoundMoney(item.Value));
+            return sums.ToDictionary(item => item.Key, item => item.Value);
         }
 
         private Dictionary<(int AccountId, CurrencyType Currency), decimal> BuildAccountBalanceMap(
@@ -342,7 +372,7 @@ namespace MyBook
                     throw new InvalidOperationException($"{context} account is required.");
 
                 var account = GetPostingAccount(accountBalance.Account);
-                balances[(account.Id, accountBalance.t)] = Currency.RoundMoney(accountBalance.v);
+                balances[(account.Id, accountBalance.t)] = accountBalance.v;
             }
 
             return balances;
@@ -408,16 +438,32 @@ namespace MyBook
             var nextMonth = currentMonth.AddMonths(1);
             var lastMonthStart = currentMonth.AddMonths(-1);
             var lastMonthEnd = currentMonth.AddDays(-1);
+            var reasonMonths = Enumerable.Range(0, 12)
+                .Select(firstMonth.AddMonths)
+                .ToList();
             var records = db.Queryable<Record>()
                 .Where(record => !record.isInternal && record.date >= firstMonth && record.date < nextMonth)
                 .ToList();
             var balances = db.Queryable<AccountBalance>()
                 .Where(balance => balance.v != 0)
                 .ToList();
+            var holdings = db.Queryable<Holding>().ToList();
+            var investmentAccountIds = holdings
+                .Select(holding => holding._account_Id)
+                .Distinct()
+                .ToHashSet();
+            var investmentRecords = db.Queryable<Record>()
+                .Where(record => !record.isInternal && record.v > 0 && record.date < today.Date.AddDays(1))
+                .ToList()
+                .Where(record => investmentAccountIds.Contains(record._account_Id))
+                .ToList();
+            var accounts = db.Queryable<Account>().ToList().ToDictionary(account => account.Id, account => account.name);
+            var holdingNames = BuildHoldingNames(holdings, accounts);
             var exchangeRates = GetCurrencyToRmbRates();
             var usedCurrencies = balances
                 .Select(balance => balance.t)
                 .Union(records.Select(record => record.t))
+                .Union(investmentRecords.Select(record => record.t))
                 .Distinct()
                 .ToList();
 
@@ -426,7 +472,20 @@ namespace MyBook
                 CurrencySummaries = BuildCurrencySummaries(balances),
                 MonthlyFlowSeries = BuildMonthlyFlowSeries(records, firstMonth),
                 RmbMonthlyFlowSeries = BuildRmbMonthlyFlowSeries(records, firstMonth, exchangeRates),
-                RmbReasonFlowSeries = BuildRmbReasonFlowSeries(records, lastMonthStart, currentMonth, exchangeRates),
+                RmbReasonFlowSeriesByMonth = reasonMonths
+                    .Select(month => BuildRmbReasonFlowSeries(records, month, month.AddMonths(1), exchangeRates))
+                    .ToList(),
+                DefaultReasonMonthIndex = Math.Max(0, reasonMonths.FindIndex(month => month == lastMonthStart)),
+                InvestmentByReason = BuildInvestmentStatistics(
+                    investmentRecords,
+                    today,
+                    exchangeRates,
+                    record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason),
+                InvestmentByHolding = BuildInvestmentStatistics(
+                    investmentRecords,
+                    today,
+                    exchangeRates,
+                    record => BuildHoldingInvestmentKey(record, holdingNames)),
                 TotalAssetsRmb = Currency.RoundMoney(balances
                     .Select(balance => TryConvertToRmb(balance.v, balance.t, exchangeRates))
                     .Where(value => value.HasValue)
@@ -601,6 +660,8 @@ namespace MyBook
             {
                 DisplayName = "",
                 Currency = CurrencyType.RMB,
+                Month = start,
+                MonthLabel = start.ToString("yyyy年MM月"),
                 Items = items,
                 TotalIncome = Currency.RoundMoney(items.Where(item => item.IsIncome).Sum(item => item.Total)),
                 TotalExpense = Currency.RoundMoney(items.Where(item => !item.IsIncome).Sum(item => item.Total))
@@ -695,6 +756,84 @@ namespace MyBook
                 .Select(item => $"{item.Currency} ¥{item.Converted:N0}")
                 .ToList();
             return currencies.Count == 0 ? "" : String.Join("、", currencies);
+        }
+
+        private static Dictionary<(int AccountId, string Code), string> BuildHoldingNames(List<Holding> holdings, Dictionary<int, string> accounts)
+        {
+            return holdings
+                .GroupBy(holding => (holding._account_Id, holding.code))
+                .ToDictionary(
+                    group => group.Key,
+                    group =>
+                    {
+                        var holding = group.First();
+                        var display = String.IsNullOrWhiteSpace(holding.displayText)
+                            ? holding.code
+                            : holding.displayText;
+                        if (String.IsNullOrWhiteSpace(display))
+                            display = holding.holdingType.ToString();
+                        return accounts.TryGetValue(holding._account_Id, out var accountName)
+                            ? $"{display} / {accountName}"
+                            : display;
+                    });
+        }
+
+        private static string BuildHoldingInvestmentKey(Record record, Dictionary<(int AccountId, string Code), string> holdingNames)
+        {
+            if (String.IsNullOrWhiteSpace(record.DestAccount))
+                return "未关联持仓";
+
+            return holdingNames.TryGetValue((record._account_Id, record.DestAccount), out var display)
+                ? display
+                : record.DestAccount;
+        }
+
+        private static InvestmentStatistics BuildInvestmentStatistics(
+            List<Record> records,
+            DateTime today,
+            Dictionary<CurrencyType, decimal> exchangeRates,
+            Func<Record, string> keySelector)
+        {
+            var end = today.Date.AddDays(1);
+            return new InvestmentStatistics
+            {
+                Periods =
+                [
+                    BuildInvestmentStatisticsPeriod("过去一个月", records, today.Date.AddMonths(-1), end, exchangeRates, keySelector),
+                    BuildInvestmentStatisticsPeriod("年初至今", records, new DateTime(today.Year, 1, 1), end, exchangeRates, keySelector),
+                    BuildInvestmentStatisticsPeriod("开始至今", records, DateTime.MinValue, end, exchangeRates, keySelector)
+                ]
+            };
+        }
+
+        private static InvestmentStatisticsPeriod BuildInvestmentStatisticsPeriod(
+            string title,
+            List<Record> records,
+            DateTime start,
+            DateTime end,
+            Dictionary<CurrencyType, decimal> exchangeRates,
+            Func<Record, string> keySelector)
+        {
+            var items = records
+                .Where(record => record.date >= start && record.date < end && record.v > 0)
+                .GroupBy(keySelector)
+                .Select(group => new InvestmentStatisticsItem
+                {
+                    Name = group.Key,
+                    Total = Currency.RoundMoney(group
+                        .Select(record => TryConvertToRmb(record.v, record.t, exchangeRates))
+                        .Where(value => value.HasValue)
+                        .Sum(value => value!.Value))
+                })
+                .Where(item => item.Total > 0)
+                .OrderByDescending(item => item.Total)
+                .ThenBy(item => item.Name)
+                .ToList();
+            return new InvestmentStatisticsPeriod
+            {
+                Title = title,
+                Items = items
+            };
         }
 
         public DatabaseCleanupResult CleanVolatileData()
@@ -960,10 +1099,10 @@ namespace MyBook
 
             var balanceSums = accountBalances
                 .GroupBy(balance => balance.t)
-                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(balance => balance.v)));
+                .ToDictionary(group => group.Key, group => group.Sum(balance => balance.v));
             var holdingSums = holdings
                 .GroupBy(holding => holding.currentPrice.t)
-                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(holding => holding.totalPrice.v)));
+                .ToDictionary(group => group.Key, group => group.Sum(holding => holding.totalPrice.v));
             var currencies = balanceSums.Keys
                 .Union(holdingSums.Keys)
                 .ToList();
