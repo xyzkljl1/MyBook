@@ -1744,7 +1744,7 @@ namespace MyBook
                     left join (
                         select `provider`, min(`time`) as `time`
                         from `StatementImports`
-                        where `provider` in ('IBKRReportMail', 'ICBCBillMail')
+                        where `provider` in ('IBKRReportMail', 'ICBCBillMail', 'OCBCStatementMail')
                         group by `provider`
                     ) fixedImport
                         on statementImport.`provider` = fixedImport.`provider`

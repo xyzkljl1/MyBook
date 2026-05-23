@@ -74,7 +74,7 @@ namespace MyBook
                     Task.Run(String.IsNullOrWhiteSpace(wiseMonth)
                             ? mail.FetchWiseReports
                             : () => mail.FetchWiseReports(ParseMonthArgument(wiseMonth)))
-                        .WaitAsync(TimeSpan.FromSeconds(300))
+                        .WaitAsync(TimeSpan.FromMinutes(20))
                         .GetAwaiter()
                         .GetResult();
                     Console.WriteLine("FetchWiseReports: done");
@@ -108,7 +108,7 @@ namespace MyBook
                     Task.Run(String.IsNullOrWhiteSpace(ocbcMonth)
                             ? mail.FetchOCBCReports
                             : () => mail.FetchOCBCReports(ParseMonthArgument(ocbcMonth)))
-                        .WaitAsync(TimeSpan.FromSeconds(300))
+                        .WaitAsync(TimeSpan.FromMinutes(20))
                         .GetAwaiter()
                         .GetResult();
                     Console.WriteLine("FetchOCBCReports: done");

@@ -64,7 +64,7 @@ namespace MyBook
                 await TryFetchAsync("IBKR", mail.FetchIBKRReports);
                 if (ShouldFetchProviderAfterDays("Wise", StatementImportProvider.WiseMail, LowVolumeMailFetchIntervalDays))
                     await TryFetchAsync("Wise", mail.FetchWiseReports);
-                if (ShouldFetchProviderAfterDays("OCBC", StatementImportProvider.OCBCMail, LowVolumeMailFetchIntervalDays))
+                if (ShouldFetchMonthlyProvider("OCBC", StatementImportProvider.OCBCStatementMail))
                     await TryFetchAsync("OCBC", mail.FetchOCBCReports);
                 if (graphQL is not null && ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport))
                     await TryFetchAsync("Nexus DP", graphQL.FetchNexusDpMonthlyReports);
