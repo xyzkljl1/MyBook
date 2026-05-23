@@ -772,7 +772,8 @@ namespace MyBook
                 AssetSummaryPoints = assetSummaryPoints,
                 CurrencySummaries = BuildCurrencySummaries(
                     balances,
-                    records.Where(record => record.date >= currentMonth && record.date < nextMonth).ToList()),
+                    records.Where(record => record.date >= currentMonth && record.date < nextMonth).ToList(),
+                    exchangeRates),
                 MonthlyFlowSeries = BuildMonthlyFlowSeries(records, firstMonth),
                 RmbMonthlyFlowSeries = BuildRmbMonthlyFlowSeries(records, firstMonth, exchangeRates),
                 RmbReasonFlowSeriesByMonth = reasonMonths
@@ -985,7 +986,7 @@ namespace MyBook
                         IsToday = point.Date == today,
                         HasData = true,
                         TotalAssetsRmb = BuildTotalAssetsRmb(point.Balances, exchangeRates),
-                        CurrencySummaries = BuildCurrencySummaries(point.Balances, monthToDateRecords)
+                        CurrencySummaries = BuildCurrencySummaries(point.Balances, monthToDateRecords, exchangeRates)
                     };
                 })
                 .ToList();
@@ -1003,11 +1004,11 @@ namespace MyBook
 
         private static List<CurrencyBalanceSummary> BuildCurrencySummaries(
             List<AccountBalance> balances,
-            List<Record> currentMonthRecords)
+            List<Record> currentMonthRecords,
+            Dictionary<CurrencyType, decimal> exchangeRates)
         {
             return balances
                 .GroupBy(balance => balance.t)
-                .OrderBy(group => group.Key)
                 .Select(group =>
                 {
                     var currencyRecords = currentMonthRecords
@@ -1026,6 +1027,8 @@ namespace MyBook
                         AccountCount = group.Select(balance => balance._account_Id).Distinct().Count()
                     };
                 })
+                .OrderByDescending(summary => Math.Abs(TryConvertToRmb(summary.Net, summary.Currency, exchangeRates) ?? 0))
+                .ThenBy(summary => summary.Currency)
                 .ToList();
         }
 

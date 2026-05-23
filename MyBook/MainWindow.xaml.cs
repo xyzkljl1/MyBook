@@ -400,12 +400,13 @@ namespace MyBook
         public string NetExactText { get; set; } = "";
         public string IncomeText { get; set; } = "";
         public string ExpenseText { get; set; } = "";
-        public string AssetsMinusLiabilitiesText { get; set; } = "";
+        public string AssetsText { get; set; } = "";
+        public string LiabilitiesText { get; set; } = "";
+        public string BreakdownSeparatorText { get; set; } = "";
 
         public static CurrencySummaryViewModel From(CurrencyBalanceSummary summary)
         {
-            var symbol = FormatCurrencySymbol(summary.Currency);
-            var net = FormatSummaryMoney(summary.Net, symbol);
+            var net = FormatSummaryMoney(summary.Net, summary.Currency);
             return new CurrencySummaryViewModel
             {
                 Currency = summary.Currency.ToString(),
@@ -414,13 +415,16 @@ namespace MyBook
                 NetExactText = net.ExactText,
                 IncomeText = FormatFlowAmount(summary.TotalIncome, "+"),
                 ExpenseText = FormatFlowAmount(summary.TotalExpense, "-"),
-                AssetsMinusLiabilitiesText = FormatAssetsMinusLiabilities(summary.Assets, summary.Liabilities)
+                AssetsText = FormatBreakdownAmount(summary.Assets, summary.Liabilities),
+                LiabilitiesText = FormatBreakdownAmount(summary.Liabilities, summary.Assets),
+                BreakdownSeparatorText = summary.Assets != 0 && summary.Liabilities != 0 ? "-" : ""
             };
         }
 
-        private static MoneyText FormatSummaryMoney(decimal value, string prefix)
+        private static MoneyText FormatSummaryMoney(decimal value, CurrencyType currency)
         {
-            return MoneyText.From(value, prefix);
+            var text = MoneyText.From(value);
+            return new MoneyText($"{text.DisplayText}  {currency}", text.ExactText);
         }
 
         public static string FormatCurrencySymbol(CurrencyType currency)
@@ -436,12 +440,12 @@ namespace MyBook
             };
         }
 
-        private static string FormatAssetsMinusLiabilities(decimal assets, decimal liabilities)
+        private static string FormatBreakdownAmount(decimal value, decimal pairedValue)
         {
-            if (assets == 0 || liabilities == 0)
+            if (value == 0 || pairedValue == 0)
                 return "";
 
-            return $"{MoneyText.FormatAmount(Math.Abs(assets))}-{MoneyText.FormatAmount(Math.Abs(liabilities))}";
+            return MoneyText.FormatAmount(Math.Abs(value));
         }
 
         private static string FormatCompactAmount(decimal value)
