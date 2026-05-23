@@ -919,7 +919,10 @@ namespace MyBook
             var baseDate = baseSnapshot.Snapshot.time.Date;
             var targetEnd = targetDate.Date.AddDays(1);
             var records = db.Queryable<Record>()
-                .Where(record => record.date > baseDate && record.date < targetEnd)
+                .Where(record => !record.isInternal
+                    && !record.isRefundMatched
+                    && record.date > baseDate
+                    && record.date < targetEnd)
                 .ToList();
             foreach (var record in records)
             {
