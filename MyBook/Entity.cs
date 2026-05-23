@@ -179,6 +179,14 @@ namespace MyBook
         public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','WiseMail','Manual')";
         public const string SnapshotSource = "enum('AutoDaily','Manual')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
+        public const string AccountUsage = "enum('Life','Investment','Transit')";
+    }
+
+    public enum AccountUsage
+    {
+        Life,
+        Investment,
+        Transit
     }
 
     // 账户。一个账户可以同时拥有多个币种余额，具体余额保存在 AccountBalances 中。
@@ -199,6 +207,13 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "''")]
         public string desc { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "1")]
+        public bool relativeBalance { get; set; } = true; // 无法直接获取真实余额，只能根据变动值推算。
+
+        // 仅用于 UI 统计分组，不影响余额、流水和导入逻辑。
+        [SugarColumn(DefaultValue = "Life", ColumnDataType = MySqlEnumColumnTypes.AccountUsage, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public AccountUsage usage { get; set; } = AccountUsage.Life;
 
         [SugarColumn(IsNullable = true)]
         public int? _primaryAccount_Id { get; set; }

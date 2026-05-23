@@ -436,6 +436,7 @@ namespace MyBook
         public string MonthLabel { get; set; } = "";
         public string TotalIncomeText { get; set; } = "";
         public string TotalExpenseText { get; set; } = "";
+        public string TotalFlowText { get; set; } = "";
         public List<ReasonFlowItemViewModel> Items { get; set; } = [];
 
         public static ReasonFlowSeriesViewModel From(ReasonFlowSeries series)
@@ -454,6 +455,7 @@ namespace MyBook
                 MonthLabel = series.MonthLabel,
                 TotalIncomeText = $"+¥{series.TotalIncome:N2}",
                 TotalExpenseText = $"-¥{series.TotalExpense:N2}",
+                TotalFlowText = $"¥{series.TotalIncome + series.TotalExpense:N2}",
                 Items = items
             };
         }
@@ -573,7 +575,7 @@ namespace MyBook
             var width = ActualWidth;
             var height = ActualHeight;
             var left = 58.0;
-            var top = 28.0;
+            var top = 46.0;
             var right = 58.0;
             var bottom = 28.0;
             var chartWidth = Math.Max(1, width - left - right);
@@ -672,13 +674,19 @@ namespace MyBook
             if (total <= 0)
                 return;
 
-            var barTop = top + chartHeight - chartHeight * (double)(total / axisMax);
-            var textTop = barTop - 17;
-            if (textTop < top + 2)
-                textTop = barTop + 3;
-
             var color = useExpense ? "#BE123C" : "#047857";
-            DrawCenteredText(dc, total.ToString("N0", CultureInfo.InvariantCulture), 10, color, centerX, textTop);
+            var text = CreateText(total.ToString("N0", CultureInfo.InvariantCulture), 10, ParseBrush(color));
+            var barTop = top + chartHeight - chartHeight * (double)(total / axisMax);
+            var textTop = Math.Max(2, barTop - text.Height - 4);
+            var textLeft = centerX - text.Width / 2;
+            var background = new SolidColorBrush(Color.FromArgb(230, 255, 255, 255));
+            dc.DrawRoundedRectangle(
+                background,
+                null,
+                new Rect(textLeft - 3, textTop - 1, text.Width + 6, text.Height + 2),
+                4,
+                4);
+            dc.DrawText(text, new Point(textLeft, textTop));
         }
 
         private static void DrawLegend(DrawingContext dc, double width)

@@ -721,6 +721,14 @@ namespace MyBook
             var records = db.Queryable<Record>()
                 .Where(record => !record.isInternal && !record.isRefundMatched && record.date >= firstMonth && record.date < nextMonth)
                 .ToList();
+            var accountList = db.Queryable<Account>().ToList();
+            var lifeAccountIds = accountList
+                .Where(account => account.usage == AccountUsage.Life)
+                .Select(account => account.Id)
+                .ToHashSet();
+            var lifeRecords = records
+                .Where(record => lifeAccountIds.Contains(record._account_Id))
+                .ToList();
             var balances = db.Queryable<AccountBalance>()
                 .Where(balance => balance.v != 0)
                 .ToList();
@@ -734,7 +742,7 @@ namespace MyBook
                 .ToList()
                 .Where(record => investmentAccountIds.Contains(record._account_Id))
                 .ToList();
-            var accounts = db.Queryable<Account>().ToList().ToDictionary(account => account.Id, account => account.name);
+            var accounts = accountList.ToDictionary(account => account.Id, account => account.name);
             var holdingNames = BuildHoldingNames(holdings, accounts);
             var exchangeRates = GetCurrencyToRmbRates();
             var usedCurrencies = balances
@@ -750,7 +758,7 @@ namespace MyBook
                 MonthlyFlowSeries = BuildMonthlyFlowSeries(records, firstMonth),
                 RmbMonthlyFlowSeries = BuildRmbMonthlyFlowSeries(records, firstMonth, exchangeRates),
                 RmbReasonFlowSeriesByMonth = reasonMonths
-                    .Select(month => BuildRmbReasonFlowSeries(records, month, month.AddMonths(1), exchangeRates))
+                    .Select(month => BuildRmbReasonFlowSeries(lifeRecords, month, month.AddMonths(1), exchangeRates))
                     .ToList(),
                 DefaultReasonMonthIndex = Math.Max(0, reasonMonths.FindIndex(month => month == lastMonthStart)),
                 InvestmentByReason = BuildInvestmentStatistics(

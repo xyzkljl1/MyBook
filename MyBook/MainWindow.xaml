@@ -212,10 +212,7 @@
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
                         <DockPanel>
-                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                                <TextBox Style="{StaticResource SelectableText}" Text="{Binding SelectedReasonSeries.TotalIncomeText}" FontSize="13" Foreground="#047857" Margin="0,0,16,0"/>
-                                <TextBox Style="{StaticResource SelectableText}" Text="{Binding SelectedReasonSeries.TotalExpenseText}" FontSize="13" Foreground="#BE123C"/>
-                            </StackPanel>
+                            <TextBox DockPanel.Dock="Right" Style="{StaticResource SelectableText}" Text="{Binding SelectedReasonSeries.TotalFlowText}" FontSize="13" Foreground="#334155"/>
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="{Binding SelectedReasonMonthLabel}"
                                            FontSize="15"
