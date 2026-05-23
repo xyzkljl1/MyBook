@@ -1540,14 +1540,12 @@ namespace MyBook
                     continue;
                 }
 
-                using var memory = new MemoryStream();
-                mimePart.Content.DecodeTo(memory);
                 attachments.Add(new InMemoryIBKRReportAttachment(
                     fileName,
                     attachmentInfo.ReportType,
                     attachmentInfo.ReportId,
                     attachmentInfo.ReportDate,
-                    memory.ToArray()));
+                    ReadMimePartBytes(mimePart)));
             }
 
             return attachments;
@@ -1598,13 +1596,6 @@ namespace MyBook
                 match.Groups["id"].Value,
                 reportDate);
             return true;
-        }
-
-        private static string GetAttachmentFileName(MimeEntity attachment)
-        {
-            return attachment.ContentDisposition?.FileName
-                ?? attachment.ContentType.Name
-                ?? "";
         }
 
         private sealed record IBKRParsedReport(

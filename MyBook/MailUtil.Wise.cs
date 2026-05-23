@@ -6,8 +6,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using MailKit;
-using MailKit.Net.Imap;
 using MailKit.Search;
 using MimeKit;
 
@@ -25,10 +23,8 @@ namespace MyBook
         private const string WiseRmbUnknownRecipientName = "Wise汇款收款方";
         private const string WiseRmbUnknownRecipientAccount = "Alipay";
         private const string WiseReceivedFundsDestinationAccount = "OCBC";
-        private const int WiseMailClientTimeoutMilliseconds = 30000;
 
         private static readonly DateTime WiseSearchStartDate = new(2025, 1, 1);
-        private static readonly TimeSpan WiseMailClientTimeout = TimeSpan.FromMilliseconds(WiseMailClientTimeoutMilliseconds);
         private static readonly string[] WisePaypalCounterpartyNames = ["PAYPAL"];
         private static readonly string[] WiseTransactionSubjectKeywords =
         [
@@ -46,8 +42,8 @@ namespace MyBook
 
         public async Task FetchWiseReports(DateTime date)
         {
-            var reportMonth = FirstDayOfMonth(date);
-            await FetchWiseReports(reportMonth, reportMonth.AddMonths(1));
+            var range = GetMonthRange(date);
+            await FetchWiseReports(range.Since, range.Before);
         }
 
         private async Task FetchWiseReports(DateTime since, DateTime before)
@@ -85,44 +81,14 @@ namespace MyBook
 
         private async Task<List<MimeMessage>> SearchWiseMails(DateTime since, DateTime before)
         {
-            try
-            {
-                using ImapClient client = new();
-                client.Timeout = WiseMailClientTimeoutMilliseconds;
-                client.CheckCertificateRevocation = false;
-                client.ProxyClient = null;
-
-                Console.WriteLine($"mail connect direct Wise {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}");
-                await RunWiseMailOperation(token => client.ConnectAsync("imap.mail.yahoo.com", 993, true, token));
-                Console.WriteLine("Wise mail connected");
-                await RunWiseMailOperation(token => client.AuthenticateAsync(username, apppasswd, token));
-                Console.WriteLine("Wise mail authenticated");
-                await RunWiseMailOperation(token => client.Inbox.OpenAsync(FolderAccess.ReadOnly, token));
-                Console.WriteLine("Wise mail inbox opened");
-
-                var query = SearchQuery.FromContains(WiseMailSender)
-                    .And(SearchQuery.SentSince(since.Date))
-                    .And(SearchQuery.SentBefore(before.Date));
-                var uids = await RunWiseMailOperation(token => client.Inbox.SearchAsync(query, token));
-                Console.WriteLine($"Wise mail search found {uids.Count}");
-                var messages = new List<MimeMessage>();
-                foreach (var uid in uids)
-                {
-                    var message = await RunWiseMailOperation(token => client.Inbox.GetMessageAsync(uid, token));
-                    if (IsWiseTransactionMail(message))
-                        messages.Add(message);
-                }
-
-                return messages
-                    .OrderBy(GetWiseMailDateTime)
-                    .ThenBy(message => message.Subject, StringComparer.Ordinal)
-                    .ToList();
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"fetch Wise mail fail :{e.Message}");
-                throw new InvalidOperationException($"Fetch Wise mail failed: {e.Message}", e);
-            }
+            var query = SearchQuery.FromContains(WiseMailSender)
+                .And(SearchQuery.SentSince(since.Date))
+                .And(SearchQuery.SentBefore(before.Date));
+            return await SearchMessages(
+                $"Wise {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}",
+                query,
+                IsWiseTransactionMail,
+                GetMailDateTime);
         }
 
         private static bool IsWiseTransactionMail(MimeMessage message)
@@ -134,8 +100,7 @@ namespace MyBook
 
         private static bool IsWiseMail(MimeMessage message)
         {
-            return message.From.Mailboxes.Any(mailbox =>
-                String.Equals(mailbox.Address, WiseMailSender, StringComparison.OrdinalIgnoreCase));
+            return IsFrom(message, WiseMailSender);
         }
 
         private static List<WiseParsedMail> ParseWiseMails(List<MimeMessage> messages, Account account, WiseSettings settings)
@@ -161,7 +126,7 @@ namespace MyBook
 
             var subject = NormalizeWiseText(message.Subject ?? "");
             var text = NormalizeWiseText(GetMessageText(message));
-            var time = GetWiseMailDateTime(message);
+            var time = GetMailDateTime(message);
             var source = $"Wise mail: {subject}";
             var statementKey = BuildWiseStatementKey(message, subject, text);
 
@@ -657,12 +622,6 @@ namespace MyBook
                 || counterparty.Contains("IBKR", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static DateTime GetWiseMailDateTime(MimeMessage message)
-        {
-            var localTime = message.Date.LocalDateTime;
-            return localTime == default ? GetMailDate(message) : localTime;
-        }
-
         private static string BuildWiseStatementKey(MimeMessage message, string subject, string text)
         {
             var match = Regex.Match(subject + " " + text, @"#(?<id>\d+)");
@@ -700,18 +659,6 @@ namespace MyBook
         {
             const int maxLength = 240;
             return text.Length <= maxLength ? text : text[..maxLength] + "...";
-        }
-
-        private static async Task RunWiseMailOperation(Func<CancellationToken, Task> operation)
-        {
-            using var cancellation = new CancellationTokenSource(WiseMailClientTimeoutMilliseconds);
-            await operation(cancellation.Token).WaitAsync(WiseMailClientTimeout);
-        }
-
-        private static async Task<T> RunWiseMailOperation<T>(Func<CancellationToken, Task<T>> operation)
-        {
-            using var cancellation = new CancellationTokenSource(WiseMailClientTimeoutMilliseconds);
-            return await operation(cancellation.Token).WaitAsync(WiseMailClientTimeout);
         }
 
         private sealed record WiseParsedMail(
