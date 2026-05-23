@@ -724,11 +724,12 @@ namespace MyBook
             var nextMonth = currentMonth.AddMonths(1);
             var lastMonthStart = currentMonth.AddMonths(-1);
             var lastMonthEnd = currentMonth.AddDays(-1);
+            var reasonFirstMonth = lastMonthStart.AddMonths(-11);
             var reasonMonths = Enumerable.Range(0, 12)
-                .Select(firstMonth.AddMonths)
+                .Select(reasonFirstMonth.AddMonths)
                 .ToList();
             var records = db.Queryable<Record>()
-                .Where(record => !record.isInternal && !record.isRefundMatched && record.date >= firstMonth && record.date < nextMonth)
+                .Where(record => !record.isInternal && !record.isRefundMatched && record.date >= reasonFirstMonth && record.date < nextMonth)
                 .ToList();
             var accountList = db.Queryable<Account>().ToList();
             var lifeAccountIds = accountList
@@ -742,9 +743,9 @@ namespace MyBook
                 .Where(balance => balance.v != 0)
                 .ToList();
             var holdings = db.Queryable<Holding>().ToList();
-            var investmentAccountIds = holdings
-                .Select(holding => holding._account_Id)
-                .Distinct()
+            var investmentAccountIds = accountList
+                .Where(account => account.usage == AccountUsage.Investment)
+                .Select(account => account.Id)
                 .ToHashSet();
             var investmentRecords = db.Queryable<Record>()
                 .Where(record => !record.isInternal && !record.isRefundMatched && record.v > 0 && record.date < today.Date.AddDays(1))
@@ -752,7 +753,7 @@ namespace MyBook
                 .Where(record => investmentAccountIds.Contains(record._account_Id))
                 .ToList();
             var accounts = accountList.ToDictionary(account => account.Id, account => account.name);
-            var holdingNames = BuildHoldingNames(holdings, accounts);
+            var holdingNames = BuildHoldingNames(holdings);
             var exchangeRates = GetCurrencyToRmbRates();
             var assetSummaryDates = BuildAssetSummaryDates(today.Date);
             var assetSummaryBalances = BuildAssetSummaryBalanceSets(assetSummaryDates, balances, today.Date);
@@ -867,19 +868,74 @@ namespace MyBook
                     }
 
                     var snapshot = GetDailySnapshot(date);
-                    if (snapshot is null)
+                    if (snapshot is not null)
+                        return BuildAssetSummaryBalanceSetFromSnapshot(date, snapshot);
+
+                    var baseSnapshot = GetLatestDailySnapshotBefore(date);
+                    if (baseSnapshot is null)
                         return new AssetSummaryBalanceSet(date, null, false, []);
 
-                    var balances = snapshot.AccountBalances
-                        .Where(balance => balance.Amount != 0)
-                        .Select(balance => new AccountBalance
-                        {
-                            _account_Id = balance.AccountId,
-                            t = balance.CurrencyType,
-                            v = balance.Amount
-                        })
-                        .ToList();
-                    return new AssetSummaryBalanceSet(date, snapshot.Snapshot.time, true, balances);
+                    return new AssetSummaryBalanceSet(
+                        date,
+                        baseSnapshot.Snapshot.time,
+                        true,
+                        BuildRolledForwardBalances(baseSnapshot, date));
+                })
+                .ToList();
+        }
+
+        private SnapshotData? GetLatestDailySnapshotBefore(DateTime date)
+        {
+            var key = BuildDailySnapshotKey(date);
+            var snapshot = db.Queryable<Snapshot>()
+                .Where(it => it.source == SnapshotSource.AutoDaily)
+                .OrderByDescending(it => it.snapshotKey)
+                .ToList()
+                .FirstOrDefault(it => String.CompareOrdinal(it.snapshotKey, key) < 0);
+            return snapshot is null ? null : ReadSnapshotData(snapshot);
+        }
+
+        private static AssetSummaryBalanceSet BuildAssetSummaryBalanceSetFromSnapshot(
+            DateTime date,
+            SnapshotData snapshot)
+        {
+            var balances = snapshot.AccountBalances
+                .Where(balance => balance.Amount != 0)
+                .Select(balance => new AccountBalance
+                {
+                    _account_Id = balance.AccountId,
+                    t = balance.CurrencyType,
+                    v = balance.Amount
+                })
+                .ToList();
+            return new AssetSummaryBalanceSet(date, snapshot.Snapshot.time, true, balances);
+        }
+
+        private List<AccountBalance> BuildRolledForwardBalances(SnapshotData baseSnapshot, DateTime targetDate)
+        {
+            var balances = baseSnapshot.AccountBalances
+                .GroupBy(balance => (balance.AccountId, balance.CurrencyType))
+                .ToDictionary(group => group.Key, group => group.Sum(balance => balance.Amount));
+            var baseDate = baseSnapshot.Snapshot.time.Date;
+            var targetEnd = targetDate.Date.AddDays(1);
+            var records = db.Queryable<Record>()
+                .Where(record => record.date > baseDate && record.date < targetEnd)
+                .ToList();
+            foreach (var record in records)
+            {
+                var key = (record._account_Id, record.t);
+                balances[key] = balances.TryGetValue(key, out var current)
+                    ? current + record.v
+                    : record.v;
+            }
+
+            return balances
+                .Where(item => item.Value != 0)
+                .Select(item => new AccountBalance
+                {
+                    _account_Id = item.Key.AccountId,
+                    t = item.Key.CurrencyType,
+                    v = item.Value
                 })
                 .ToList();
         }
@@ -1188,7 +1244,7 @@ namespace MyBook
             return currencies.Count == 0 ? "" : String.Join("、", currencies);
         }
 
-        private static Dictionary<(int AccountId, string Code), string> BuildHoldingNames(List<Holding> holdings, Dictionary<int, string> accounts)
+        private static Dictionary<(int AccountId, string Code), string> BuildHoldingNames(List<Holding> holdings)
         {
             return holdings
                 .GroupBy(holding => (holding._account_Id, holding.code))
@@ -1202,9 +1258,7 @@ namespace MyBook
                             : holding.displayText;
                         if (String.IsNullOrWhiteSpace(display))
                             display = holding.holdingType.ToString();
-                        return accounts.TryGetValue(holding._account_Id, out var accountName)
-                            ? $"{display} / {accountName}"
-                            : display;
+                        return display;
                     });
         }
 
@@ -1226,53 +1280,100 @@ namespace MyBook
             Dictionary<CurrencyType, decimal> exchangeRates,
             Dictionary<(int AccountId, string Code), string> holdingNames)
         {
+            var investmentAccounts = investmentAccountIds
+                .Select(accountId =>
+                {
+                    var accountName = accounts.TryGetValue(accountId, out var name) ? name : $"Account {accountId}";
+                    return new
+                    {
+                        AccountId = accountId,
+                        AccountName = accountName,
+                        AccountType = GetAccountType(accountName)
+                    };
+                })
+                .OrderBy(account => account.AccountType)
+                .ThenBy(account => account.AccountName)
+                .ToList();
+
             var statistics = new List<InvestmentAccountStatistics>
             {
-                new()
-                {
-                    DisplayName = "所有账户",
-                    ByReason = BuildInvestmentStatistics(
-                        investmentRecords,
-                        today,
-                        exchangeRates,
-                        record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason),
-                    ByHolding = BuildInvestmentStatistics(
-                        investmentRecords,
-                        today,
-                        exchangeRates,
-                        record => BuildHoldingInvestmentKey(record, holdingNames))
-                }
+                BuildInvestmentAccountStatistic("所有账户", investmentRecords, today, exchangeRates, holdingNames)
             };
 
-            statistics.AddRange(investmentAccountIds
-                .Select(accountId => new
+            foreach (var group in investmentAccounts
+                .GroupBy(account => account.AccountType, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(group => group.Key))
+            {
+                var groupAccounts = group
+                    .OrderBy(account => account.AccountName)
+                    .ToList();
+                if (groupAccounts.Count > 1)
                 {
-                    AccountId = accountId,
-                    AccountName = accounts.TryGetValue(accountId, out var accountName) ? accountName : $"Account {accountId}"
-                })
-                .OrderBy(account => account.AccountName)
-                .Select(account =>
+                    var accountIds = groupAccounts.Select(account => account.AccountId).ToHashSet();
+                    var accountRecords = investmentRecords
+                        .Where(record => accountIds.Contains(record._account_Id))
+                        .ToList();
+                    statistics.Add(BuildInvestmentAccountStatistic(
+                        BuildAccountTypeDisplayName(group.Key),
+                        accountRecords,
+                        today,
+                        exchangeRates,
+                        holdingNames));
+                }
+
+                foreach (var account in groupAccounts)
                 {
                     var accountRecords = investmentRecords
                         .Where(record => record._account_Id == account.AccountId)
                         .ToList();
-                    return new InvestmentAccountStatistics
-                    {
-                        DisplayName = account.AccountName,
-                        ByReason = BuildInvestmentStatistics(
-                            accountRecords,
-                            today,
-                            exchangeRates,
-                            record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason),
-                        ByHolding = BuildInvestmentStatistics(
-                            accountRecords,
-                            today,
-                            exchangeRates,
-                            record => BuildHoldingInvestmentKey(record, holdingNames))
-                    };
-                }));
+                    var statistic = BuildInvestmentAccountStatistic(
+                        account.AccountName,
+                        accountRecords,
+                        today,
+                        exchangeRates,
+                        holdingNames);
+                    statistics.Add(statistic);
+                }
+            }
 
             return statistics;
+        }
+
+        private static InvestmentAccountStatistics BuildInvestmentAccountStatistic(
+            string displayName,
+            List<Record> records,
+            DateTime today,
+            Dictionary<CurrencyType, decimal> exchangeRates,
+            Dictionary<(int AccountId, string Code), string> holdingNames)
+        {
+            return new InvestmentAccountStatistics
+            {
+                DisplayName = displayName,
+                ByReason = BuildInvestmentStatistics(
+                    records,
+                    today,
+                    exchangeRates,
+                    record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason),
+                ByHolding = BuildInvestmentStatistics(
+                    records,
+                    today,
+                    exchangeRates,
+                    record => BuildHoldingInvestmentKey(record, holdingNames))
+            };
+        }
+
+        private static string GetAccountType(string accountName)
+        {
+            var normalized = accountName.Trim();
+            var separatorIndex = normalized.IndexOf('_');
+            return separatorIndex > 0 ? normalized[..separatorIndex] : normalized;
+        }
+
+        private static string BuildAccountTypeDisplayName(string accountType)
+        {
+            return String.IsNullOrWhiteSpace(accountType)
+                ? "未分类账户"
+                : $"{accountType} 账户";
         }
 
         private static InvestmentStatistics BuildInvestmentStatistics(

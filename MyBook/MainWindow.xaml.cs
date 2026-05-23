@@ -400,30 +400,21 @@ namespace MyBook
         public string NetExactText { get; set; } = "";
         public string IncomeText { get; set; } = "";
         public string ExpenseText { get; set; } = "";
-        public string AssetsText { get; set; } = "";
-        public string AssetsExactText { get; set; } = "";
-        public string LiabilitiesText { get; set; } = "";
-        public string LiabilitiesExactText { get; set; } = "";
+        public string AssetsMinusLiabilitiesText { get; set; } = "";
 
         public static CurrencySummaryViewModel From(CurrencyBalanceSummary summary)
         {
             var symbol = FormatCurrencySymbol(summary.Currency);
             var net = FormatSummaryMoney(summary.Net, symbol);
-            var shouldShowBreakdown = summary.Assets != 0 && summary.Liabilities != 0;
-            var assets = shouldShowBreakdown ? FormatSignedMoney(summary.Assets, "+", symbol) : new MoneyText("", "");
-            var liabilities = shouldShowBreakdown ? FormatSignedMoney(summary.Liabilities, "-", symbol) : new MoneyText("", "");
             return new CurrencySummaryViewModel
             {
                 Currency = summary.Currency.ToString(),
                 NetText = net.DisplayText,
-                NetLineText = $"{FormatCompactAmount(summary.Net)} {summary.Currency}",
-                NetExactText = $"{summary.Net:N2} {summary.Currency}",
+                NetLineText = net.DisplayText,
+                NetExactText = net.ExactText,
                 IncomeText = FormatFlowAmount(summary.TotalIncome, "+"),
                 ExpenseText = FormatFlowAmount(summary.TotalExpense, "-"),
-                AssetsText = assets.DisplayText,
-                AssetsExactText = assets.ExactText,
-                LiabilitiesText = liabilities.DisplayText,
-                LiabilitiesExactText = liabilities.ExactText
+                AssetsMinusLiabilitiesText = FormatAssetsMinusLiabilities(summary.Assets, summary.Liabilities)
             };
         }
 
@@ -445,15 +436,12 @@ namespace MyBook
             };
         }
 
-        private static MoneyText FormatSignedMoney(decimal value, string sign, string prefix)
+        private static string FormatAssetsMinusLiabilities(decimal assets, decimal liabilities)
         {
-            if (value == 0)
-                return new MoneyText("", "");
+            if (assets == 0 || liabilities == 0)
+                return "";
 
-            var text = MoneyText.From(Math.Abs(value), prefix);
-            return new MoneyText(
-                $"{sign}{text.DisplayText}",
-                String.IsNullOrWhiteSpace(text.ExactText) ? "" : $"{sign}{text.ExactText}");
+            return $"{MoneyText.FormatAmount(Math.Abs(assets))}-{MoneyText.FormatAmount(Math.Abs(liabilities))}";
         }
 
         private static string FormatCompactAmount(decimal value)
@@ -463,7 +451,7 @@ namespace MyBook
             if (absoluteValue >= 1000)
                 return $"{sign}{Math.Round(absoluteValue / 1000, 0):0}k";
 
-            return $"{sign}{absoluteValue:N2}";
+            return $"{sign}{MoneyText.FormatAmount(absoluteValue)}";
         }
 
         private static string FormatFlowAmount(decimal value, string sign)
@@ -492,16 +480,26 @@ namespace MyBook
     {
         private const decimal AbbreviationThreshold = 100000m;
 
+        public string ExactTextOrDisplay => String.IsNullOrWhiteSpace(ExactText) ? DisplayText : ExactText;
+
         public static MoneyText From(decimal value, string prefix = "")
         {
             var sign = value < 0 ? "-" : "";
             var absoluteValue = Math.Abs(value);
-            var exact = $"{sign}{prefix}{absoluteValue:N2}";
+            var exact = $"{sign}{prefix}{FormatAmount(absoluteValue)}";
             if (absoluteValue <= AbbreviationThreshold)
                 return new MoneyText(exact, "");
 
             var abbreviated = $"{sign}{prefix}{Math.Round(absoluteValue / 1000, 0):0}k";
             return new MoneyText(abbreviated, exact);
+        }
+
+        public static string FormatAmount(decimal value)
+        {
+            var rounded = Decimal.Round(value, 2, MidpointRounding.ToEven);
+            return rounded == Decimal.Truncate(rounded)
+                ? rounded.ToString("N0", CultureInfo.InvariantCulture)
+                : rounded.ToString("N2", CultureInfo.InvariantCulture);
         }
     }
 

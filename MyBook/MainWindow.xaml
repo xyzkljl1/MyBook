@@ -125,22 +125,16 @@
                                      FontWeight="SemiBold"
                                      Foreground="#0F172A"/>
                             <TextBox Style="{StaticResource SelectableText}"
-                                     Text="{Binding IncomeText}"
-                                     FontSize="13"
-                                     FontWeight="SemiBold"
-                                     Foreground="#047857"
-                                     Margin="12,2,0,0"/>
-                            <TextBox Style="{StaticResource SelectableText}"
-                                     Text="{Binding ExpenseText}"
-                                     FontSize="13"
-                                     FontWeight="SemiBold"
-                                     Foreground="#BE123C"
-                                     Margin="8,2,0,0"/>
-                            <TextBox Style="{StaticResource SelectableText}"
                                      Text="{Binding NetExactText}"
                                      FontSize="11"
                                      Foreground="#64748B"
-                                     Margin="9,4,0,0"/>
+                                     Margin="7,4,0,0"/>
+                            <TextBox Style="{StaticResource SelectableText}"
+                                     Text="{Binding AssetsMinusLiabilitiesText}"
+                                     FontSize="13"
+                                     FontWeight="SemiBold"
+                                     Foreground="#334155"
+                                     Margin="12,2,0,0"/>
                         </StackPanel>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
