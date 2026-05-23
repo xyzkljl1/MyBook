@@ -74,15 +74,26 @@
         </Grid.RowDefinitions>
 
         <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,12">
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="18,7,0,0">
-                <TextBlock Text="{Binding SnapshotTimeText}" FontSize="12" Foreground="#64748B" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <Button Width="70" Height="30"
-                        Background="#0F766E"
-                        Foreground="White"
-                        BorderThickness="0"
-                        FontSize="12"
-                        Content="刷新"
-                        Click="Refresh_Click"/>
+            <StackPanel DockPanel.Dock="Right" Width="420" VerticalAlignment="Top" Margin="18,4,0,0">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <TextBlock Text="{Binding SelectedAssetDateText}" FontSize="12" FontWeight="SemiBold" Foreground="#334155" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <TextBlock Text="{Binding SnapshotTimeText}" FontSize="12" Foreground="#64748B" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <Button Width="70" Height="30"
+                            Background="#0F766E"
+                            Foreground="White"
+                            BorderThickness="0"
+                            FontSize="12"
+                            Content="刷新"
+                            Click="Refresh_Click"/>
+                </StackPanel>
+                <Slider Minimum="0"
+                        Maximum="{Binding AssetSummaryMaximum}"
+                        Value="{Binding SelectedAssetSummaryOffset, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        Ticks="{Binding AssetSummaryTicks}"
+                        TickPlacement="BottomRight"
+                        IsSnapToTickEnabled="True"
+                        IsMoveToPointEnabled="True"
+                        Margin="0,8,0,0"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" VerticalAlignment="Top">
                 <TextBox Style="{StaticResource SelectableText}"
@@ -98,55 +109,39 @@
             </StackPanel>
         </DockPanel>
 
-        <StackPanel Grid.Row="1" Margin="0,0,0,12">
+        <StackPanel Grid.Row="1" Margin="0,0,0,14">
             <ItemsControl ItemsSource="{Binding CurrencySummaries}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
-                        <WrapPanel/>
+                        <StackPanel/>
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <Border Style="{StaticResource Card}" Width="258" Margin="0,0,12,12">
-                            <StackPanel>
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding NetText}" FontSize="27" FontWeight="SemiBold" Foreground="#0F172A"/>
-                                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding NetExactText}" FontSize="11" Foreground="#64748B" Margin="8,10,0,0"/>
-                                </StackPanel>
-                                <StackPanel Margin="0,14,0,0">
-                                    <StackPanel>
-                                        <StackPanel.Style>
-                                            <Style TargetType="StackPanel">
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding AssetsText}" Value="">
-                                                        <Setter Property="Visibility" Value="Collapsed"/>
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </StackPanel.Style>
-                                        <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
-                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding AssetsText}" FontSize="15" Foreground="#047857"/>
-                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding AssetsExactText}" FontSize="10" Foreground="#94A3B8" Margin="5,3,0,0"/>
-                                        </StackPanel>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,5,0,0">
-                                        <StackPanel.Style>
-                                            <Style TargetType="StackPanel">
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding LiabilitiesText}" Value="">
-                                                        <Setter Property="Visibility" Value="Collapsed"/>
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </StackPanel.Style>
-                                        <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
-                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding LiabilitiesText}" FontSize="15" Foreground="#BE123C"/>
-                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding LiabilitiesExactText}" FontSize="10" Foreground="#94A3B8" Margin="5,3,0,0"/>
-                                        </StackPanel>
-                                    </StackPanel>
-                                </StackPanel>
-                            </StackPanel>
-                        </Border>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                            <TextBox Style="{StaticResource SelectableText}"
+                                     Text="{Binding NetLineText}"
+                                     FontSize="17"
+                                     FontWeight="SemiBold"
+                                     Foreground="#0F172A"/>
+                            <TextBox Style="{StaticResource SelectableText}"
+                                     Text="{Binding IncomeText}"
+                                     FontSize="13"
+                                     FontWeight="SemiBold"
+                                     Foreground="#047857"
+                                     Margin="12,2,0,0"/>
+                            <TextBox Style="{StaticResource SelectableText}"
+                                     Text="{Binding ExpenseText}"
+                                     FontSize="13"
+                                     FontWeight="SemiBold"
+                                     Foreground="#BE123C"
+                                     Margin="8,2,0,0"/>
+                            <TextBox Style="{StaticResource SelectableText}"
+                                     Text="{Binding NetExactText}"
+                                     FontSize="11"
+                                     Foreground="#64748B"
+                                     Margin="9,4,0,0"/>
+                        </StackPanel>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
@@ -224,9 +219,11 @@
                                         Maximum="{Binding ReasonMonthMaximum}"
                                         Value="{Binding SelectedReasonMonthIndex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                         TickFrequency="1"
+                                        TickPlacement="BottomRight"
                                         IsSnapToTickEnabled="True"
                                         IsMoveToPointEnabled="True"
                                         Margin="16,0,0,0"
+                                        Height="30"
                                         VerticalAlignment="Center"/>
                             </StackPanel>
                         </DockPanel>

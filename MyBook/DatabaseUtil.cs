@@ -745,16 +745,24 @@ namespace MyBook
             var accounts = accountList.ToDictionary(account => account.Id, account => account.name);
             var holdingNames = BuildHoldingNames(holdings, accounts);
             var exchangeRates = GetCurrencyToRmbRates();
+            var assetSummaryDates = BuildAssetSummaryDates(today.Date);
+            var assetSummaryBalances = BuildAssetSummaryBalanceSets(assetSummaryDates, balances, today.Date);
             var usedCurrencies = balances
                 .Select(balance => balance.t)
                 .Union(records.Select(record => record.t))
                 .Union(investmentRecords.Select(record => record.t))
+                .Union(assetSummaryBalances.SelectMany(point => point.Balances.Select(balance => balance.t)))
                 .Distinct()
                 .ToList();
+            var assetSummaryPoints = BuildAssetSummaryPoints(assetSummaryBalances, records, exchangeRates, today.Date);
+            var todayAssetSummary = assetSummaryPoints.LastOrDefault(point => point.IsToday);
 
             return new DashboardData
             {
-                CurrencySummaries = BuildCurrencySummaries(balances),
+                AssetSummaryPoints = assetSummaryPoints,
+                CurrencySummaries = BuildCurrencySummaries(
+                    balances,
+                    records.Where(record => record.date >= currentMonth && record.date < nextMonth).ToList()),
                 MonthlyFlowSeries = BuildMonthlyFlowSeries(records, firstMonth),
                 RmbMonthlyFlowSeries = BuildRmbMonthlyFlowSeries(records, firstMonth, exchangeRates),
                 RmbReasonFlowSeriesByMonth = reasonMonths
@@ -778,10 +786,7 @@ namespace MyBook
                     today,
                     exchangeRates,
                     holdingNames),
-                TotalAssetsRmb = Currency.RoundMoney(balances
-                    .Select(balance => TryConvertToRmb(balance.v, balance.t, exchangeRates))
-                    .Where(value => value.HasValue)
-                    .Sum(value => value!.Value)),
+                TotalAssetsRmb = todayAssetSummary?.TotalAssetsRmb ?? BuildTotalAssetsRmb(balances, exchangeRates),
                 MissingExchangeRateCurrencies = usedCurrencies
                     .Where(currency => currency != CurrencyType.RMB && !exchangeRates.ContainsKey(currency))
                     .OrderBy(currency => currency)
@@ -811,13 +816,135 @@ namespace MyBook
             return rates;
         }
 
-        private static List<CurrencyBalanceSummary> BuildCurrencySummaries(List<AccountBalance> balances)
+        private static List<DateTime> BuildAssetSummaryDates(DateTime today)
+        {
+            var start = new DateTime(today.Year, today.Month, 1).AddMonths(-3);
+            var dates = new List<DateTime>();
+            for (var month = start; month <= today; month = month.AddMonths(1))
+            {
+                var daysInMonth = DateTime.DaysInMonth(month.Year, month.Month);
+                for (var day = 1; day <= daysInMonth; day += 5)
+                {
+                    var date = new DateTime(month.Year, month.Month, day);
+                    if (date >= start && date <= today)
+                        dates.Add(date);
+                }
+            }
+
+            if (!dates.Contains(today))
+                dates.Add(today);
+
+            return dates
+                .Distinct()
+                .OrderBy(date => date)
+                .ToList();
+        }
+
+        private List<AssetSummaryBalanceSet> BuildAssetSummaryBalanceSets(
+            List<DateTime> dates,
+            List<AccountBalance> currentBalances,
+            DateTime today)
+        {
+            return dates
+                .Select(date =>
+                {
+                    if (date == today)
+                    {
+                        return new AssetSummaryBalanceSet(
+                            date,
+                            null,
+                            true,
+                            currentBalances.Select(CloneDashboardBalance).ToList());
+                    }
+
+                    var snapshot = GetDailySnapshot(date);
+                    if (snapshot is null)
+                        return new AssetSummaryBalanceSet(date, null, false, []);
+
+                    var balances = snapshot.AccountBalances
+                        .Where(balance => balance.Amount != 0)
+                        .Select(balance => new AccountBalance
+                        {
+                            _account_Id = balance.AccountId,
+                            t = balance.CurrencyType,
+                            v = balance.Amount
+                        })
+                        .ToList();
+                    return new AssetSummaryBalanceSet(date, snapshot.Snapshot.time, true, balances);
+                })
+                .ToList();
+        }
+
+        private static AccountBalance CloneDashboardBalance(AccountBalance balance)
+        {
+            return new AccountBalance
+            {
+                _account_Id = balance._account_Id,
+                t = balance.t,
+                v = balance.v
+            };
+        }
+
+        private static List<AssetSummaryPoint> BuildAssetSummaryPoints(
+            List<AssetSummaryBalanceSet> balanceSets,
+            List<Record> records,
+            Dictionary<CurrencyType, decimal> exchangeRates,
+            DateTime today)
+        {
+            return balanceSets
+                .Select(point =>
+                {
+                    if (!point.HasData)
+                    {
+                        return new AssetSummaryPoint
+                        {
+                            Date = point.Date,
+                            SnapshotTime = point.SnapshotTime,
+                            IsToday = point.Date == today,
+                            HasData = false
+                        };
+                    }
+
+                    var monthStart = new DateTime(point.Date.Year, point.Date.Month, 1);
+                    var nextDay = point.Date.AddDays(1);
+                    var monthToDateRecords = records
+                        .Where(record => record.date >= monthStart && record.date < nextDay)
+                        .ToList();
+                    return new AssetSummaryPoint
+                    {
+                        Date = point.Date,
+                        SnapshotTime = point.SnapshotTime,
+                        IsToday = point.Date == today,
+                        HasData = true,
+                        TotalAssetsRmb = BuildTotalAssetsRmb(point.Balances, exchangeRates),
+                        CurrencySummaries = BuildCurrencySummaries(point.Balances, monthToDateRecords)
+                    };
+                })
+                .ToList();
+        }
+
+        private static decimal BuildTotalAssetsRmb(
+            List<AccountBalance> balances,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            return Currency.RoundMoney(balances
+                .Select(balance => TryConvertToRmb(balance.v, balance.t, exchangeRates))
+                .Where(value => value.HasValue)
+                .Sum(value => value!.Value));
+        }
+
+        private static List<CurrencyBalanceSummary> BuildCurrencySummaries(
+            List<AccountBalance> balances,
+            List<Record> currentMonthRecords)
         {
             return balances
                 .GroupBy(balance => balance.t)
                 .OrderBy(group => group.Key)
                 .Select(group =>
                 {
+                    var currencyRecords = currentMonthRecords
+                        .Where(record => record.t == group.Key)
+                        .ToList();
                     var assets = Currency.RoundMoney(group.Where(balance => balance.v > 0).Sum(balance => balance.v));
                     var liabilities = Currency.RoundMoney(group.Where(balance => balance.v < 0).Sum(balance => balance.v));
                     return new CurrencyBalanceSummary
@@ -826,6 +953,8 @@ namespace MyBook
                         Assets = assets,
                         Liabilities = liabilities,
                         Net = Currency.RoundMoney(assets + liabilities),
+                        TotalIncome = Currency.RoundMoney(currencyRecords.Where(record => record.v > 0).Sum(record => record.v)),
+                        TotalExpense = Currency.RoundMoney(-currencyRecords.Where(record => record.v < 0).Sum(record => record.v)),
                         AccountCount = group.Select(balance => balance._account_Id).Distinct().Count()
                     };
                 })
@@ -1531,6 +1660,12 @@ namespace MyBook
             string TotalCurrencyType,
             string DisplayText,
             string Description);
+
+        private sealed record AssetSummaryBalanceSet(
+            DateTime Date,
+            DateTime? SnapshotTime,
+            bool HasData,
+            List<AccountBalance> Balances);
 
         private sealed record ForeignKeyDefinition(
             string ConstraintName,

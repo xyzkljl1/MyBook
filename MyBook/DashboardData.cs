@@ -2,6 +2,7 @@ namespace MyBook
 {
     public class DashboardData
     {
+        public List<AssetSummaryPoint> AssetSummaryPoints { get; set; } = [];
         public List<CurrencyBalanceSummary> CurrencySummaries { get; set; } = [];
         public List<MonthlyFlowSeries> MonthlyFlowSeries { get; set; } = [];
         public MonthlyFlowSeries RmbMonthlyFlowSeries { get; set; } = new();
@@ -16,12 +17,24 @@ namespace MyBook
         public DateTime LastMonthEnd { get; set; }
     }
 
+    public class AssetSummaryPoint
+    {
+        public DateTime Date { get; set; }
+        public DateTime? SnapshotTime { get; set; }
+        public bool IsToday { get; set; }
+        public bool HasData { get; set; }
+        public decimal TotalAssetsRmb { get; set; }
+        public List<CurrencyBalanceSummary> CurrencySummaries { get; set; } = [];
+    }
+
     public class CurrencyBalanceSummary
     {
         public CurrencyType Currency { get; set; }
         public decimal Assets { get; set; }
         public decimal Liabilities { get; set; }
         public decimal Net { get; set; }
+        public decimal TotalIncome { get; set; }
+        public decimal TotalExpense { get; set; }
         public int AccountCount { get; set; }
     }
 

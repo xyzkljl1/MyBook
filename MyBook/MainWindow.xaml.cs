@@ -134,6 +134,7 @@ namespace MyBook
     public class DashboardViewModel : INotifyPropertyChanged
     {
         bool showSingleCurrencyMonthly;
+        double selectedAssetSummaryOffset = -1;
         double selectedReasonMonthIndex;
         bool showInvestmentByHolding;
         InvestmentAccountStatisticsViewModel? selectedInvestmentAccount;
@@ -141,9 +142,11 @@ namespace MyBook
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public string SnapshotTimeText { get; set; } = "";
+        public string SelectedAssetDateText { get; set; } = "";
         public string ReasonTabHeader { get; set; } = "分类";
         public TotalAssetsViewModel TotalAssets { get; set; } = new();
         public List<CurrencySummaryViewModel> CurrencySummaries { get; set; } = [];
+        public List<AssetSummaryViewModel> AssetSummaries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> RmbMonthlySeries { get; set; } = [];
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
@@ -154,6 +157,8 @@ namespace MyBook
             : ShowInvestmentByHolding
                 ? SelectedInvestmentAccount.ByHoldingPeriods
                 : SelectedInvestmentAccount.ByReasonPeriods;
+        public DoubleCollection AssetSummaryTicks => new(AssetSummaries.Select(summary => summary.DayOffset));
+        public double AssetSummaryMaximum => AssetSummaries.Count == 0 ? 0 : AssetSummaries[^1].DayOffset;
         public double ReasonMonthMaximum => Math.Max(0, ReasonMonthSeries.Count - 1);
         public ReasonFlowSeriesViewModel SelectedReasonSeries => ReasonMonthSeries.Count == 0
             ? new ReasonFlowSeriesViewModel()
@@ -171,6 +176,26 @@ namespace MyBook
                 showSingleCurrencyMonthly = value;
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowSingleCurrencyMonthly)));
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VisibleMonthlySeries)));
+            }
+        }
+
+        public double SelectedAssetSummaryOffset
+        {
+            get => selectedAssetSummaryOffset;
+            set
+            {
+                var normalized = AssetSummaries.Count == 0
+                    ? 0
+                    : AssetSummaries
+                        .OrderBy(summary => Math.Abs(summary.DayOffset - value))
+                        .First()
+                        .DayOffset;
+                if (selectedAssetSummaryOffset == normalized)
+                    return;
+
+                selectedAssetSummaryOffset = normalized;
+                ApplySelectedAssetSummary();
+                OnPropertyChanged(nameof(SelectedAssetSummaryOffset));
             }
         }
 
@@ -254,6 +279,7 @@ namespace MyBook
                 ReasonTabHeader = "分类",
                 TotalAssets = TotalAssetsViewModel.From(data.TotalAssetsRmb),
                 CurrencySummaries = data.CurrencySummaries.Select(CurrencySummaryViewModel.From).ToList(),
+                AssetSummaries = BuildAssetSummaryViewModels(data),
                 MonthlySeries = data.MonthlyFlowSeries
                     .Select(MonthlyFlowSeriesViewModel.From)
                     .ToList(),
@@ -264,8 +290,25 @@ namespace MyBook
                     .ToList()
             };
             viewModel.SelectedInvestmentAccount = viewModel.InvestmentAccounts.FirstOrDefault();
+            viewModel.SelectedAssetSummaryOffset = viewModel.AssetSummaries.Count == 0 ? 0 : viewModel.AssetSummaries[^1].DayOffset;
             viewModel.SelectedReasonMonthIndex = Math.Clamp(data.DefaultReasonMonthIndex, 0, Math.Max(0, reasonSeries.Count - 1));
             return viewModel;
+        }
+
+        private static List<AssetSummaryViewModel> BuildAssetSummaryViewModels(DashboardData data)
+        {
+            if (data.AssetSummaryPoints.Count > 0)
+            {
+                var firstDate = data.AssetSummaryPoints.Min(point => point.Date);
+                return data.AssetSummaryPoints
+                    .Select(point => AssetSummaryViewModel.From(point, firstDate))
+                    .ToList();
+            }
+
+            return
+            [
+                AssetSummaryViewModel.FromCurrent(data.TotalAssetsRmb, data.CurrencySummaries)
+            ];
         }
 
         public static DashboardViewModel FromError(string message)
@@ -275,13 +318,88 @@ namespace MyBook
                 SnapshotTimeText = $"数据读取失败：{message}"
             };
         }
+
+        private void ApplySelectedAssetSummary()
+        {
+            if (AssetSummaries.Count == 0)
+                return;
+
+            var selected = AssetSummaries
+                .OrderBy(summary => Math.Abs(summary.DayOffset - selectedAssetSummaryOffset))
+                .First();
+            SnapshotTimeText = selected.StatusText;
+            SelectedAssetDateText = selected.DateLabel;
+            TotalAssets = selected.TotalAssets;
+            CurrencySummaries = selected.CurrencySummaries;
+            OnPropertyChanged(nameof(SnapshotTimeText));
+            OnPropertyChanged(nameof(SelectedAssetDateText));
+            OnPropertyChanged(nameof(TotalAssets));
+            OnPropertyChanged(nameof(CurrencySummaries));
+        }
+
+        private void OnPropertyChanged(string propertyName)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+    }
+
+    public class AssetSummaryViewModel
+    {
+        public double DayOffset { get; set; }
+        public string DateLabel { get; set; } = "";
+        public string StatusText { get; set; } = "";
+        public TotalAssetsViewModel TotalAssets { get; set; } = new();
+        public List<CurrencySummaryViewModel> CurrencySummaries { get; set; } = [];
+
+        public static AssetSummaryViewModel From(AssetSummaryPoint point, DateTime firstDate)
+        {
+            var dateLabel = point.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            return new AssetSummaryViewModel
+            {
+                DayOffset = (point.Date - firstDate).TotalDays,
+                DateLabel = dateLabel,
+                StatusText = BuildStatusText(point, dateLabel),
+                TotalAssets = TotalAssetsViewModel.From(point.HasData ? point.TotalAssetsRmb : 0),
+                CurrencySummaries = point.HasData
+                    ? point.CurrencySummaries.Select(CurrencySummaryViewModel.From).ToList()
+                    : []
+            };
+        }
+
+        public static AssetSummaryViewModel FromCurrent(
+            decimal totalAssetsRmb,
+            List<CurrencyBalanceSummary> currencySummaries)
+        {
+            return new AssetSummaryViewModel
+            {
+                DateLabel = DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                StatusText = $"更新于 {DateTime.Now:yyyy-MM-dd HH:mm}",
+                TotalAssets = TotalAssetsViewModel.From(totalAssetsRmb),
+                CurrencySummaries = currencySummaries.Select(CurrencySummaryViewModel.From).ToList()
+            };
+        }
+
+        private static string BuildStatusText(AssetSummaryPoint point, string dateLabel)
+        {
+            if (!point.HasData)
+                return $"{dateLabel} 缺少快照";
+
+            if (point.IsToday)
+                return $"更新于 {DateTime.Now:yyyy-MM-dd HH:mm}";
+
+            var snapshotTime = point.SnapshotTime ?? point.Date;
+            return $"快照 {snapshotTime:yyyy-MM-dd HH:mm}";
+        }
     }
 
     public class CurrencySummaryViewModel
     {
         public string Currency { get; set; } = "";
         public string NetText { get; set; } = "";
+        public string NetLineText { get; set; } = "";
         public string NetExactText { get; set; } = "";
+        public string IncomeText { get; set; } = "";
+        public string ExpenseText { get; set; } = "";
         public string AssetsText { get; set; } = "";
         public string AssetsExactText { get; set; } = "";
         public string LiabilitiesText { get; set; } = "";
@@ -296,9 +414,12 @@ namespace MyBook
             var liabilities = shouldShowBreakdown ? FormatSignedMoney(summary.Liabilities, "-", symbol) : new MoneyText("", "");
             return new CurrencySummaryViewModel
             {
-                Currency = symbol,
+                Currency = summary.Currency.ToString(),
                 NetText = net.DisplayText,
-                NetExactText = net.ExactText,
+                NetLineText = $"{FormatCompactAmount(summary.Net)} {summary.Currency}",
+                NetExactText = $"{summary.Net:N2} {summary.Currency}",
+                IncomeText = FormatFlowAmount(summary.TotalIncome, "+"),
+                ExpenseText = FormatFlowAmount(summary.TotalExpense, "-"),
                 AssetsText = assets.DisplayText,
                 AssetsExactText = assets.ExactText,
                 LiabilitiesText = liabilities.DisplayText,
@@ -334,6 +455,21 @@ namespace MyBook
                 $"{sign}{text.DisplayText}",
                 String.IsNullOrWhiteSpace(text.ExactText) ? "" : $"{sign}{text.ExactText}");
         }
+
+        private static string FormatCompactAmount(decimal value)
+        {
+            var sign = value < 0 ? "-" : "";
+            var absoluteValue = Math.Abs(value);
+            if (absoluteValue >= 1000)
+                return $"{sign}{Math.Round(absoluteValue / 1000, 0):0}k";
+
+            return $"{sign}{absoluteValue:N2}";
+        }
+
+        private static string FormatFlowAmount(decimal value, string sign)
+        {
+            return value == 0 ? "" : $"{sign}{FormatCompactAmount(Math.Abs(value))}";
+        }
     }
 
     public class TotalAssetsViewModel
@@ -343,7 +479,7 @@ namespace MyBook
 
         public static TotalAssetsViewModel From(decimal value)
         {
-            var text = MoneyText.From(value, "¥");
+            var text = MoneyText.From(value, "¥ ");
             return new TotalAssetsViewModel
             {
                 ValueText = text.DisplayText,
