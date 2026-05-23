@@ -265,7 +265,7 @@ namespace MyBook
         public bool isInternal { get; set; } = false; // 是否自己账户间的交易
 
         [SugarColumn(DefaultValue = "0")]
-        public bool isOffset { get; set; } = false; // 是否已被退款/消费互相抵消；默认不计入界面统计图表。
+        public bool isRefundMatched { get; set; } = false; // 是否已匹配到对应退款/消费；默认不计入界面统计图表。
 
         [SugarColumn(DefaultValue = "0")]
         public int HoldingQuantity { get; set; } = 0; // 交易涉及的持仓数量，非持仓交易为 0。
@@ -507,16 +507,12 @@ namespace MyBook
         public Currency(decimal _v, string _t)
         {
             v = _v;
-            if (!Enum.TryParse<CurrencyType>(_t, out var currencyType))
-                throw new ArgumentException($"不支持的币种 {_t}");
-            t = currencyType;
+            t = ParseCurrencyType(_t);
         }
         public Currency(string _v, string _t)
         {
             v = decimal.Parse(_v, NumberStyles.Currency);
-            if (!Enum.TryParse<CurrencyType>(_t, out var currencyType))
-                throw new ArgumentException($"不支持的币种 {_t}");
-            t = currencyType;
+            t = ParseCurrencyType(_t);
         }
         public Currency(decimal _v, CurrencyType _t)
         {
@@ -532,6 +528,16 @@ namespace MyBook
         public static decimal RoundMoney(decimal value)
         {
             return Decimal.Round(value, 2, MidpointRounding.ToEven);
+        }
+
+        private static CurrencyType ParseCurrencyType(string value)
+        {
+            if (value == "CNY")
+                return CurrencyType.RMB;
+
+            if (!Enum.TryParse<CurrencyType>(value, out var currencyType))
+                throw new ArgumentException($"不支持的币种 {value}");
+            return currencyType;
         }
     }
 }

@@ -355,6 +355,9 @@ namespace MyBook
                     .First();
                 if (existing is null)
                 {
+                    if (beginningAccountBalance.v == 0 || !HasAccountCurrencyHistory(account.Id, beginningAccountBalance.t))
+                        continue;
+
                     throw new InvalidOperationException(
                         $"Missing current account balance for {provider}: {account.name}/{beginningAccountBalance.t}");
                 }
@@ -365,6 +368,16 @@ namespace MyBook
                         $"Beginning account balance mismatch for {provider}: {account.name}/{beginningAccountBalance.t}, current={existing.v}, beginning={beginningAccountBalance.v}");
                 }
             }
+        }
+
+        private bool HasAccountCurrencyHistory(int accountId, CurrencyType currencyType)
+        {
+            return db.Queryable<AccountBalance>()
+                    .Where(it => it._account_Id == accountId && it.t == currencyType)
+                    .Any()
+                || db.Queryable<Record>()
+                    .Where(it => it._account_Id == accountId && it.t == currencyType)
+                    .Any();
         }
 
         private void ValidateRecordBalanceChanges(
@@ -706,7 +719,7 @@ namespace MyBook
                 .Select(firstMonth.AddMonths)
                 .ToList();
             var records = db.Queryable<Record>()
-                .Where(record => !record.isInternal && !record.isOffset && record.date >= firstMonth && record.date < nextMonth)
+                .Where(record => !record.isInternal && !record.isRefundMatched && record.date >= firstMonth && record.date < nextMonth)
                 .ToList();
             var balances = db.Queryable<AccountBalance>()
                 .Where(balance => balance.v != 0)
@@ -717,7 +730,7 @@ namespace MyBook
                 .Distinct()
                 .ToHashSet();
             var investmentRecords = db.Queryable<Record>()
-                .Where(record => !record.isInternal && !record.isOffset && record.v > 0 && record.date < today.Date.AddDays(1))
+                .Where(record => !record.isInternal && !record.isRefundMatched && record.v > 0 && record.date < today.Date.AddDays(1))
                 .ToList()
                 .Where(record => investmentAccountIds.Contains(record._account_Id))
                 .ToList();
@@ -1260,7 +1273,7 @@ namespace MyBook
                 .ToList();
         }
 
-        public void MarkRecordsAsOffset(IEnumerable<Record> records)
+        public void MarkRecordsAsRefundMatched(IEnumerable<Record> records)
         {
             var updates = records.ToList();
             if (updates.Count == 0)
@@ -1269,12 +1282,12 @@ namespace MyBook
             var now = DateTime.Now;
             foreach (var record in updates)
             {
-                record.isOffset = true;
+                record.isRefundMatched = true;
                 record.updateTime = now;
             }
 
             db.Updateable(updates)
-                .UpdateColumns(record => new { record.isOffset, record.updateTime })
+                .UpdateColumns(record => new { record.isRefundMatched, record.updateTime })
                 .ExecuteCommand();
         }
 

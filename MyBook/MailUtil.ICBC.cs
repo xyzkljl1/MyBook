@@ -153,7 +153,20 @@ namespace MyBook
                         destRecord.DestAccount == record.DestAccount && destRecord.v < 0
                         && IsSameAccount(destRecord.Account, record.Account) && destRecord.DescCurrency == record.DescCurrency);
                     if (destRecord is not null)
+                    {
                         records.Remove(destRecord);
+                        if (destRecord.t != record.t)
+                            throw new MailParseException("Parse ICBC Bill Fail, Refund Currency Mismatch");
+
+                        record.v += destRecord.v;
+                        if (record.DescCurrency is not null)
+                            record.DescCurrency = new Currency(0, record.DescCurrency.t);
+                        if (record.v != 0)
+                        {
+                            record.Reason = "退款汇率差异";
+                            records.Add(record);
+                        }
+                    }
                     else
                     {
                         record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。
@@ -168,6 +181,11 @@ namespace MyBook
                     record.Reason = "信用卡还款";
                     records.Add(record);
                 }
+                else if (line[3] == "年费减免")
+                {
+                    if (record.v != 0)
+                        throw new MailParseException("Parse ICBC Bill Fail, Invalid Annual Fee Waiver");
+                }
                 else
                 {
                     throw new MailParseException($"Parse ICBC Bill Fail, Unknown Transaction Type: {line[3]}");
@@ -180,7 +198,7 @@ namespace MyBook
         private int OffsetMatchedICBCRefundRecords(int targetStatementImportId)
         {
             var refunds = database.GetRecordsByStatementImport(targetStatementImportId)
-                .Where(record => !record.isOffset)
+                .Where(record => !record.isRefundMatched)
                 .Where(IsICBCRefundRecord)
                 .OrderBy(record => record.date)
                 .ThenBy(record => record.Id)
@@ -191,7 +209,7 @@ namespace MyBook
             var minDate = refunds.Min(record => record.date.Date.AddMonths(-2));
             var maxDate = refunds.Max(record => record.date);
             var expenses = database.GetStatementRecords(ICBCProvider, minDate, maxDate)
-                .Where(record => !record.isOffset
+                .Where(record => !record.isRefundMatched
                     && record._statementImport_Id != targetStatementImportId
                     && record.v < 0)
                 .Where(IsICBCExpenseRecord)
@@ -226,10 +244,10 @@ namespace MyBook
             if (matchedRecordIds.Count == 0)
                 return 0;
 
-            database.MarkRecordsAsOffset(refunds
+            database.MarkRecordsAsRefundMatched(refunds
                 .Concat(expenses)
                 .Where(record => matchedRecordIds.Contains(record.Id)));
-            Console.WriteLine($"offset ICBC refund records: {pairCount} pairs");
+            Console.WriteLine($"matched ICBC refund records: {pairCount} pairs");
             return pairCount;
         }
 
