@@ -20,6 +20,7 @@ namespace MyBook
 
         readonly Fetcher fetcher = new();
         Forms.NotifyIcon? trayIcon;
+        Drawing.Icon? trayIconImage;
         bool isExitRequested;
 
         public MainWindow()
@@ -72,7 +73,7 @@ namespace MyBook
             trayIcon = new Forms.NotifyIcon
             {
                 Text = "MyBook",
-                Icon = Drawing.SystemIcons.Application,
+                Icon = trayIconImage = LoadAppIcon(),
                 ContextMenuStrip = menu,
                 Visible = true
             };
@@ -81,6 +82,17 @@ namespace MyBook
                 if (e.Button == Forms.MouseButtons.Left)
                     RestoreFromTray();
             };
+        }
+
+        private static Drawing.Icon LoadAppIcon()
+        {
+            var iconResource = Application.GetResourceStream(new Uri("pack://application:,,,/Assets/AppIcon.ico"));
+            if (iconResource?.Stream is null)
+                return Drawing.SystemIcons.Application;
+
+            using var stream = iconResource.Stream;
+            using var icon = new Drawing.Icon(stream);
+            return (Drawing.Icon)icon.Clone();
         }
 
         private void RestoreFromTray()
@@ -113,6 +125,7 @@ namespace MyBook
         protected override void OnClosed(EventArgs e)
         {
             trayIcon?.Dispose();
+            trayIconImage?.Dispose();
             fetcher.Dispose();
             base.OnClosed(e);
         }
