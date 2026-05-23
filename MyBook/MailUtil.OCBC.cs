@@ -1,283 +1,986 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using MailKit.Search;
 using MimeKit;
+using UglyToad.PdfPig;
 
 namespace MyBook
 {
-    // OCBC mail discovery and parsing. OCBC mails currently provide balance deltas,
-    // so imports save Records without updating AccountBalances.
+    // OCBC monthly combined e-statement discovery and parsing.
+    // The PDF statement is the source of truth for OCBC balances.
     partial class MailUtil
     {
-        private const StatementImportProvider OCBCProvider = StatementImportProvider.OCBCMail;
-        private const string OCBCMailSender = "notifications@ocbc.com";
-        private const string OCBCAccountName = "OCBC";
-        private const string OCBCWiseAccountName = "WISE";
-        private static readonly DateTime OCBCSearchStartDate = new(2024, 1, 1);
-        private static readonly string[] OCBCTransactionSubjectKeywords =
-        [
-            "funds transfer",
-            "sent money",
-            "FX order"
-        ];
-
+        private const StatementImportProvider OCBCProvider = StatementImportProvider.OCBCStatementMail;
+        private const string OCBCMailSender = "documents@ocbc.com";
+        private const string OCBCAccountType = "OCBC";
+        private const string OCBCStatementPasswordConfigKey = "ocbc_statement_passwords";
+        private static readonly Regex OCBCStatementSubjectRegex = new(
+            @"^OCBC:\s*Your Combined e-Statement for (?<month>[A-Za-z]{3})\s+(?<year>\d{4})(?:\s+is attached)?\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         public async Task FetchOCBCReports()
         {
-            await FetchOCBCReports(OCBCSearchStartDate, DateTime.Today.AddDays(1));
+            var month = GetNextMonthlyStatementDate(OCBCProvider);
+            var currentMonth = FirstDayOfMonth(DateTime.Today);
+            while (month <= currentMonth)
+            {
+                var imported = await FetchOCBCReport(month);
+                if (!imported)
+                {
+                    Console.WriteLine($"Missing OCBC statement for {month:yyyy-MM}");
+                    month = month.AddMonths(1);
+                    continue;
+                }
+
+                month = month.AddMonths(1);
+            }
         }
 
         public async Task FetchOCBCReports(DateTime date)
         {
-            var range = GetMonthRange(date);
-            await FetchOCBCReports(range.Since, range.Before);
+            await FetchOCBCReport(date);
         }
 
-        private async Task FetchOCBCReports(DateTime since, DateTime before)
+        private async Task<bool> FetchOCBCReport(DateTime date)
         {
-            var account = database.GetAccountByName(OCBCAccountName);
-            var messages = await SearchOCBCMails(since, before);
-            Console.WriteLine($"Fetch OCBC mails: {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}, count={messages.Count}");
+            var statementMonth = FirstDayOfMonth(date);
+            var subject = BuildOCBCStatementSubject(statementMonth);
+            var message = await SearchOCBCStatementMail(statementMonth, subject);
+            if (message is null)
+                return false;
 
-            var savedCount = 0;
-            var skippedCount = 0;
-            var recordCount = 0;
-            foreach (var parsed in ParseOCBCMails(messages, account))
+            ImportOCBCStatement(statementMonth, message);
+            return true;
+        }
+
+        private void ImportOCBCStatement(DateTime statementMonth, MimeMessage message)
+        {
+            var accounts = GetOCBCStatementAccounts();
+            var attachment = ReadOCBCStatementPdfAttachment(message);
+            var text = ReadOCBCStatementPdfText(attachment);
+            var parsed = ParseOCBCStatement(statementMonth, GetMailDate(message), text, accounts);
+            if (database.IsStatementKeyImported(OCBCProvider, parsed.StatementKey))
             {
-                var saved = database.SaveStatementRecordsOnce(
-                    OCBCProvider,
-                    parsed.Time,
-                    parsed.Records,
-                    statementKey: parsed.StatementKey);
-                if (saved)
-                {
-                    savedCount++;
-                    recordCount += parsed.Records.Count;
-                    Console.WriteLine($"Import OCBC mail {parsed.Time:yyyy-MM-dd HH:mm:ss} {parsed.StatementKey}, records={parsed.Records.Count}");
-                }
-                else
-                {
-                    skippedCount++;
-                    Console.WriteLine($"Skip imported OCBC mail {parsed.Time:yyyy-MM-dd HH:mm:ss} {parsed.StatementKey}");
-                }
+                Console.WriteLine($"Skip imported OCBC statement {parsed.StatementKey}");
+                return;
             }
 
-            Console.WriteLine($"Fetch OCBC mails done: saved={savedCount}, skipped={skippedCount}, records={recordCount}");
+            var saved = database.SaveStatementRecordsOnce(
+                OCBCProvider,
+                parsed.ImportTime,
+                parsed.Records,
+                parsed.EndingBalances,
+                parsed.StatementKey,
+                parsed.BeginningBalances);
+
+            Console.WriteLine(saved
+                ? $"Import OCBC statement {parsed.StatementKey}, records={parsed.Records.Count}"
+                : $"Skip imported OCBC statement {parsed.StatementKey}");
         }
 
-        private async Task<List<MimeMessage>> SearchOCBCMails(DateTime since, DateTime before)
+        private async Task<MimeMessage?> SearchOCBCStatementMail(DateTime statementMonth, string subject)
         {
             var query = SearchQuery.FromContains(OCBCMailSender)
-                .And(SearchQuery.SentSince(since.Date))
-                .And(SearchQuery.SentBefore(before.Date));
-            return await SearchMessages(
-                $"OCBC {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}",
+                .And(SearchQuery.SentSince(statementMonth.Date))
+                .And(SearchQuery.SentBefore(statementMonth.AddMonths(2).Date));
+            var messages = await SearchMessages(
+                $"OCBC statement {statementMonth:yyyy-MM}",
                 query,
-                IsOCBCTransactionMail,
+                message => IsOCBCStatementMail(message, statementMonth),
                 GetMailDateTime);
+            return messages.FirstOrDefault();
         }
 
-        private static bool IsOCBCTransactionMail(MimeMessage message)
+        private static bool IsOCBCStatementMail(MimeMessage message, DateTime statementMonth)
         {
-            return IsFrom(message, OCBCMailSender)
-                && OCBCTransactionSubjectKeywords.Any(keyword =>
-                    message.Subject?.Contains(keyword, StringComparison.OrdinalIgnoreCase) == true);
+            if (!IsFrom(message, OCBCMailSender))
+                return false;
+
+            if (!TryParseOCBCStatementSubjectMonth(message.Subject ?? "", out var subjectMonth))
+                return false;
+
+            return subjectMonth == FirstDayOfMonth(statementMonth);
         }
 
-        private static List<OCBCParsedMail> ParseOCBCMails(List<MimeMessage> messages, Account account)
+        private static DateTime ParseOCBCStatementSubjectMonth(string subject)
         {
-            return messages
-                .Select(message => ParseOCBCMail(message, account))
-                .OrderBy(parsed => parsed.Time)
-                .ThenBy(parsed => parsed.StatementKey, StringComparer.Ordinal)
+            if (!TryParseOCBCStatementSubjectMonth(subject, out var subjectMonth))
+                throw new MailParseException($"Invalid OCBC statement subject: {subject}");
+
+            return subjectMonth;
+        }
+
+        private static bool TryParseOCBCStatementSubjectMonth(string subject, out DateTime subjectMonth)
+        {
+            subjectMonth = default;
+            var match = OCBCStatementSubjectRegex.Match(subject);
+            if (!match.Success)
+                return false;
+
+            return DateTime.TryParseExact(
+                $"{match.Groups["month"].Value} {match.Groups["year"].Value}",
+                "MMM yyyy",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out subjectMonth);
+        }
+
+        private static string BuildOCBCStatementSubject(DateTime statementMonth)
+        {
+            return $"OCBC: Your Combined e-Statement for {statementMonth:MMM yyyy}";
+        }
+
+        private List<Account> GetOCBCStatementAccounts()
+        {
+            var accounts = database.GetAllAccounts()
+                .Where(account => account.name.StartsWith($"{OCBCAccountType}_", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(account => account.name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+            if (accounts.Count != 3)
+                throw new InvalidOperationException($"OCBC statement import expects exactly 3 accounts, actual={accounts.Count}");
+
+            return accounts;
         }
 
-        private static OCBCParsedMail ParseOCBCMail(MimeMessage message, Account account)
+        private byte[] ReadOCBCStatementPdfAttachment(MimeMessage message)
         {
-            if (!IsOCBCTransactionMail(message))
-                throw new MailParseException($"Unsupported OCBC mail sender or subject: {message.Subject}");
+            var pdfAttachments = message.Attachments
+                .OfType<MimePart>()
+                .Where(attachment => GetAttachmentFileName(attachment).EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (pdfAttachments.Count != 1)
+                throw new MailParseException($"OCBC statement mail should contain exactly one PDF attachment: {message.Subject}");
 
-            var subject = NormalizeMailText(message.Subject ?? "");
-            var text = NormalizeMailText(GetMessageText(message));
-            var source = $"OCBC mail: {subject}";
-            var statementKey = BuildOCBCStatementKey(message, subject, text);
-
-            if (subject.Contains("sent money", StringComparison.OrdinalIgnoreCase))
-                return ParseOCBCPayNowTransfer(account, subject, text, source, statementKey);
-
-            if (subject.Contains("FX order", StringComparison.OrdinalIgnoreCase))
-                return ParseOCBCFxOrder(account, text, source, statementKey);
-
-            if (subject.Contains("funds transfer", StringComparison.OrdinalIgnoreCase))
-                return ParseOCBCFundsTransfer(account, text, source, statementKey);
-
-            throw new MailParseException($"Unsupported OCBC mail format: subject={subject}; text={TrimForError(text)}");
+            return ReadMimePartBytes(pdfAttachments[0]);
         }
 
-        private static OCBCParsedMail ParseOCBCPayNowTransfer(
-            Account account,
-            string subject,
-            string text,
-            string source,
-            string statementKey)
+        private string ReadOCBCStatementPdfText(byte[] pdfBytes)
         {
-            var date = ParseOCBCTransferDateTime(text);
-            var amount = ParseOCBCAmountAt(text, "Amount");
-            var fromAccount = ExtractOCBCField(text, "From your account", ["Description", "Description/reference no.", "Reference number", "You can also", "For assistance"]);
-            var description = ExtractOptionalOCBCField(text, "Description", ["OCBC Reference number", "You can also", "For assistance"])
-                ?? ExtractOptionalOCBCField(text, "Description/reference no.", ["You can also", "For assistance"])
-                ?? "";
-
-            if (!subject.Contains("WISE ASIA-PACIFIC", StringComparison.OrdinalIgnoreCase))
-                throw new MailParseException($"Unsupported OCBC PayNow recipient: subject={subject}; text={TrimForError(text)}");
-
-            var destAccount = FormatTransferCounterparty(OCBCAccountName, OCBCWiseAccountName);
-            var records = new Records
+            var passwords = GetOCBCStatementPasswords();
+            Exception? lastException = null;
+            foreach (var password in passwords)
             {
-                CreateOCBCRecord(
-                    account,
-                    date,
-                    NegateOCBCAmount(amount),
-                    String.IsNullOrWhiteSpace(description) ? destAccount : $"{destAccount} / {description}",
-                    "转账",
-                    true,
-                    source)
-            };
-            Console.WriteLine($"Parse OCBC PayNow transfer from {fromAccount}: {amount.v:0.##} {amount.t}");
-            return new OCBCParsedMail(date, statementKey, records);
-        }
+                try
+                {
+                    using var document = PdfDocument.Open(pdfBytes, new ParsingOptions { Password = password });
+                    var text = new StringBuilder();
+                    foreach (var page in document.GetPages())
+                    {
+                        var lines = page.GetWords()
+                            .GroupBy(word => Math.Round(word.BoundingBox.Bottom / 2.0) * 2.0)
+                            .OrderByDescending(group => group.Key)
+                            .Select(group => String.Join(" ", group
+                                .OrderBy(word => word.BoundingBox.Left)
+                                .Select(word => word.Text)));
+                        foreach (var line in lines)
+                            text.AppendLine(line);
+                    }
 
-        private static OCBCParsedMail ParseOCBCFxOrder(
-            Account account,
-            string text,
-            string source,
-            string statementKey)
-        {
-            var date = ParseOCBCFxDateTime(text);
-            var sourceAmount = ParseOCBCAmountAt(text, "Amount");
-            var equivalentAmount = ParseOCBCAmountAt(text, "Equivalent amount");
-            var fromAccount = ExtractOCBCField(text, "From your account", ["To account"]);
-            var toAccount = ExtractOCBCField(text, "To account", ["Reference number", "For assistance"]);
-            var destAccount = $"{fromAccount} -> {toAccount}";
-            var records = new Records
-            {
-                CreateOCBCRecord(account, date, NegateOCBCAmount(sourceAmount), destAccount, "换汇", true, source),
-                CreateOCBCRecord(account, date, equivalentAmount, destAccount, "换汇", true, source)
-            };
-            return new OCBCParsedMail(date, statementKey, records);
-        }
-
-        private static OCBCParsedMail ParseOCBCFundsTransfer(
-            Account account,
-            string text,
-            string source,
-            string statementKey)
-        {
-            var date = ParseOCBCTransferDateTime(text);
-            var amount = ParseOCBCAmountAt(text, "Amount");
-            var fromAccount = ExtractOCBCField(text, "From your account", ["To account"]);
-            var toAccount = ExtractOCBCField(text, "To account", ["Reference number", "For assistance"]);
-            if (IsOCBCOwnAccountText(fromAccount) && IsOCBCOwnAccountText(toAccount))
-            {
-                Console.WriteLine($"Skip OCBC own-account transfer: {amount.v:0.##} {amount.t}, {fromAccount} -> {toAccount}");
-                return new OCBCParsedMail(date, statementKey, []);
+                    return text.ToString();
+                }
+                catch (Exception e)
+                {
+                    lastException = e;
+                }
             }
 
-            throw new MailParseException($"Unsupported OCBC funds transfer: {TrimForError(text)}");
+            throw new MailParseException($"Parse OCBC statement PDF fail, no configured password could open it: {lastException?.Message}");
+        }
+
+        private List<string> GetOCBCStatementPasswords()
+        {
+            var passwords = config.GetSection(OCBCStatementPasswordConfigKey)
+                .GetChildren()
+                .Select(section => section.Value ?? "")
+                .ToList();
+            if (passwords.Count == 0)
+            {
+                passwords = config.GetChildren()
+                    .Where(section => String.Equals(
+                        section.Key.Trim(),
+                        OCBCStatementPasswordConfigKey,
+                        StringComparison.OrdinalIgnoreCase))
+                    .SelectMany(section => section.GetChildren())
+                    .Select(section => section.Value ?? "")
+                    .ToList();
+            }
+
+            if (passwords.Count == 0)
+                throw new InvalidOperationException($"Missing config array: {OCBCStatementPasswordConfigKey}");
+
+            return passwords;
+        }
+
+        private OCBCParsedStatement ParseOCBCStatement(
+            DateTime statementMonth,
+            DateTime importTime,
+            string text,
+            List<Account> accounts)
+        {
+            var normalizedText = NormalizeOCBCPdfText(text);
+            var statementEndDate = ParseOCBCStatementEndDate(normalizedText, statementMonth);
+            var statementKey = statementEndDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            var lines = normalizedText.Split('\n')
+                .Select(line => line.Trim())
+                .Where(line => !String.IsNullOrWhiteSpace(line))
+                .ToList();
+            var words = Regex.Split(normalizedText, @"\s+")
+                .Where(word => !String.IsNullOrWhiteSpace(word))
+                .ToList();
+            var accountInfos = accounts.Select(account => new OCBCAccountInfo(account, GetOCBCAccountTail(account))).ToList();
+            var parsedBalances = ParseOCBCStatement(lines, words, accountInfos, statementEndDate, statementKey);
+            return BuildOCBCStatementImport(importTime, statementKey, accountInfos, parsedBalances, ReadConfigList("wise:own_names"));
+        }
+
+        private OCBCParsedStatement BuildOCBCStatementImport(
+            DateTime importTime,
+            string statementKey,
+            List<OCBCAccountInfo> accounts,
+            OCBCParsedBalances parsedBalances,
+            List<string> ownCounterpartyMarkers)
+        {
+            var beginningBalances = new List<AccountBalance>();
+            var endingBalances = new List<AccountBalance>();
+            var records = new Records();
+            var now = DateTime.Now;
+            var fxCounterparties = BuildOCBCFxCounterpartyMap(parsedBalances.Transactions);
+            foreach (var transaction in parsedBalances.Transactions)
+                records.Add(CreateOCBCRecord(transaction, statementKey, accounts, fxCounterparties, ownCounterpartyMarkers, now));
+
+            foreach (var accountInfo in accounts)
+            {
+                var currency = GetOCBCAccountCurrency(accountInfo);
+                var key = (accountInfo.Account.name, currency);
+                var currentBalance = database.GetAccountBalance(accountInfo.Account, currency).v;
+                var hasEnding = parsedBalances.Ending.TryGetValue(key, out var parsedEnding);
+                var ending = hasEnding ? parsedEnding : 0;
+                var beginning = parsedBalances.Beginning.TryGetValue(key, out var parsedBeginning)
+                    ? parsedBeginning
+                    : hasEnding && parsedBalances.PresentAccounts.Contains(accountInfo.Account.name)
+                        ? ending
+                        : currentBalance;
+
+                beginningBalances.Add(new AccountBalance(accountInfo.Account, new Currency(beginning, currency)));
+                endingBalances.Add(new AccountBalance(accountInfo.Account, new Currency(ending, currency)));
+            }
+
+            return new OCBCParsedStatement(importTime, statementKey, records, beginningBalances, endingBalances);
+        }
+
+        private static OCBCParsedBalances ParseOCBCStatement(
+            List<string> lines,
+            List<string> words,
+            List<OCBCAccountInfo> accounts,
+            DateTime statementEndDate,
+            string statementKey)
+        {
+            var beginning = new Dictionary<(string AccountName, CurrencyType Currency), decimal>();
+            var ending = new Dictionary<(string AccountName, CurrencyType Currency), decimal>();
+            var transactions = new List<OCBCParsedTransaction>();
+            var presentAccounts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddOCBCSummaryEndingBalances(words, accounts, presentAccounts, ending);
+            var sections = FindOCBCAccountSections(lines, accounts);
+            foreach (var group in sections.GroupBy(section => section.Account.Account.name, StringComparer.OrdinalIgnoreCase))
+            {
+                var accountInfo = group.First().Account;
+                var sectionLines = group.SelectMany(section => section.Lines).ToList();
+                var currency = GetOCBCAccountCurrency(accountInfo);
+                var hasBeginningBalance = TryReadOCBCSectionBalance(sectionLines, "B/F", out var beginningBalance);
+                var hasEndingBalance = TryReadOCBCSectionBalance(sectionLines, "C/F", out var endingBalance);
+                if (!hasBeginningBalance && !hasEndingBalance)
+                    continue;
+
+                presentAccounts.Add(accountInfo.Account.name);
+                if (!hasBeginningBalance)
+                    throw new MailParseException($"Parse OCBC Statement Fail, missing beginning balance for {accountInfo.Account.name} in {statementKey}");
+
+                if (!hasEndingBalance)
+                    throw new MailParseException($"Parse OCBC Statement Fail, missing ending balance for {accountInfo.Account.name} in {statementKey}");
+
+                var key = (accountInfo.Account.name, currency);
+                if (beginning.ContainsKey(key))
+                    throw new MailParseException($"Parse OCBC Statement Fail, duplicate account section for {accountInfo.Account.name} in {statementKey}");
+
+                var sectionTransactions = ParseOCBCSectionTransactions(
+                    new OCBCAccountSection(accountInfo, sectionLines),
+                    statementEndDate,
+                    statementKey,
+                    beginningBalance,
+                    endingBalance);
+                transactions.AddRange(sectionTransactions);
+                beginning[key] = beginningBalance;
+                ending[key] = endingBalance;
+            }
+
+            foreach (var accountInfo in accounts.Where(account => presentAccounts.Contains(account.Account.name)))
+            {
+                var accountEnding = ending.Keys
+                    .Any(key => String.Equals(key.AccountName, accountInfo.Account.name, StringComparison.OrdinalIgnoreCase));
+                if (!accountEnding)
+                    throw new MailParseException($"Parse OCBC Statement Fail, missing ending balance for {accountInfo.Account.name}");
+            }
+
+            return new OCBCParsedBalances(presentAccounts, beginning, ending, transactions);
+        }
+
+        private static void AddOCBCSummaryEndingBalances(
+            List<string> words,
+            List<OCBCAccountInfo> accounts,
+            HashSet<string> presentAccounts,
+            Dictionary<(string AccountName, CurrencyType Currency), decimal> ending)
+        {
+            var summaryEnd = FindOCBCSummaryEnd(words);
+            for (var i = 0; i < summaryEnd; i++)
+            {
+                var accountNumber = Regex.Replace(words[i], @"\D", "");
+                if (accountNumber.Length < 4)
+                    continue;
+
+                foreach (var account in accounts)
+                {
+                    if (!accountNumber.EndsWith(account.Tail, StringComparison.Ordinal))
+                        continue;
+
+                    var amountIndex = Enumerable.Range(i + 1, Math.Min(6, summaryEnd - i - 1))
+                        .FirstOrDefault(index => IsOCBCAmountWord(words[index]));
+                    if (amountIndex <= i)
+                        throw new MailParseException($"Parse OCBC Statement Fail, missing summary balance for {account.Account.name}");
+
+                    presentAccounts.Add(account.Account.name);
+                    ending[(account.Account.name, GetOCBCAccountCurrency(account))] = ParseOCBCDecimal(words[amountIndex]);
+                }
+            }
+        }
+
+        private static int FindOCBCSummaryEnd(List<string> words)
+        {
+            for (var i = 0; i + 1 < words.Count; i++)
+            {
+                if (String.Equals(words[i], "TRANSACTION", StringComparison.OrdinalIgnoreCase)
+                    && String.Equals(words[i + 1], "CODE", StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+
+            return words.Count;
+        }
+
+        private static List<OCBCAccountSection> FindOCBCAccountSections(List<string> lines, List<OCBCAccountInfo> accounts)
+        {
+            var starts = new List<(int Index, OCBCAccountInfo Account)>();
+            for (var i = 0; i < lines.Count; i++)
+            {
+                var match = Regex.Match(
+                    lines[i],
+                    @"\bAccount\s+No\.?\s+(?<accountNumber>\d+)\b",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                if (!match.Success)
+                    continue;
+
+                var accountNumber = Regex.Replace(match.Groups["accountNumber"].Value, @"\D", "");
+                foreach (var account in accounts)
+                {
+                    if (accountNumber.EndsWith(account.Tail, StringComparison.Ordinal))
+                        starts.Add((i, account));
+                }
+            }
+
+            var sections = new List<OCBCAccountSection>();
+            for (var i = 0; i < starts.Count; i++)
+            {
+                var end = i + 1 < starts.Count ? starts[i + 1].Index : lines.Count;
+                sections.Add(new OCBCAccountSection(
+                    starts[i].Account,
+                    lines.Skip(starts[i].Index).Take(end - starts[i].Index).ToList()));
+            }
+
+            return sections;
+        }
+
+        private static CurrencyType GetOCBCAccountCurrency(OCBCAccountInfo accountInfo)
+        {
+            return accountInfo.Tail == "1201" ? CurrencyType.USD : CurrencyType.SGD;
+        }
+
+        private static List<OCBCParsedTransaction> ParseOCBCSectionTransactions(
+            OCBCAccountSection section,
+            DateTime statementEndDate,
+            string statementKey,
+            decimal beginningBalance,
+            decimal endingBalance)
+        {
+            var beginIndex = section.Lines.FindIndex(line => IsOCBCBalanceLine(line, "B/F"));
+            var endIndex = section.Lines.FindIndex(line => IsOCBCBalanceLine(line, "C/F"));
+            if (beginIndex < 0 || endIndex < 0 || endIndex <= beginIndex)
+                throw new MailParseException($"Parse OCBC Statement Fail, invalid balance markers for {section.Account.Account.name} in {statementKey}");
+
+            var currentBalance = beginningBalance;
+            var pendingDescriptionLines = new List<string>();
+            OCBCParsedTransaction? currentTransaction = null;
+            var transactions = new List<OCBCParsedTransaction>();
+            var transactionStartIndex = beginIndex + 1;
+            if (!OCBCBalanceLineHasInlineAmount(section.Lines[beginIndex])
+                && transactionStartIndex < endIndex
+                && IsOCBCAmountWord(section.Lines[transactionStartIndex].Trim()))
+            {
+                transactionStartIndex++;
+            }
+
+            for (var i = transactionStartIndex; i < endIndex; i++)
+            {
+                var line = section.Lines[i].Trim();
+                if (String.IsNullOrWhiteSpace(line))
+                    continue;
+                if (IsOCBCBoilerplateLine(line))
+                    continue;
+
+                if (TryParseOCBCTransactionLine(line, statementEndDate, out var transactionLine))
+                {
+                    var delta = transactionLine.Balance - currentBalance;
+                    var unsignedAmount = transactionLine.Amount;
+                    if (unsignedAmount < 0)
+                        throw new MailParseException($"Parse OCBC Statement Fail, negative unsigned transaction amount: {line}");
+
+                    decimal signedAmount;
+                    if (delta == unsignedAmount)
+                        signedAmount = unsignedAmount;
+                    else if (delta == -unsignedAmount)
+                        signedAmount = -unsignedAmount;
+                    else
+                        throw new MailParseException(
+                            $"Parse OCBC Statement Fail, running balance mismatch for {section.Account.Account.name} in {statementKey}: previous={currentBalance}, lineAmount={unsignedAmount}, lineBalance={transactionLine.Balance}, line={line}");
+
+                    var descriptionLines = new List<string>(pendingDescriptionLines);
+                    pendingDescriptionLines.Clear();
+                    if (!String.IsNullOrWhiteSpace(transactionLine.InlineDescription))
+                        descriptionLines.Add(transactionLine.InlineDescription);
+
+                    currentTransaction = new OCBCParsedTransaction(
+                        section.Account,
+                        GetOCBCAccountCurrency(section.Account),
+                        transactionLine.TransactionDate,
+                        transactionLine.ValueDate,
+                        signedAmount,
+                        transactionLine.Balance,
+                        descriptionLines,
+                        line);
+                    transactions.Add(currentTransaction);
+                    currentBalance = transactionLine.Balance;
+                    continue;
+                }
+
+                if (IsOCBCPendingTransactionTitle(section.Lines, i, statementEndDate))
+                {
+                    pendingDescriptionLines.Add(line);
+                    currentTransaction = null;
+                    continue;
+                }
+
+                if (currentTransaction is not null)
+                {
+                    if (ShouldIgnoreOCBCContinuation(currentTransaction))
+                        continue;
+
+                    currentTransaction.DescriptionLines.Add(line);
+                    continue;
+                }
+
+                pendingDescriptionLines.Add(line);
+            }
+
+            if (pendingDescriptionLines.Count > 0)
+                throw new MailParseException(
+                    $"Parse OCBC Statement Fail, description without transaction for {section.Account.Account.name} in {statementKey}: {String.Join(" / ", pendingDescriptionLines)}");
+
+            if (currentBalance != endingBalance)
+                throw new MailParseException(
+                    $"Parse OCBC Statement Fail, section balance mismatch for {section.Account.Account.name} in {statementKey}: parsed={currentBalance}, ending={endingBalance}");
+
+            return transactions;
+        }
+
+        private static bool IsOCBCPendingTransactionTitle(List<string> lines, int index, DateTime statementEndDate)
+        {
+            if (!IsKnownOCBCTransactionTitle(lines[index]))
+                return false;
+
+            for (var i = index + 1; i < lines.Count; i++)
+            {
+                var line = lines[i].Trim();
+                if (String.IsNullOrWhiteSpace(line))
+                    continue;
+
+                return TryParseOCBCTransactionLine(line, statementEndDate, out _);
+            }
+
+            return false;
+        }
+
+        private static bool IsKnownOCBCTransactionTitle(string line)
+        {
+            var normalized = NormalizeOCBCTransactionText(line);
+            return normalized is "FUND TRANSFER"
+                or "INTEREST CREDIT"
+                or "BONUS INTEREST"
+                or "CALL A/C TT DEP"
+                or "COMM/COMM IN LIEU"
+                or "BANK CHARGES"
+                or "TRAN CHARGE"
+                or "CCY CONVERSION FEE"
+                or "SERVICE CHARGE"
+                or "DEBIT PURCHASE"
+                or "MEPS RECEIPTS"
+                or "CREDIT ADVICE";
+        }
+
+        private static bool ShouldIgnoreOCBCContinuation(OCBCParsedTransaction transaction)
+        {
+            var mainDescription = GetOCBCMainDescription(transaction);
+            return mainDescription.Equals("INTEREST CREDIT", StringComparison.OrdinalIgnoreCase)
+                || mainDescription.Equals("BONUS INTEREST", StringComparison.OrdinalIgnoreCase)
+                || mainDescription.Equals("SERVICE CHARGE", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsOCBCBoilerplateLine(string line)
+        {
+            var normalized = NormalizeOCBCTransactionText(line);
+            if (normalized.Length == 1)
+                return true;
+
+            return normalized.StartsWith("Deposit Insurance Scheme", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Singapore dollar deposits", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("and separately insured", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Foreign currency deposits", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("OCBC Bank", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("65 Chulia Street", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("STATEMENT OF ACCOUNT", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Account No.", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Transaction Value", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Date Date Description", StringComparison.OrdinalIgnoreCase)
+                || Regex.IsMatch(normalized, @"^\d{1,2}\s+[A-Z]{3}\s+\d{4}$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+                || normalized.Equals("LI JINGLUN", StringComparison.OrdinalIgnoreCase)
+                || Regex.IsMatch(normalized, @"^[A-Za-z](?:\s+\d+)?$", RegexOptions.CultureInvariant)
+                || (normalized.Length <= 5 && normalized.Contains(' ', StringComparison.Ordinal))
+                || normalized.StartsWith("Page ", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("For enquiries", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Please check this statement", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("CHECK YOUR STATEMENT", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Total Withdrawals/Deposits", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Total Interest Paid", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("Average Balance", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool TryParseOCBCTransactionLine(string line, DateTime statementEndDate, out OCBCTransactionLine transactionLine)
+        {
+            transactionLine = new OCBCTransactionLine(default, default, "", 0, 0);
+            var match = Regex.Match(
+                line,
+                @"^(?<td>\d{1,2})\s+(?<tm>[A-Za-z]{3})\s+(?<vd>\d{1,2})\s+(?<vm>[A-Za-z]{3})(?:\s+(?<desc>.*?))?\s+(?<amount>\(?-?\d[\d,]*(?:\.\d+)?\)?)\s+(?<balance>\(?-?\d[\d,]*(?:\.\d+)?\)?)\s*$",
+                RegexOptions.CultureInvariant);
+            if (!match.Success)
+                return false;
+
+            transactionLine = new OCBCTransactionLine(
+                ParseOCBCLineDate(match.Groups["td"].Value, match.Groups["tm"].Value, statementEndDate),
+                ParseOCBCLineDate(match.Groups["vd"].Value, match.Groups["vm"].Value, statementEndDate),
+                NormalizeOCBCTransactionText(match.Groups["desc"].Value),
+                ParseOCBCDecimal(match.Groups["amount"].Value),
+                ParseOCBCDecimal(match.Groups["balance"].Value));
+            return true;
+        }
+
+        private static DateTime ParseOCBCLineDate(string dayText, string monthText, DateTime statementEndDate)
+        {
+            if (!DateTime.TryParseExact(
+                    monthText,
+                    "MMM",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var parsedMonth))
+            {
+                throw new MailParseException($"Invalid OCBC transaction month: {monthText}");
+            }
+
+            var day = Int32.Parse(dayText, CultureInfo.InvariantCulture);
+            var candidate = new DateTime(statementEndDate.Year, parsedMonth.Month, day);
+            if (candidate < statementEndDate.AddMonths(-11))
+                candidate = candidate.AddYears(1);
+            else if (candidate > statementEndDate.AddMonths(1))
+                candidate = candidate.AddYears(-1);
+
+            return candidate.Date;
+        }
+
+        private static bool TryReadOCBCSectionBalance(List<string> lines, string balanceKind, out decimal balance)
+        {
+            balance = 0;
+            for (var i = 0; i < lines.Count; i++)
+            {
+                var line = lines[i];
+                var match = Regex.Match(
+                    line,
+                    $@"^\s*BALANCE\s+{Regex.Escape(balanceKind)}(?:\s+(?<amount>\(?-?\d[\d,]*(?:\.\d+)?\)?))?\s*$",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                if (!match.Success)
+                    continue;
+
+                if (match.Groups["amount"].Success)
+                {
+                    balance = ParseOCBCDecimal(match.Groups["amount"].Value);
+                    return true;
+                }
+
+                var nextAmountLine = lines
+                    .Skip(i + 1)
+                    .FirstOrDefault(candidate => !String.IsNullOrWhiteSpace(candidate));
+                if (nextAmountLine is not null && IsOCBCAmountWord(nextAmountLine))
+                {
+                    balance = ParseOCBCDecimal(nextAmountLine);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsOCBCBalanceLine(string line, string balanceKind)
+        {
+            return Regex.IsMatch(
+                line,
+                $@"^\s*BALANCE\s+{Regex.Escape(balanceKind)}(?:\s+\(?-?\d[\d,]*(?:\.\d+)?\)?)?\s*$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        private static bool OCBCBalanceLineHasInlineAmount(string line)
+        {
+            return Regex.IsMatch(
+                line,
+                @"^\s*BALANCE\s+(?:B/F|C/F)\s+\(?-?\d[\d,]*(?:\.\d+)?\)?\s*$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        private static bool IsOCBCAmountWord(string value)
+        {
+            return Regex.IsMatch(value, @"^\(?-?\d[\d,]*(?:\.\d+)?\)?$", RegexOptions.CultureInvariant);
+        }
+
+        private static decimal ParseOCBCDecimal(string amountText)
+        {
+            var normalized = amountText.Trim();
+            var negative = normalized.StartsWith("(", StringComparison.Ordinal) && normalized.EndsWith(")", StringComparison.Ordinal);
+            normalized = normalized.Trim('(', ')').Replace(",", "");
+            var amount = Decimal.Parse(normalized, NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+            return negative ? -Math.Abs(amount) : amount;
+        }
+
+        private static Dictionary<OCBCParsedTransaction, string> BuildOCBCFxCounterpartyMap(List<OCBCParsedTransaction> transactions)
+        {
+            var result = new Dictionary<OCBCParsedTransaction, string>();
+            foreach (var group in transactions
+                         .Where(IsOCBCFxTransaction)
+                         .GroupBy(transaction => transaction.Reference, StringComparer.OrdinalIgnoreCase))
+            {
+                if (String.IsNullOrWhiteSpace(group.Key))
+                    throw new MailParseException($"Parse OCBC Statement Fail, FX transaction missing reference: {group.First().DescriptionText}");
+
+                var list = group.ToList();
+                if (list.Count != 2 || list.Select(transaction => transaction.Currency).Distinct().Count() != 2)
+                    throw new MailParseException($"Parse OCBC Statement Fail, unpaired FX transaction reference {group.Key}: count={list.Count}");
+
+                foreach (var transaction in list)
+                    result[transaction] = list.First(other => !ReferenceEquals(other, transaction)).AccountInfo.Account.name;
+            }
+
+            return result;
         }
 
         private static Record CreateOCBCRecord(
-            Account account,
-            DateTime time,
-            Currency amount,
-            string destAccount,
-            string reason,
-            bool isInternal,
-            string source)
+            OCBCParsedTransaction transaction,
+            string statementKey,
+            List<OCBCAccountInfo> accounts,
+            Dictionary<OCBCParsedTransaction, string> fxCounterparties,
+            List<string> ownCounterpartyMarkers,
+            DateTime updateTime)
         {
+            var classification = ClassifyOCBCTransaction(transaction, accounts, fxCounterparties, ownCounterpartyMarkers);
             return new Record
             {
-                Account = account,
-                date = time,
-                updateTime = DateTime.Now,
-                DestAccount = LimitOCBCRecordText(destAccount),
-                isInternal = isInternal,
-                Reason = reason,
-                Source = LimitOCBCRecordText(source),
-                v = amount.v,
-                t = amount.t
+                Account = transaction.AccountInfo.Account,
+                date = transaction.ValueDate,
+                updateTime = updateTime,
+                DestAccount = classification.DestAccount,
+                isInternal = classification.IsInternal,
+                Source = LimitOCBCRecordText(BuildOCBCSource(statementKey, transaction)),
+                Reason = classification.Reason,
+                v = transaction.Amount,
+                t = transaction.Currency
             };
         }
 
-        private static DateTime ParseOCBCTransferDateTime(string text)
+        private static OCBCTransactionClassification ClassifyOCBCTransaction(
+            OCBCParsedTransaction transaction,
+            List<OCBCAccountInfo> accounts,
+            Dictionary<OCBCParsedTransaction, string> fxCounterparties,
+            List<string> ownCounterpartyMarkers)
         {
-            var match = Regex.Match(
-                text,
-                @"Date of Transfer\s*:\s*(?<date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s*Time of Transfer\s*:\s*(?<time>\d{1,2}[:.]\d{2}(?:\s*(?:AM|PM))?(?:\s*SGT)?)",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (!match.Success)
-                throw new MailParseException($"Parse OCBC Mail Fail, Missing Transfer Date: {TrimForError(text)}");
+            if (IsOCBCFeeTransaction(transaction))
+                return new OCBCTransactionClassification("手续费", ExtractOCBCCounterparty(transaction, accounts), false);
 
-            var date = DateTime.ParseExact(match.Groups["date"].Value.Trim(), "d MMM yyyy", CultureInfo.InvariantCulture);
-            return date.Date + ParseOCBCTime(match.Groups["time"].Value);
-        }
+            if (IsOCBCInterestTransaction(transaction))
+                return new OCBCTransactionClassification("利息", "OCBC", false);
 
-        private static DateTime ParseOCBCFxDateTime(string text)
-        {
-            var match = Regex.Match(
-                text,
-                @"Date of exchange:\s*(?<date>\d{1,2}/\d{1,2}/\d{4})\s*Time of exchange:\s*(?<time>\d{1,2}[:.]\d{2}\s*(?:am|pm)?)",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (!match.Success)
-                throw new MailParseException($"Parse OCBC Mail Fail, Missing FX Date: {TrimForError(text)}");
-
-            var date = DateTime.ParseExact(match.Groups["date"].Value.Trim(), "d/M/yyyy", CultureInfo.InvariantCulture);
-            return date.Date + ParseOCBCTime(match.Groups["time"].Value);
-        }
-
-        private static TimeSpan ParseOCBCTime(string value)
-        {
-            var normalized = Regex.Replace(value, @"\bSGT\b", "", RegexOptions.IgnoreCase)
-                .Replace('.', ':')
-                .Trim()
-                .ToUpperInvariant();
-            var amPmMatch = Regex.Match(normalized, @"^(?<hour>\d{1,2}):(?<minute>\d{2})\s*(?<period>AM|PM)?$");
-            if (!amPmMatch.Success)
-                throw new MailParseException($"Parse OCBC Mail Fail, Invalid Time: {value}");
-
-            var hour = Int32.Parse(amPmMatch.Groups["hour"].Value, CultureInfo.InvariantCulture);
-            var minute = Int32.Parse(amPmMatch.Groups["minute"].Value, CultureInfo.InvariantCulture);
-            var period = amPmMatch.Groups["period"].Value;
-            if (!String.IsNullOrWhiteSpace(period) && hour <= 12)
+            if (IsOCBCFxTransaction(transaction))
             {
-                if (period == "PM" && hour < 12)
-                    hour += 12;
-                if (period == "AM" && hour == 12)
-                    hour = 0;
+                var destAccount = fxCounterparties.TryGetValue(transaction, out var pairedAccount)
+                    ? pairedAccount
+                    : ExtractOCBCFxDescription(transaction);
+                return new OCBCTransactionClassification("换汇", destAccount, true);
             }
 
-            return new TimeSpan(hour, minute, 0);
+            var counterparty = ExtractOCBCCounterparty(transaction, accounts);
+            var isInternal = IsOCBCOwnCounterparty(counterparty, transaction.DescriptionText, ownCounterpartyMarkers);
+            if (IsOCBCTransferTransaction(transaction))
+                return new OCBCTransactionClassification("转账", counterparty, isInternal);
+
+            if (IsOCBCTelegraphicDepositTransaction(transaction))
+                return new OCBCTransactionClassification("电汇入账", counterparty, isInternal);
+
+            if (IsOCBCPurchaseTransaction(transaction))
+                return new OCBCTransactionClassification("消费", counterparty, isInternal);
+
+            if (IsOCBCReceiptTransaction(transaction))
+                return new OCBCTransactionClassification("转账入账", counterparty, isInternal);
+
+            if (IsOCBCCreditAdviceTransaction(transaction))
+                return new OCBCTransactionClassification(
+                    transaction.DescriptionText.Contains("Welcome", StringComparison.OrdinalIgnoreCase) ? "奖励" : "入账",
+                    counterparty,
+                    isInternal);
+
+            return new OCBCTransactionClassification(GetOCBCMainDescription(transaction), counterparty, isInternal);
         }
 
-        private static Currency ParseOCBCAmountAt(string text, string label)
+        private static string BuildOCBCSource(string statementKey, OCBCParsedTransaction transaction)
         {
-            var match = Regex.Match(
-                text,
-                $@"{Regex.Escape(label)}\s*:\s*(?:(?<currency1>[A-Z]{{3}})\s*(?<amount1>[\d,]+(?:\.\d+)?)|(?<amount2>[\d,]+(?:\.\d+)?)\s*(?<currency2>[A-Z]{{3}}))",
-                RegexOptions.Singleline);
-            if (!match.Success)
-                throw new MailParseException($"Parse OCBC Mail Fail, Missing Amount: {label}; {TrimForError(text)}");
+            return $"OCBC statement {statementKey}/{transaction.AccountInfo.Account.name}/{transaction.Currency}: transactionDate={transaction.TransactionDate:yyyy-MM-dd}; valueDate={transaction.ValueDate:yyyy-MM-dd}; {transaction.DescriptionText}";
+        }
 
-            var amountText = match.Groups["amount1"].Success ? match.Groups["amount1"].Value : match.Groups["amount2"].Value;
-            var currencyText = match.Groups["currency1"].Success ? match.Groups["currency1"].Value : match.Groups["currency2"].Value;
-            var amount = Decimal.Parse(amountText.Replace(",", ""), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture);
-            return new Currency(amount, ParseOCBCCurrencyType(currencyText));
+        private static string ExtractOCBCCounterparty(OCBCParsedTransaction transaction, List<OCBCAccountInfo> accounts)
+        {
+            var lines = transaction.DescriptionLines
+                .Select(NormalizeOCBCTransactionText)
+                .Where(line => !String.IsNullOrWhiteSpace(line))
+                .ToList();
+            var ownAccount = ExtractOCBCOwnAccountCounterparty(lines, accounts, transaction.AccountInfo);
+            if (!String.IsNullOrWhiteSpace(ownAccount))
+                return ownAccount;
+
+            var toLine = lines.FirstOrDefault(line => line.StartsWith("to ", StringComparison.OrdinalIgnoreCase));
+            if (!String.IsNullOrWhiteSpace(toLine))
+            {
+                var reference = lines.FirstOrDefault(line => line.StartsWith("OTHR - ", StringComparison.OrdinalIgnoreCase));
+                return String.IsNullOrWhiteSpace(reference)
+                    ? toLine[3..].Trim()
+                    : $"{toLine[3..].Trim()} / {reference[7..].Trim()}";
+            }
+
+            var wiseLine = lines.FirstOrDefault(line => line.Contains("Wise", StringComparison.OrdinalIgnoreCase));
+            if (!String.IsNullOrWhiteSpace(wiseLine))
+                return ExtractOCBCMerchantLine(wiseLine, @"xx-\d+\s+Wise");
+
+            var paypalLine = lines.FirstOrDefault(line => line.Contains("PAYPAL", StringComparison.OrdinalIgnoreCase));
+            if (!String.IsNullOrWhiteSpace(paypalLine))
+                return ExtractOCBCMerchantLine(paypalLine, @"xx-\d+\s+PAYPAL.*");
+
+            var namedLines = lines
+                .Where(line => !IsOCBCDescriptionMetadata(line))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (namedLines.Count > 0)
+                return String.Join(" / ", namedLines);
+
+            return GetOCBCMainDescription(transaction);
+        }
+
+        private static string ExtractOCBCMerchantLine(string line, string pattern)
+        {
+            var match = Regex.Match(line, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return match.Success ? NormalizeOCBCTransactionText(match.Value) : line;
+        }
+
+        private static string ExtractOCBCOwnAccountCounterparty(List<string> lines, List<OCBCAccountInfo> accounts, OCBCAccountInfo currentAccount)
+        {
+            foreach (var line in lines)
+            {
+                var accountNumber = Regex.Replace(line, @"\D", "");
+                if (accountNumber.Length < 4)
+                    continue;
+
+                var account = accounts
+                    .FirstOrDefault(item => accountNumber.EndsWith(item.Tail, StringComparison.Ordinal)
+                        && !String.Equals(item.Account.name, currentAccount.Account.name, StringComparison.OrdinalIgnoreCase));
+                if (account is not null)
+                    return account.Account.name;
+            }
+
+            return "";
+        }
+
+        private static string ExtractOCBCFxDescription(OCBCParsedTransaction transaction)
+        {
+            var fxLine = transaction.DescriptionLines
+                .FirstOrDefault(line => Regex.IsMatch(line, @"\b[A-Z]{3}\s+to\s+[A-Z]{3}\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
+            return String.IsNullOrWhiteSpace(fxLine)
+                ? GetOCBCMainDescription(transaction)
+                : NormalizeOCBCTransactionText(fxLine);
+        }
+
+        private static bool IsOCBCDescriptionMetadata(string line)
+        {
+            if (IsKnownOCBCTransactionTitle(line))
+                return true;
+
+            return line.StartsWith("*", StringComparison.Ordinal)
+                || line.StartsWith("Sys ", StringComparison.OrdinalIgnoreCase)
+                || line.StartsWith("via ", StringComparison.OrdinalIgnoreCase)
+                || line.StartsWith("OTHR - ", StringComparison.OrdinalIgnoreCase)
+                || Regex.IsMatch(line, @"^\d+$", RegexOptions.CultureInvariant)
+                || Regex.IsMatch(line, @"^\d{1,2}/\d{1,2}/\d{2,4}(?:\s+[A-Za-z])?$", RegexOptions.CultureInvariant)
+                || Regex.IsMatch(line, @"^[A-Z]{3}\s+\d[\d,]*(?:\.\d+)?$", RegexOptions.CultureInvariant)
+                || Regex.IsMatch(line, @"\b[A-Z]{3}\s+to\s+[A-Z]{3}\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+                || line.Contains("FX Transaction", StringComparison.OrdinalIgnoreCase)
+                || Regex.IsMatch(line, @"^[A-Z0-9]{8,}$", RegexOptions.CultureInvariant);
+        }
+
+        private static bool IsOCBCOwnCounterparty(string counterparty, string descriptionText, List<string> ownCounterpartyMarkers)
+        {
+            var normalizedCounterparty = NormalizeOCBCNameForComparison(counterparty + " " + descriptionText);
+            if (normalizedCounterparty.Contains("WISE", StringComparison.Ordinal)
+                || normalizedCounterparty.Contains("OWNACCOUNT", StringComparison.Ordinal)
+                || Regex.IsMatch(counterparty, @"^OCBC_\d{4}$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                return true;
+
+            return ownCounterpartyMarkers
+                .Select(NormalizeOCBCNameForComparison)
+                .Where(marker => !String.IsNullOrWhiteSpace(marker))
+                .Any(marker => normalizedCounterparty.Contains(marker, StringComparison.Ordinal));
+        }
+
+        private static string NormalizeOCBCNameForComparison(string value)
+        {
+            return Regex.Replace(value, @"\s+", "").ToUpperInvariant();
+        }
+
+        private static bool IsOCBCFeeTransaction(OCBCParsedTransaction transaction)
+        {
+            var text = transaction.DescriptionText;
+            return text.Contains("COMM/COMM IN LIEU", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("BANK CHARGES", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("TRAN CHARGE", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("CCY CONVERSION FEE", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("SERVICE CHARGE", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsOCBCInterestTransaction(OCBCParsedTransaction transaction)
+        {
+            return transaction.DescriptionText.Contains("INTEREST CREDIT", StringComparison.OrdinalIgnoreCase)
+                || transaction.DescriptionText.Contains("BONUS INTEREST", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsOCBCPurchaseTransaction(OCBCParsedTransaction transaction)
+        {
+            return transaction.DescriptionText.Contains("DEBIT PURCHASE", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsOCBCReceiptTransaction(OCBCParsedTransaction transaction)
+        {
+            return transaction.DescriptionText.Contains("MEPS RECEIPTS", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsOCBCCreditAdviceTransaction(OCBCParsedTransaction transaction)
+        {
+            return transaction.DescriptionText.Contains("CREDIT ADVICE", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsOCBCFxTransaction(OCBCParsedTransaction transaction)
+        {
+            var text = transaction.DescriptionText;
+            return text.Contains("FX Transaction", StringComparison.OrdinalIgnoreCase)
+                || Regex.IsMatch(text, @"\b[A-Z]{3}\s+to\s+[A-Z]{3}\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        private static bool IsOCBCTransferTransaction(OCBCParsedTransaction transaction)
+        {
+            return transaction.DescriptionText.Contains("FUND TRANSFER", StringComparison.OrdinalIgnoreCase)
+                || transaction.DescriptionText.Contains("TRANSFER", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsOCBCTelegraphicDepositTransaction(OCBCParsedTransaction transaction)
+        {
+            return transaction.DescriptionText.Contains("CALL A/C TT DEP", StringComparison.OrdinalIgnoreCase)
+                || transaction.DescriptionText.Contains("TT DEP", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string GetOCBCMainDescription(OCBCParsedTransaction transaction)
+        {
+            return transaction.DescriptionLines.Count == 0
+                ? "未分类"
+                : NormalizeOCBCTransactionText(transaction.DescriptionLines[0]);
+        }
+
+        private static string LimitOCBCRecordText(string text)
+        {
+            const int maxLength = 1024;
+            var normalized = NormalizeOCBCTransactionText(text);
+            return normalized.Length <= maxLength ? normalized : normalized[..maxLength];
+        }
+
+        private static string NormalizeOCBCTransactionText(string text)
+        {
+            return Regex.Replace(text ?? "", @"\s+", " ").Trim();
+        }
+
+        private static string ExtractOCBCReference(IEnumerable<string> lines)
+        {
+            foreach (var line in lines.Reverse().Select(NormalizeOCBCTransactionText))
+            {
+                var othr = Regex.Match(line, @"\bOTHR\s*-\s*(?<reference>[A-Z0-9]{8,})\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                if (othr.Success)
+                    return othr.Groups["reference"].Value;
+
+                var reference = Regex.Match(line, @"\b(?<reference>(?:FTS)?[A-Z0-9]*\d[A-Z0-9]{7,})\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                if (reference.Success && !line.StartsWith("*", StringComparison.Ordinal))
+                    return reference.Groups["reference"].Value;
+            }
+
+            return "";
+        }
+
+        private static DateTime ParseOCBCStatementEndDate(string text, DateTime statementMonth)
+        {
+            var datePatterns = new[]
+            {
+                @"Statement\s+Date\s*:?\s*(?<date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
+                @"Statement\s+Period\s*:?.*?(?:to|-)\s*(?<date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
+                @"From\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+(?:to|-)\s*(?<date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})"
+            };
+            foreach (var pattern in datePatterns)
+            {
+                var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+                if (match.Success
+                    && DateTime.TryParseExact(match.Groups["date"].Value.Trim(), "d MMM yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+                {
+                    return date.Date;
+                }
+            }
+
+            return statementMonth.AddMonths(1).AddDays(-1);
         }
 
         private static CurrencyType ParseOCBCCurrencyType(string currencyText)
@@ -289,58 +992,87 @@ namespace MyBook
             throw new MailParseException($"Unsupported OCBC currency: {currencyText}");
         }
 
-        private static string ExtractOCBCField(string text, string label, string[] nextLabels)
+        private static string NormalizeOCBCPdfText(string text)
         {
-            var value = ExtractOptionalOCBCField(text, label, nextLabels);
-            if (String.IsNullOrWhiteSpace(value))
-                throw new MailParseException($"Parse OCBC Mail Fail, Missing Field: {label}; {TrimForError(text)}");
-            return value;
+            var normalized = text
+                .Replace("\r\n", "\n")
+                .Replace('\r', '\n');
+            normalized = Regex.Replace(normalized, @"[ \t]+", " ");
+            normalized = Regex.Replace(normalized, @"\n{2,}", "\n");
+            return normalized.Trim();
         }
 
-        private static string? ExtractOptionalOCBCField(string text, string label, string[] nextLabels)
+        private static string GetOCBCAccountTail(Account account)
         {
-            var nextPattern = String.Join("|", nextLabels.Select(Regex.Escape));
-            var match = Regex.Match(
-                text,
-                $@"{Regex.Escape(label)}\s*:\s*(?<value>.*?)(?=\s*(?:{nextPattern})\s*:|\s*(?:{nextPattern})\b|$)",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            return match.Success ? NormalizeMailText(match.Groups["value"].Value).Trim() : null;
+            var separator = account.name.LastIndexOf('_');
+            var tail = separator >= 0 ? account.name[(separator + 1)..] : account.name;
+            if (!Regex.IsMatch(tail, @"^\d{4}$", RegexOptions.CultureInvariant))
+                throw new InvalidOperationException($"Invalid OCBC account name, expected OCBC_1234: {account.name}");
+
+            return tail;
         }
 
-        private static string BuildOCBCStatementKey(MimeMessage message, string subject, string text)
+        private sealed record OCBCAccountInfo(Account Account, string Tail);
+
+        private sealed record OCBCAccountSection(OCBCAccountInfo Account, List<string> Lines);
+
+        private sealed record OCBCParsedBalances(
+            HashSet<string> PresentAccounts,
+            Dictionary<(string AccountName, CurrencyType Currency), decimal> Beginning,
+            Dictionary<(string AccountName, CurrencyType Currency), decimal> Ending,
+            List<OCBCParsedTransaction> Transactions);
+
+        private sealed record OCBCTransactionLine(
+            DateTime TransactionDate,
+            DateTime ValueDate,
+            string InlineDescription,
+            decimal Amount,
+            decimal Balance);
+
+        private sealed record OCBCTransactionClassification(
+            string Reason,
+            string DestAccount,
+            bool IsInternal);
+
+        private sealed class OCBCParsedTransaction
         {
-            var reference = Regex.Match(text, @"Reference number\s*:\s*(?<id>\d+)", RegexOptions.IgnoreCase);
-            if (reference.Success)
-                return $"OCBC_{reference.Groups["id"].Value}";
+            public OCBCParsedTransaction(
+                OCBCAccountInfo accountInfo,
+                CurrencyType currency,
+                DateTime transactionDate,
+                DateTime valueDate,
+                decimal amount,
+                decimal runningBalance,
+                List<string> descriptionLines,
+                string rawLine)
+            {
+                AccountInfo = accountInfo;
+                Currency = currency;
+                TransactionDate = transactionDate;
+                ValueDate = valueDate;
+                Amount = amount;
+                RunningBalance = runningBalance;
+                DescriptionLines = descriptionLines;
+                RawLine = rawLine;
+            }
 
-            if (!String.IsNullOrWhiteSpace(message.MessageId))
-                return $"OCBCMessage_{message.MessageId.Trim()}";
-
-            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(subject + "\n" + text)));
-            return $"OCBCHash_{hash[..16]}";
+            public OCBCAccountInfo AccountInfo { get; }
+            public CurrencyType Currency { get; }
+            public DateTime TransactionDate { get; }
+            public DateTime ValueDate { get; }
+            public decimal Amount { get; }
+            public decimal RunningBalance { get; }
+            public List<string> DescriptionLines { get; }
+            public string RawLine { get; }
+            public string DescriptionText => NormalizeOCBCTransactionText(String.Join(" / ", DescriptionLines));
+            public string Reference => ExtractOCBCReference(DescriptionLines);
         }
 
-        private static bool IsOCBCOwnAccountText(string value)
-        {
-            return value.Contains("Account", StringComparison.OrdinalIgnoreCase)
-                && Regex.IsMatch(value, @"-\d{3,}\)", RegexOptions.CultureInvariant);
-        }
-
-        private static Currency NegateOCBCAmount(Currency amount)
-        {
-            if (amount.v < 0)
-                throw new MailParseException($"OCBC amount should be positive before applying direction: {amount.v}/{amount.t}");
-            return new Currency(-amount.v, amount.t);
-        }
-
-        private static string LimitOCBCRecordText(string text)
-        {
-            return text.Length <= 1024 ? text : text[..1024];
-        }
-
-        private sealed record OCBCParsedMail(
-            DateTime Time,
+        private sealed record OCBCParsedStatement(
+            DateTime ImportTime,
             string StatementKey,
-            Records Records);
+            Records Records,
+            List<AccountBalance> BeginningBalances,
+            List<AccountBalance> EndingBalances);
     }
 }
