@@ -257,6 +257,15 @@ namespace MyBook
             return db.Queryable<Account>().ToList();
         }
 
+        public Currency GetAccountBalance(Account account, CurrencyType currencyType)
+        {
+            account = GetPostingAccount(account);
+            var balance = db.Queryable<AccountBalance>()
+                .Where(it => it._account_Id == account.Id && it.t == currencyType)
+                .First();
+            return new Currency(balance?.v ?? 0, currencyType);
+        }
+
         private Account? FindAccountByName(string accountName)
         {
             return db.Queryable<Account>()

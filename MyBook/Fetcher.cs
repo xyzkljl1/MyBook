@@ -10,9 +10,11 @@ namespace MyBook
         IConfigurationRoot? config;
         MailUtil? mail;
         StockUtil? stock;
+        GraphQLUtil? graphQL;
         DatabaseUtil? database;
         Timer? dailyTimer;
         readonly SemaphoreSlim fetchLock = new(1, 1);
+        const int MonthlyFetchIntervalDays = 27;
 
         public void RunSchedule()
         {
@@ -26,6 +28,7 @@ namespace MyBook
             database = new(config);
             mail = new(config, database);
             stock = new(config, database);
+            graphQL = new(config, database);
             dailyTimer?.Dispose();
             _ = RunDailyFetchAsync();
             dailyTimer = new Timer(
@@ -55,9 +58,12 @@ namespace MyBook
 
             try
             {
-                await TryFetchAsync("ICBC", mail.FetchICBCBills);
+                if (ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail))
+                    await TryFetchAsync("ICBC", mail.FetchICBCBills);
                 await TryFetchAsync("IBKR", mail.FetchIBKRReports);
                 await TryFetchAsync("Wise", mail.FetchWiseReports);
+                if (graphQL is not null && ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport))
+                    await TryFetchAsync("Nexus DP", graphQL.FetchNexusDpMonthlyReports);
                 if (stock is not null)
                     await TryFetchAsync("exchange rate", stock.FetchExchangeRates);
                 if (database is not null)
@@ -71,6 +77,23 @@ namespace MyBook
             {
                 fetchLock.Release();
             }
+        }
+
+        private bool ShouldFetchMonthlyProvider(string name, StatementImportProvider provider)
+        {
+            if (database is null)
+                return true;
+
+            var latestImportTime = database.GetLatestStatementImportTime(provider);
+            if (latestImportTime is null)
+                return true;
+
+            var elapsedDays = (DateTime.Today - latestImportTime.Value.Date).TotalDays;
+            if (elapsedDays > MonthlyFetchIntervalDays)
+                return true;
+
+            Console.WriteLine($"skip scheduled {name} fetch: last import {latestImportTime.Value:yyyy-MM-dd}, elapsed {elapsedDays:0} days");
+            return false;
         }
 
         private static async Task TryFetchAsync(string name, Func<Task> fetch)
