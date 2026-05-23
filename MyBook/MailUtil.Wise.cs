@@ -58,11 +58,11 @@ namespace MyBook
             var recordCount = 0;
             foreach (var parsed in ParseWiseMails(messages, account, settings))
             {
-                var saved = database.SaveStatementRecordsWithoutBalanceOnce(
+                var saved = database.SaveStatementRecordsOnce(
                     WiseProvider,
                     parsed.Time,
-                    parsed.StatementKey,
-                    parsed.Records);
+                    parsed.Records,
+                    statementKey: parsed.StatementKey);
                 if (saved)
                 {
                     savedCount++;

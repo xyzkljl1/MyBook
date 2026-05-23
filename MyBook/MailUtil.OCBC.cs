@@ -49,11 +49,11 @@ namespace MyBook
             var recordCount = 0;
             foreach (var parsed in ParseOCBCMails(messages, account))
             {
-                var saved = database.SaveStatementRecordsWithoutBalanceOnce(
+                var saved = database.SaveStatementRecordsOnce(
                     OCBCProvider,
                     parsed.Time,
-                    parsed.StatementKey,
-                    parsed.Records);
+                    parsed.Records,
+                    statementKey: parsed.StatementKey);
                 if (saved)
                 {
                     savedCount++;

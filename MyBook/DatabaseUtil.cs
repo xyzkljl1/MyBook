@@ -149,6 +149,7 @@ namespace MyBook
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
             var beginningAccountBalanceList = beginningAccountBalances?.ToList() ?? [];
+            var hasExternalBalances = accountBalanceList.Count > 0 || beginningAccountBalanceList.Count > 0;
             try
             {
                 return ExecuteLockedTransaction(() =>
@@ -156,14 +157,25 @@ namespace MyBook
                     if (IsStatementImported(provider, time, statementKey))
                         return false;
 
-                    ValidateBeginningAccountBalances(
-                        provider,
-                        beginningAccountBalanceList,
-                        ShouldValidateBeginningAccountBalances(provider));
-                    ValidateRecordBalanceChanges(provider, recordList, beginningAccountBalanceList, accountBalanceList);
                     var statementImportId = InsertStatementImport(provider, time, statementKey);
-                    SaveAccountBalancesCore(accountBalanceList);
+                    if (hasExternalBalances)
+                    {
+                        ValidateBeginningAccountBalances(
+                            provider,
+                            beginningAccountBalanceList,
+                            ShouldValidateBeginningAccountBalances(provider));
+                        ValidateRecordBalanceChanges(provider, recordList, beginningAccountBalanceList, accountBalanceList);
+                        SaveAccountBalancesCore(accountBalanceList);
+                    }
+                    else
+                    {
+                        ValidateRelativeBalanceRecords(provider, recordList);
+                    }
+
                     SaveRecordsCore(recordList, statementImportId);
+                    if (!hasExternalBalances)
+                        AddAccountBalanceDeltas(recordList);
+
                     afterSaveInTransaction?.Invoke(statementImportId);
                     return true;
                 });
@@ -209,33 +221,6 @@ namespace MyBook
 
                 return saved;
             });
-        }
-
-        public bool SaveStatementRecordsWithoutBalanceOnce(
-            StatementImportProvider provider,
-            DateTime time,
-            string statementKey,
-            IEnumerable<Record> records)
-        {
-            var recordList = records.ToList();
-            try
-            {
-                return ExecuteLockedTransaction(() =>
-                {
-                    if (IsStatementImported(provider, time, statementKey))
-                        return false;
-
-                    var statementImportId = InsertStatementImport(provider, time, statementKey);
-                    SaveRecordsCore(recordList, statementImportId);
-                    return true;
-                });
-            }
-            catch (Exception e)
-            {
-                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
-                    return false;
-                throw;
-            }
         }
 
         public List<RecordDetailData> GetRecordDetails(DateTime start, DateTime end, string? accountName)
@@ -471,7 +456,30 @@ namespace MyBook
             }
 
             existing.v += delta;
+            if (existing.v == 0)
+            {
+                db.Deleteable<AccountBalance>()
+                    .Where(balance => balance.Id == existing.Id)
+                    .ExecuteCommand();
+                return;
+            }
+
             db.Updateable(existing).ExecuteCommand();
+        }
+
+        private void AddAccountBalanceDeltas(IEnumerable<Record> records)
+        {
+            foreach (var group in records
+                         .GroupBy(record => (record._account_Id, record.t))
+                         .Select(group => new
+                         {
+                             AccountId = group.Key._account_Id,
+                             Currency = group.Key.t,
+                             Amount = group.Sum(record => record.v)
+                         }))
+            {
+                AddAccountBalanceDelta(group.AccountId, group.Currency, group.Amount);
+            }
         }
 
         private static DateTime NormalizeRecordDetailDate(DateTime date)
@@ -609,6 +617,22 @@ namespace MyBook
 
             if (recordList.Count > 0)
                 db.Insertable(recordList).ExecuteCommand();
+        }
+
+        private void ValidateRelativeBalanceRecords(StatementImportProvider provider, List<Record> recordList)
+        {
+            foreach (var record in recordList)
+            {
+                if (record.Account is null)
+                    throw new InvalidOperationException("Record account is required.");
+
+                var account = GetPostingAccount(record.Account);
+                if (!account.relativeBalance)
+                {
+                    throw new InvalidOperationException(
+                        $"Statement import without external balances is only allowed for relative-balance accounts: provider={provider}, account={account.name}");
+                }
+            }
         }
 
         private bool ShouldValidateBeginningAccountBalances(StatementImportProvider provider)
