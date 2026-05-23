@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -71,9 +72,21 @@ namespace MyBook
             return new DateTime(date.Year, date.Month, 1);
         }
 
+        private static (DateTime Since, DateTime Before) GetMonthRange(DateTime date)
+        {
+            var since = FirstDayOfMonth(date);
+            return (since, since.AddMonths(1));
+        }
+
+        private static DateTime GetMailDateTime(MimeMessage message)
+        {
+            var localTime = message.Date.LocalDateTime;
+            return localTime == default ? default : localTime;
+        }
+
         private static DateTime GetMailDate(MimeMessage message)
         {
-            return message.Date.LocalDateTime.Date;
+            return GetMailDateTime(message).Date;
         }
 
         private static string GetMessageText(MimeMessage message)
@@ -94,6 +107,26 @@ namespace MyBook
             return Regex.Replace(text, @"\s+", " ").Trim();
         }
 
+        private static bool IsFrom(MimeMessage message, string sender)
+        {
+            return message.From.Mailboxes.Any(mailbox =>
+                String.Equals(mailbox.Address, sender, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static byte[] ReadMimePartBytes(MimePart mimePart)
+        {
+            using var memory = new MemoryStream();
+            mimePart.Content.DecodeTo(memory);
+            return memory.ToArray();
+        }
+
+        private static string GetAttachmentFileName(MimeEntity attachment)
+        {
+            return attachment.ContentDisposition?.FileName
+                ?? attachment.ContentType.Name
+                ?? "";
+        }
+
         private async Task<string> SearchBill(string sender, string subject, DateTime date)
         {
             var message = await SearchBill(sender, subject, date, null);
@@ -107,22 +140,40 @@ namespace MyBook
 
         private async Task<List<MimeMessage>> SearchBills(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
         {
+            var range = GetMonthRange(date);
+            var query = SearchQuery.FromContains(sender)
+                .And(SearchQuery.SubjectContains(subject))
+                .And(SearchQuery.SentSince(range.Since))
+                .And(SearchQuery.SentBefore(range.Before.AddSeconds(-1)));
+            var messages = await SearchMessages($"{subject} {date:yyyy-MM-dd}", query, messageFilter);
+            if (messages.Count > 1)
+                Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
+
+            return messages;
+        }
+
+        private async Task<List<MimeMessage>> SearchMessages(
+            string label,
+            SearchQuery query,
+            Func<MimeMessage, bool>? messageFilter,
+            Func<MimeMessage, DateTime>? orderDateSelector = null)
+        {
             try
             {
-                return await SearchBillsCore(sender, subject, date, messageFilter);
+                return await SearchMessagesCore(label, query, messageFilter, orderDateSelector);
             }
             catch (Exception e)
             {
-                Console.WriteLine($"fetch mail fail :{e.Message}");
-                throw new InvalidOperationException($"Fetch mail failed: {e.Message}", e);
+                Console.WriteLine($"fetch mail fail {label}: {e.Message}");
+                throw new InvalidOperationException($"Fetch mail failed: {label}: {e.Message}", e);
             }
         }
 
-        private async Task<List<MimeMessage>> SearchBillsCore(
-            string sender,
-            string subject,
-            DateTime date,
-            Func<MimeMessage, bool>? messageFilter)
+        private async Task<List<MimeMessage>> SearchMessagesCore(
+            string label,
+            SearchQuery query,
+            Func<MimeMessage, bool>? messageFilter,
+            Func<MimeMessage, DateTime>? orderDateSelector)
         {
             using MailKit.Net.Imap.ImapClient client = new();
             client.Timeout = MailClientTimeoutMilliseconds;
@@ -130,7 +181,7 @@ namespace MyBook
             client.ProxyClient = null;
 
             //client.ServerCertificateValidationCallback = (s, c, h, e) => true;
-            Console.WriteLine($"mail connect direct {subject} {date:yyyy-MM-dd}");
+            Console.WriteLine($"mail connect direct {label}");
             await RunMailOperation(token => client.ConnectAsync("imap.mail.yahoo.com", 993, true, token));
             Console.WriteLine("mail connected");
             // 邮箱->security->generate app password。
@@ -139,15 +190,8 @@ namespace MyBook
             await RunMailOperation(token => client.Inbox.OpenAsync(FolderAccess.ReadOnly, token));
             Console.WriteLine("mail inbox opened");
 
-            // 搜索 date 所在月份的邮件。
-            var query = SearchQuery.FromContains(sender)
-                .And(SearchQuery.SubjectContains(subject))
-                .And(SearchQuery.SentSince(date.AddDays(1 - date.Day)))
-                .And(SearchQuery.SentBefore(date.AddDays(1 - date.Day).AddMonths(1).AddSeconds(-1)));
             var uids = await RunMailOperation(token => client.Inbox.SearchAsync(query, token));
-            Console.WriteLine($"mail search found {uids.Count}");
-            if (uids.Count > 1)
-                Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
+            Console.WriteLine($"mail search {label} found {uids.Count}");
             var messages = new List<MimeMessage>();
             foreach (var uid in uids)
             {
@@ -158,7 +202,11 @@ namespace MyBook
                 messages.Add(message);
             }
 
-            return messages.OrderBy(GetMailDate).ToList();
+            orderDateSelector ??= GetMailDate;
+            return messages
+                .OrderBy(orderDateSelector)
+                .ThenBy(message => message.Subject, StringComparer.Ordinal)
+                .ToList();
         }
 
         private static async Task RunMailOperation(Func<CancellationToken, Task> operation)
