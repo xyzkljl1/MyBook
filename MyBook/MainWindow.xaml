@@ -27,6 +27,26 @@
             <Setter Property="Cursor" Value="IBeam"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
+        <Style x:Key="FilterComboBox" TargetType="ComboBox">
+            <Setter Property="MinHeight" Value="32"/>
+            <Setter Property="Padding" Value="10,3"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Foreground" Value="#334155"/>
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#CBD5E1"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="ItemContainerStyle">
+                <Setter.Value>
+                    <Style TargetType="ComboBoxItem">
+                        <Setter Property="Padding" Value="10,5"/>
+                        <Setter Property="FontSize" Value="13"/>
+                        <Setter Property="Foreground" Value="#334155"/>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style TargetType="TabControl">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="BorderBrush" Value="#E2E8F0"/>
@@ -336,13 +356,12 @@
                                          Foreground="#334155"/>
                         </StackPanel>
                         <ComboBox Grid.Column="2"
+                                  Style="{StaticResource FilterComboBox}"
                                   ItemsSource="{Binding InvestmentAccounts}"
                                   SelectedItem="{Binding SelectedInvestmentAccount, Mode=TwoWay}"
                                   DisplayMemberPath="DisplayName"
                                   MinWidth="180"
-                                  Height="30"
-                                  FontSize="13"
-                                  Foreground="#334155"/>
+                                  Height="32"/>
                     </Grid>
                     <ItemsControl Grid.Row="1" ItemsSource="{Binding VisibleInvestmentPeriods}">
                         <ItemsControl.ItemsPanel>
@@ -394,6 +413,192 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="详情">
+                <Grid Margin="0,16,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <DockPanel Margin="0,0,0,12">
+                        <TextBlock DockPanel.Dock="Right"
+                                   Text="{Binding DetailStatusText}"
+                                   FontSize="12"
+                                   Foreground="#64748B"
+                                   VerticalAlignment="Center"/>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="时间"
+                                       FontSize="13"
+                                       Foreground="#334155"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,8,0"/>
+                            <DatePicker SelectedDate="{Binding DetailStartDate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Width="128"
+                                        Height="30"
+                                        FontSize="13"
+                                        SelectedDateChanged="DetailDate_SelectedDateChanged"/>
+                            <TextBlock Text="-"
+                                       FontSize="13"
+                                       Foreground="#64748B"
+                                       VerticalAlignment="Center"
+                                       Margin="8,0"/>
+                            <DatePicker SelectedDate="{Binding DetailEndDate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        DisplayDateStart="{Binding DetailStartDate}"
+                                        Width="128"
+                                        Height="30"
+                                        FontSize="13"
+                                        SelectedDateChanged="DetailDate_SelectedDateChanged"/>
+                            <TextBlock Text="账户"
+                                       FontSize="13"
+                                       Foreground="#334155"
+                                       VerticalAlignment="Center"
+                                       Margin="16,0,8,0"/>
+                            <ComboBox ItemsSource="{Binding DetailAccountNames}"
+                                      Style="{StaticResource FilterComboBox}"
+                                      SelectedItem="{Binding SelectedDetailAccountName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      SelectionChanged="DetailAccount_SelectionChanged"
+                                      Width="168"
+                                      Height="32"/>
+                            <Button Content="新增"
+                                    Width="66"
+                                    Height="30"
+                                    Margin="12,0,0,0"
+                                    Click="AddRecordDetail_Click"/>
+                            <Button Content="放弃"
+                                    Width="66"
+                                    Height="30"
+                                    Margin="8,0,0,0"
+                                    Click="DiscardRecordDetails_Click"/>
+                            <Button Content="保存"
+                                    Width="66"
+                                    Height="30"
+                                    Margin="8,0,0,0"
+                                    Background="#0F766E"
+                                    Foreground="White"
+                                    BorderThickness="0"
+                                    Click="SaveRecordDetails_Click"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <Border Grid.Row="1"
+                            Background="#F8FAFC"
+                            BorderBrush="#E2E8F0"
+                            BorderThickness="1"
+                            Padding="8"
+                            Margin="0,0,0,10">
+                        <DockPanel LastChildFill="True">
+                            <TextBlock DockPanel.Dock="Left"
+                                       Text="余额"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       Foreground="#334155"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,12,0"/>
+                            <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                          VerticalScrollBarVisibility="Disabled">
+                                <ItemsControl ItemsSource="{Binding DetailAccountBalances}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel Orientation="Horizontal"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,0,14,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="116"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding Currency}"
+                                                           FontSize="12"
+                                                           Foreground="#64748B"
+                                                           VerticalAlignment="Center"
+                                                           Margin="0,0,6,0"/>
+                                                <TextBox Grid.Column="1"
+                                                         Text="{Binding Amount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, StringFormat=0.############}"
+                                                         Height="26"
+                                                         Padding="6,2"
+                                                         FontSize="12"
+                                                         BorderBrush="#CBD5E1"
+                                                         Background="White"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </DockPanel>
+                    </Border>
+                    <DataGrid x:Name="RecordDetailsGrid"
+                              Grid.Row="2"
+                              ItemsSource="{Binding RecordDetails}"
+                              AutoGenerateColumns="False"
+                              CanUserAddRows="False"
+                              CanUserDeleteRows="False"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              SelectionUnit="CellOrRowHeader"
+                              AlternatingRowBackground="#F8FAFC"
+                              RowBackground="White"
+                              BorderBrush="#E2E8F0"
+                              BorderThickness="1"
+                              FontSize="12">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="58" IsReadOnly="True"/>
+                            <DataGridTemplateColumn Header="日期" Width="136">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Date, StringFormat=yyyy-MM-dd HH:mm}" Padding="4,0"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                                <DataGridTemplateColumn.CellEditingTemplate>
+                                    <DataTemplate>
+                                        <TextBox Text="{Binding Date, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, StringFormat=yyyy-MM-dd HH:mm}"
+                                                 IsReadOnly="{Binding IsDateReadOnly}"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellEditingTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="账户" Binding="{Binding AccountName}" Width="150" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="金额" Binding="{Binding Amount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, StringFormat=0.##}" Width="96"/>
+                            <DataGridTemplateColumn Header="币种" Width="82">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Currency}" Padding="4,0"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                                <DataGridTemplateColumn.CellEditingTemplate>
+                                    <DataTemplate>
+                                        <ComboBox Style="{StaticResource FilterComboBox}"
+                                                  ItemsSource="{Binding DataContext.DetailCurrencyTypes, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                  SelectedItem="{Binding Currency, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  IsEnabled="{Binding IsCurrencyEditable}"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellEditingTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="原因" Binding="{Binding Reason, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="140"/>
+                            <DataGridTextColumn Header="对方" Binding="{Binding DestAccount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="220"/>
+                            <DataGridTemplateColumn Header="数量" Width="70">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding HoldingQuantity}" Padding="4,0"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                                <DataGridTemplateColumn.CellEditingTemplate>
+                                    <DataTemplate>
+                                        <TextBox Text="{Binding HoldingQuantity, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 IsReadOnly="{Binding IsHoldingQuantityReadOnly}"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellEditingTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridCheckBoxColumn Header="内部" Binding="{Binding IsInternal, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="62"/>
+                            <DataGridCheckBoxColumn Header="已抵消" Binding="{Binding IsRefundMatched, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="74"/>
+                            <DataGridTextColumn Header="来源" Binding="{Binding Source, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="220"/>
+                            <DataGridTextColumn Header="导入" Binding="{Binding StatementProviderText}" Width="126" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="键" Binding="{Binding StatementKey}" Width="130" IsReadOnly="True"/>
+                            <DataGridCheckBoxColumn Header="备份" Binding="{Binding HasBackup}" Width="62" IsReadOnly="True"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
                 </Grid>
             </TabItem>
         </TabControl>
