@@ -15,6 +15,7 @@ namespace MyBook
         Timer? dailyTimer;
         readonly SemaphoreSlim fetchLock = new(1, 1);
         const int MonthlyFetchIntervalDays = 27;
+        const int LowVolumeMailFetchIntervalDays = 14;
 
         public void RunSchedule()
         {
@@ -61,7 +62,10 @@ namespace MyBook
                 if (ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail))
                     await TryFetchAsync("ICBC", mail.FetchICBCBills);
                 await TryFetchAsync("IBKR", mail.FetchIBKRReports);
-                await TryFetchAsync("Wise", mail.FetchWiseReports);
+                if (ShouldFetchProviderAfterDays("Wise", StatementImportProvider.WiseMail, LowVolumeMailFetchIntervalDays))
+                    await TryFetchAsync("Wise", mail.FetchWiseReports);
+                if (ShouldFetchProviderAfterDays("OCBC", StatementImportProvider.OCBCMail, LowVolumeMailFetchIntervalDays))
+                    await TryFetchAsync("OCBC", mail.FetchOCBCReports);
                 if (graphQL is not null && ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport))
                     await TryFetchAsync("Nexus DP", graphQL.FetchNexusDpMonthlyReports);
                 if (stock is not null)
@@ -81,6 +85,11 @@ namespace MyBook
 
         private bool ShouldFetchMonthlyProvider(string name, StatementImportProvider provider)
         {
+            return ShouldFetchProviderAfterDays(name, provider, MonthlyFetchIntervalDays);
+        }
+
+        private bool ShouldFetchProviderAfterDays(string name, StatementImportProvider provider, int intervalDays)
+        {
             if (database is null)
                 return true;
 
@@ -89,7 +98,7 @@ namespace MyBook
                 return true;
 
             var elapsedDays = (DateTime.Today - latestImportTime.Value.Date).TotalDays;
-            if (elapsedDays > MonthlyFetchIntervalDays)
+            if (elapsedDays > intervalDays)
                 return true;
 
             Console.WriteLine($"skip scheduled {name} fetch: last import {latestImportTime.Value:yyyy-MM-dd}, elapsed {elapsedDays:0} days");
