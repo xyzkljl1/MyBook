@@ -238,6 +238,279 @@ namespace MyBook
             }
         }
 
+        public List<RecordDetailData> GetRecordDetails(DateTime start, DateTime end, string? accountName)
+        {
+            var startDate = start.Date;
+            var endDate = end.Date.AddDays(1);
+            var query = db.Queryable<Record>()
+                .Where(record => record.date >= startDate && record.date < endDate);
+            if (!String.IsNullOrWhiteSpace(accountName))
+            {
+                var account = GetPostingAccount(GetAccountByName(accountName));
+                query = query.Where(record => record._account_Id == account.Id);
+            }
+
+            var records = query.ToList()
+                .OrderBy(record => record.date)
+                .ThenBy(record => record.Id)
+                .ToList();
+            var accounts = db.Queryable<Account>()
+                .ToList()
+                .ToDictionary(account => account.Id);
+            var statementImports = db.Queryable<StatementImport>()
+                .ToList()
+                .ToDictionary(statementImport => statementImport.Id);
+            return records
+                .Select(record =>
+                {
+                    accounts.TryGetValue(record._account_Id, out var account);
+                    statementImports.TryGetValue(record._statementImport_Id, out var statementImport);
+                    return new RecordDetailData
+                    {
+                        Id = record.Id,
+                        AccountName = account?.name ?? "",
+                        Amount = record.v,
+                        Currency = record.t,
+                        Date = record.date,
+                        DestAccount = record.DestAccount,
+                        IsInternal = record.isInternal,
+                        IsRefundMatched = record.isRefundMatched,
+                        HoldingQuantity = record.HoldingQuantity,
+                        Source = record.Source,
+                        Reason = record.Reason,
+                        StatementProvider = statementImport?.provider ?? StatementImportProvider.Manual,
+                        StatementKey = statementImport?.statementKey ?? "",
+                        HasBackup = !String.IsNullOrWhiteSpace(record.backup)
+                    };
+                })
+                .ToList();
+        }
+
+        public List<string> GetAccountNames()
+        {
+            return db.Queryable<Account>()
+                .ToList()
+                .Select(account => account.name)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        public List<AccountBalanceDetailData> GetAccountBalanceDetails(string accountName)
+        {
+            if (String.IsNullOrWhiteSpace(accountName))
+                return [];
+
+            var account = GetPostingAccount(GetAccountByName(accountName));
+            var balances = db.Queryable<AccountBalance>()
+                .Where(balance => balance._account_Id == account.Id)
+                .ToList()
+                .ToDictionary(balance => balance.t, balance => balance.v);
+
+            return Enum.GetValues<CurrencyType>()
+                .Select(currency => new AccountBalanceDetailData
+                {
+                    AccountName = account.name,
+                    Currency = currency,
+                    Amount = balances.TryGetValue(currency, out var amount) ? amount : 0
+                })
+                .ToList();
+        }
+
+        public void SaveRecordDetails(IEnumerable<RecordDetailEdit> edits)
+        {
+            var editList = edits.ToList();
+            ExecuteLockedTransaction(() =>
+            {
+                var accountsByName = db.Queryable<Account>()
+                    .ToList()
+                    .ToDictionary(account => account.name, StringComparer.OrdinalIgnoreCase);
+                var manualStatementImportId = 0;
+                var now = DateTime.Now;
+                foreach (var edit in editList)
+                {
+                    var account = ResolveRecordDetailAccount(edit, accountsByName);
+                    if (edit.Id <= 0)
+                    {
+                        manualStatementImportId = EnsureManualStatementImport(manualStatementImportId, now);
+                        InsertManualRecordDetail(edit, account, manualStatementImportId, now);
+                        continue;
+                    }
+
+                    UpdateRecordDetail(edit, account, now, ref manualStatementImportId);
+                }
+            });
+        }
+
+        private Account ResolveRecordDetailAccount(
+            RecordDetailEdit edit,
+            Dictionary<string, Account> accountsByName)
+        {
+            if (String.IsNullOrWhiteSpace(edit.AccountName))
+                throw new InvalidOperationException("Record account is required.");
+            if (!accountsByName.TryGetValue(CleanRecordText(edit.AccountName), out var account))
+                throw new InvalidOperationException($"Account not found: {edit.AccountName}");
+
+            return GetPostingAccount(account);
+        }
+
+        private int EnsureManualStatementImport(int currentStatementImportId, DateTime now)
+        {
+            return currentStatementImportId > 0
+                ? currentStatementImportId
+                : InsertStatementImport(StatementImportProvider.Manual, now, $"manual-edit-{now:yyyyMMddHHmmssffffff}");
+        }
+
+        private void InsertManualRecordDetail(
+            RecordDetailEdit edit,
+            Account account,
+            int statementImportId,
+            DateTime now)
+        {
+            var record = new Record
+            {
+                v = edit.Amount,
+                t = edit.Currency,
+                date = NormalizeRecordDetailDate(edit.Date),
+                updateTime = now,
+                DestAccount = CleanRecordText(edit.DestAccount),
+                isInternal = edit.IsInternal,
+                isRefundMatched = edit.IsRefundMatched,
+                HoldingQuantity = edit.HoldingQuantity,
+                Source = CleanRecordText(edit.Source),
+                Reason = CleanRecordText(edit.Reason),
+                _account_Id = account.Id,
+                _statementImport_Id = statementImportId,
+                backup = null
+            };
+            db.Insertable(record).ExecuteCommand();
+            AddAccountBalanceDelta(account.Id, record.t, record.v);
+        }
+
+        private void UpdateRecordDetail(
+            RecordDetailEdit edit,
+            Account account,
+            DateTime now,
+            ref int manualStatementImportId)
+        {
+            var existing = db.Queryable<Record>()
+                .Where(record => record.Id == edit.Id)
+                .First();
+            if (existing is null)
+                throw new InvalidOperationException($"Record not found: {edit.Id}");
+
+            var statementImport = db.Queryable<StatementImport>()
+                .Where(import => import.Id == existing._statementImport_Id)
+                .First();
+            if (statementImport is null)
+                throw new InvalidOperationException($"Record statement import not found: {existing._statementImport_Id}");
+
+            var normalizedDate = NormalizeRecordDetailDate(edit.Date);
+            var normalizedDestAccount = CleanRecordText(edit.DestAccount);
+            var normalizedSource = CleanRecordText(edit.Source);
+            var normalizedReason = CleanRecordText(edit.Reason);
+            if (existing._account_Id != account.Id)
+                throw new InvalidOperationException($"Record account is fixed and cannot be edited: {existing.Id}");
+            if (statementImport.provider != StatementImportProvider.Manual && existing.date != normalizedDate)
+                throw new InvalidOperationException($"Imported record date is fixed and cannot be edited: {existing.Id}");
+            if (statementImport.provider != StatementImportProvider.Manual && existing.t != edit.Currency)
+                throw new InvalidOperationException($"Imported record currency is fixed and cannot be edited: {existing.Id}");
+            if (existing.HoldingQuantity == 0 && edit.HoldingQuantity != 0)
+                throw new InvalidOperationException($"Record holding quantity is not applicable and cannot be edited: {existing.Id}");
+
+            var changed = existing._account_Id != account.Id
+                || existing.v != edit.Amount
+                || existing.t != edit.Currency
+                || existing.date != normalizedDate
+                || existing.DestAccount != normalizedDestAccount
+                || existing.isInternal != edit.IsInternal
+                || existing.isRefundMatched != edit.IsRefundMatched
+                || existing.HoldingQuantity != edit.HoldingQuantity
+                || existing.Source != normalizedSource
+                || existing.Reason != normalizedReason;
+            if (!changed)
+                return;
+
+            manualStatementImportId = EnsureManualStatementImport(manualStatementImportId, now);
+            if (statementImport.provider != StatementImportProvider.Manual && String.IsNullOrWhiteSpace(existing.backup))
+                existing.backup = SerializeRecordBackup(existing, statementImport);
+
+            AddAccountBalanceDelta(existing._account_Id, existing.t, -existing.v);
+            existing._account_Id = account.Id;
+            existing._statementImport_Id = manualStatementImportId;
+            existing.v = edit.Amount;
+            existing.t = edit.Currency;
+            existing.date = normalizedDate;
+            existing.updateTime = now;
+            existing.DestAccount = normalizedDestAccount;
+            existing.isInternal = edit.IsInternal;
+            existing.isRefundMatched = edit.IsRefundMatched;
+            existing.HoldingQuantity = edit.HoldingQuantity;
+            existing.Source = normalizedSource;
+            existing.Reason = normalizedReason;
+            db.Updateable(existing).ExecuteCommand();
+            AddAccountBalanceDelta(account.Id, existing.t, existing.v);
+        }
+
+        private void AddAccountBalanceDelta(int accountId, CurrencyType currency, decimal delta)
+        {
+            if (delta == 0)
+                return;
+
+            var existing = db.Queryable<AccountBalance>()
+                .Where(balance => balance._account_Id == accountId && balance.t == currency)
+                .First();
+            if (existing is null)
+            {
+                db.Insertable(new AccountBalance
+                {
+                    _account_Id = accountId,
+                    t = currency,
+                    v = delta
+                }).ExecuteCommand();
+                return;
+            }
+
+            existing.v += delta;
+            db.Updateable(existing).ExecuteCommand();
+        }
+
+        private static DateTime NormalizeRecordDetailDate(DateTime date)
+        {
+            if (date.Year < 1900)
+                throw new InvalidOperationException($"Invalid record date: {date:O}");
+            return date;
+        }
+
+        private static string CleanRecordText(string? value)
+        {
+            return value?.Trim() ?? "";
+        }
+
+        private static string SerializeRecordBackup(Record record, StatementImport statementImport)
+        {
+            return JsonSerializer.Serialize(
+                new RecordBackupPayloadV1(
+                    1,
+                    record.Id,
+                    record._account_Id,
+                    record.v,
+                    record.t,
+                    record.date,
+                    record.updateTime,
+                    record.DestAccount,
+                    record.isInternal,
+                    record.isRefundMatched,
+                    record.HoldingQuantity,
+                    record.Source,
+                    record.Reason,
+                    record._descCurrency_v,
+                    record._descCurrency_t,
+                    record._statementImport_Id,
+                    statementImport.provider,
+                    statementImport.statementKey),
+                SnapshotJsonOptions);
+        }
+
         public Account GetAccountByTypeAndId(string? accountType, string id)
         {
             return GetAccountByName(BuildAccountName(accountType, id));
@@ -1776,6 +2049,26 @@ namespace MyBook
             string TotalCurrencyType,
             string DisplayText,
             string Description);
+
+        private sealed record RecordBackupPayloadV1(
+            int SchemaVersion,
+            int Id,
+            int AccountId,
+            decimal Amount,
+            CurrencyType Currency,
+            DateTime Date,
+            DateTime UpdateTime,
+            string DestAccount,
+            bool IsInternal,
+            bool IsRefundMatched,
+            int HoldingQuantity,
+            string Source,
+            string Reason,
+            decimal? DescCurrencyAmount,
+            CurrencyType? DescCurrency,
+            int StatementImportId,
+            StatementImportProvider StatementProvider,
+            string StatementKey);
 
         private sealed record AssetSummaryBalanceSet(
             DateTime Date,

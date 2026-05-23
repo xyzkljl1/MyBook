@@ -1,9 +1,11 @@
 using Microsoft.Extensions.Configuration;
 using System.Collections;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using Drawing = System.Drawing;
 using Forms = System.Windows.Forms;
@@ -15,6 +17,8 @@ namespace MyBook
     /// </summary>
     public partial class MainWindow : Window
     {
+        private const string DefaultDetailAccountName = "ICBC";
+
         [DllImport("kernel32.dll")]
         private static extern bool AllocConsole();
 
@@ -22,6 +26,7 @@ namespace MyBook
         Forms.NotifyIcon? trayIcon;
         Drawing.Icon? trayIconImage;
         bool isExitRequested;
+        bool isLoadingRecordDetails;
 
         public MainWindow()
         {
@@ -36,10 +41,156 @@ namespace MyBook
 
         private async void Refresh_Click(object sender, RoutedEventArgs e)
         {
-            await LoadDashboardAsync();
+            var viewModel = DataContext as DashboardViewModel;
+            await LoadDashboardAsync(viewModel?.DetailStartDate, viewModel?.DetailEndDate, viewModel?.SelectedDetailAccountName);
         }
 
-        private async Task LoadDashboardAsync()
+        private void AddRecordDetail_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            var accountName = viewModel.SelectedDetailAccountName
+                ?? viewModel.DetailAccountNames.FirstOrDefault()
+                ?? "";
+            viewModel.RecordDetails.Insert(0, RecordDetailRowViewModel.CreateNew(accountName));
+            viewModel.SetDetailStatus("新增记录尚未保存");
+        }
+
+        private async void DetailDate_SelectedDateChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (isLoadingRecordDetails)
+                return;
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            await LoadRecordDetailsAsync(viewModel);
+        }
+
+        private async void DetailAccount_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (isLoadingRecordDetails)
+                return;
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            await LoadRecordDetailsAsync(viewModel);
+        }
+
+        private async void DiscardRecordDetails_Click(object sender, RoutedEventArgs e)
+        {
+            await LoadRecordDetailsAsync();
+            if (DataContext is DashboardViewModel viewModel)
+                viewModel.SetDetailStatus("已放弃未保存修改");
+        }
+
+        private async void SaveRecordDetails_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            RecordDetailsGrid.CommitEdit(DataGridEditingUnit.Cell, true);
+            RecordDetailsGrid.CommitEdit(DataGridEditingUnit.Row, true);
+            var changes = viewModel.GetPendingRecordChanges()
+                .Concat(viewModel.GetPendingBalanceCorrections())
+                .ToList();
+            if (changes.Count == 0)
+            {
+                viewModel.SetDetailStatus("没有需要保存的修改");
+                return;
+            }
+
+            if (!ConfirmRecordDetailChanges(changes))
+            {
+                viewModel.SetDetailStatus("保存已取消");
+                return;
+            }
+
+            try
+            {
+                var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                var database = new DatabaseUtil(config);
+                database.SaveRecordDetails(changes.Select(change => change.Edit));
+                await LoadDashboardAsync(viewModel.DetailStartDate, viewModel.DetailEndDate, viewModel.SelectedDetailAccountName);
+            }
+            catch (Exception ex)
+            {
+                viewModel.SetDetailStatus($"保存失败：{ex.Message}");
+            }
+        }
+
+        private bool ConfirmRecordDetailChanges(IReadOnlyList<RecordDetailPendingChange> changes)
+        {
+            var text = $"将保存以下 {changes.Count} 项修改，并作为同一个手动导入批次写入数据库：{Environment.NewLine}{Environment.NewLine}"
+                + String.Join(
+                    Environment.NewLine + Environment.NewLine,
+                    changes.Select((change, index) => $"{index + 1}. {change.Description}"));
+            var confirmed = false;
+            var content = new Grid { Margin = new Thickness(16) };
+            content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var changeText = new TextBox
+            {
+                Text = text,
+                IsReadOnly = true,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                BorderBrush = Brushes.Transparent,
+                Background = Brushes.Transparent,
+                FontSize = 13
+            };
+            content.Children.Add(changeText);
+
+            var buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 14, 0, 0)
+            };
+            Grid.SetRow(buttons, 1);
+            var cancelButton = new Button
+            {
+                Content = "取消",
+                Width = 82,
+                Height = 30,
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            var saveButton = new Button
+            {
+                Content = "保存",
+                Width = 82,
+                Height = 30,
+                Background = new SolidColorBrush(Color.FromRgb(15, 118, 110)),
+                Foreground = Brushes.White,
+                BorderThickness = new Thickness(0)
+            };
+            buttons.Children.Add(cancelButton);
+            buttons.Children.Add(saveButton);
+            content.Children.Add(buttons);
+
+            var dialog = new Window
+            {
+                Title = "确认保存明细修改",
+                Owner = this,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Width = 760,
+                Height = 520,
+                MinWidth = 560,
+                MinHeight = 360,
+                Content = content
+            };
+            cancelButton.Click += (_, _) => dialog.Close();
+            saveButton.Click += (_, _) =>
+            {
+                confirmed = true;
+                dialog.Close();
+            };
+            dialog.ShowDialog();
+            return confirmed;
+        }
+
+        private async Task LoadDashboardAsync(DateTime? detailStartDate = null, DateTime? detailEndDate = null, string? detailAccountName = null)
         {
             try
             {
@@ -58,12 +209,66 @@ namespace MyBook
                     }
                 }
 
-                DataContext = DashboardViewModel.From(data);
+                var viewModel = DashboardViewModel.From(data);
+                if (detailStartDate.HasValue)
+                    viewModel.DetailStartDate = detailStartDate.Value;
+                if (detailEndDate.HasValue)
+                    viewModel.DetailEndDate = detailEndDate.Value;
+                viewModel.SelectedDetailAccountName = detailAccountName;
+                DataContext = viewModel;
+                await LoadRecordDetailsAsync(viewModel);
             }
             catch (Exception e)
             {
                 DataContext = DashboardViewModel.FromError(e.Message);
             }
+        }
+
+        private async Task LoadRecordDetailsAsync(DashboardViewModel? viewModel = null)
+        {
+            viewModel ??= DataContext as DashboardViewModel;
+            if (viewModel is null)
+                return;
+
+            if (isLoadingRecordDetails)
+                return;
+
+            isLoadingRecordDetails = true;
+            try
+            {
+                var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                var database = new DatabaseUtil(config);
+                var accountNames = database.GetAccountNames();
+                viewModel.SetDetailAccountNames(accountNames, DefaultDetailAccountName);
+                var details = database.GetRecordDetails(viewModel.DetailStartDate, viewModel.DetailEndDate, viewModel.SelectedDetailAccountName)
+                    .Select(RecordDetailRowViewModel.From)
+                    .ToList();
+                LoadDetailAccountBalances(viewModel, database);
+                viewModel.SetRecordDetails(details);
+                viewModel.SetDetailStatus($"共 {details.Count} 条");
+            }
+            catch (Exception e)
+            {
+                viewModel.SetDetailStatus($"读取失败：{e.Message}");
+            }
+            finally
+            {
+                isLoadingRecordDetails = false;
+            }
+        }
+
+        private static void LoadDetailAccountBalances(DashboardViewModel viewModel, DatabaseUtil database)
+        {
+            if (String.IsNullOrWhiteSpace(viewModel.SelectedDetailAccountName))
+            {
+                viewModel.SetDetailAccountBalances([]);
+                return;
+            }
+
+            var balances = database.GetAccountBalanceDetails(viewModel.SelectedDetailAccountName)
+                .Select(AccountBalanceRowViewModel.From)
+                .ToList();
+            viewModel.SetDetailAccountBalances(balances);
         }
 
         private void InitializeTrayIcon()
@@ -136,7 +341,10 @@ namespace MyBook
         bool showSingleCurrencyMonthly;
         double selectedAssetSummaryOffset = -1;
         double selectedReasonMonthIndex;
+        DateTime detailStartDate = DateTime.Today.AddDays(-30);
+        DateTime detailEndDate = DateTime.Today;
         bool showInvestmentByHolding;
+        string? selectedDetailAccountName;
         InvestmentAccountStatisticsViewModel? selectedInvestmentAccount;
 
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -151,6 +359,11 @@ namespace MyBook
         public List<MonthlyFlowSeriesViewModel> RmbMonthlySeries { get; set; } = [];
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
+        public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
+        public ObservableCollection<AccountBalanceRowViewModel> DetailAccountBalances { get; } = [];
+        public List<string> DetailAccountNames { get; private set; } = [];
+        public List<CurrencyType> DetailCurrencyTypes { get; } = Enum.GetValues<CurrencyType>().ToList();
+        public string DetailStatusText { get; private set; } = "";
         public IEnumerable<MonthlyFlowSeriesViewModel> VisibleMonthlySeries => ShowSingleCurrencyMonthly ? MonthlySeries : RmbMonthlySeries;
         public IEnumerable<InvestmentStatisticsPeriodViewModel> VisibleInvestmentPeriods => SelectedInvestmentAccount is null
             ? Enumerable.Empty<InvestmentStatisticsPeriodViewModel>()
@@ -164,6 +377,52 @@ namespace MyBook
             ? new ReasonFlowSeriesViewModel()
             : ReasonMonthSeries[Math.Clamp((int)Math.Round(selectedReasonMonthIndex), 0, ReasonMonthSeries.Count - 1)];
         public string SelectedReasonMonthLabel => SelectedReasonSeries.MonthLabel;
+
+        public DateTime DetailStartDate
+        {
+            get => detailStartDate;
+            set
+            {
+                value = value.Date;
+                if (detailStartDate == value)
+                    return;
+
+                detailStartDate = value;
+                OnPropertyChanged(nameof(DetailStartDate));
+                if (detailEndDate < detailStartDate)
+                {
+                    detailEndDate = detailStartDate;
+                    OnPropertyChanged(nameof(DetailEndDate));
+                }
+            }
+        }
+
+        public DateTime DetailEndDate
+        {
+            get => detailEndDate;
+            set
+            {
+                value = value.Date < detailStartDate ? detailStartDate : value.Date;
+                if (detailEndDate == value)
+                    return;
+
+                detailEndDate = value;
+                OnPropertyChanged(nameof(DetailEndDate));
+            }
+        }
+
+        public string? SelectedDetailAccountName
+        {
+            get => selectedDetailAccountName;
+            set
+            {
+                if (selectedDetailAccountName == value)
+                    return;
+
+                selectedDetailAccountName = value;
+                OnPropertyChanged(nameof(SelectedDetailAccountName));
+            }
+        }
 
         public bool ShowSingleCurrencyMonthly
         {
@@ -341,6 +600,60 @@ namespace MyBook
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
+
+        public void SetDetailAccountNames(IEnumerable<string> accountNames, string defaultAccountName)
+        {
+            DetailAccountNames = accountNames.ToList();
+            if (String.IsNullOrWhiteSpace(SelectedDetailAccountName) ||
+                !DetailAccountNames.Contains(SelectedDetailAccountName, StringComparer.OrdinalIgnoreCase))
+            {
+                SelectedDetailAccountName = DetailAccountNames.Contains(defaultAccountName, StringComparer.OrdinalIgnoreCase)
+                    ? defaultAccountName
+                    : DetailAccountNames.FirstOrDefault();
+            }
+
+            OnPropertyChanged(nameof(DetailAccountNames));
+        }
+
+        public void SetRecordDetails(IEnumerable<RecordDetailRowViewModel> records)
+        {
+            RecordDetails.Clear();
+            foreach (var record in records)
+                RecordDetails.Add(record);
+            OnPropertyChanged(nameof(RecordDetails));
+        }
+
+        public void SetDetailStatus(string status)
+        {
+            DetailStatusText = status;
+            OnPropertyChanged(nameof(DetailStatusText));
+        }
+
+        public void SetDetailAccountBalances(IEnumerable<AccountBalanceRowViewModel> balances)
+        {
+            DetailAccountBalances.Clear();
+            foreach (var balance in balances)
+                DetailAccountBalances.Add(balance);
+            OnPropertyChanged(nameof(DetailAccountBalances));
+        }
+
+        public List<RecordDetailPendingChange> GetPendingRecordChanges()
+        {
+            return RecordDetails
+                .Select(record => record.GetPendingChange())
+                .Where(change => change is not null)
+                .Select(change => change!)
+                .ToList();
+        }
+
+        public List<RecordDetailPendingChange> GetPendingBalanceCorrections()
+        {
+            return DetailAccountBalances
+                .Select(balance => balance.GetPendingCorrection(SelectedDetailAccountName))
+                .Where(change => change is not null)
+                .Select(change => change!)
+                .ToList();
+        }
     }
 
     public class AssetSummaryViewModel
@@ -391,6 +704,200 @@ namespace MyBook
             return $"快照 {snapshotTime:yyyy-MM-dd HH:mm}";
         }
     }
+
+    public class RecordDetailRowViewModel
+    {
+        RecordDetailSnapshot? original;
+
+        public int Id { get; set; }
+        public DateTime Date { get; set; }
+        public string AccountName { get; set; } = "";
+        public decimal Amount { get; set; }
+        public CurrencyType Currency { get; set; }
+        public string Reason { get; set; } = "";
+        public string DestAccount { get; set; } = "";
+        public int HoldingQuantity { get; set; }
+        public bool IsInternal { get; set; }
+        public bool IsRefundMatched { get; set; }
+        public string Source { get; set; } = "";
+        public StatementImportProvider StatementProvider { get; set; }
+        public string StatementProviderText { get; set; } = "";
+        public string StatementKey { get; set; } = "";
+        public bool HasBackup { get; set; }
+        public bool IsDateReadOnly => StatementProvider != StatementImportProvider.Manual;
+        public bool IsCurrencyEditable => StatementProvider == StatementImportProvider.Manual;
+        public bool IsHoldingQuantityReadOnly => original is not null && original.Value.HoldingQuantity == 0;
+
+        public static RecordDetailRowViewModel From(RecordDetailData data)
+        {
+            var row = new RecordDetailRowViewModel
+            {
+                Id = data.Id,
+                Date = data.Date,
+                AccountName = data.AccountName,
+                Amount = data.Amount,
+                Currency = data.Currency,
+                Reason = data.Reason,
+                DestAccount = data.DestAccount,
+                HoldingQuantity = data.HoldingQuantity,
+                IsInternal = data.IsInternal,
+                IsRefundMatched = data.IsRefundMatched,
+                Source = data.Source,
+                StatementProvider = data.StatementProvider,
+                StatementProviderText = data.StatementProvider.ToString(),
+                StatementKey = data.StatementKey,
+                HasBackup = data.HasBackup
+            };
+            row.original = row.ToSnapshot();
+            return row;
+        }
+
+        public static RecordDetailRowViewModel CreateNew(string accountName)
+        {
+            return new RecordDetailRowViewModel
+            {
+                Date = DateTime.Today,
+                AccountName = accountName,
+                Currency = CurrencyType.RMB,
+                StatementProvider = StatementImportProvider.Manual,
+                StatementProviderText = StatementImportProvider.Manual.ToString()
+            };
+        }
+
+        public RecordDetailPendingChange? GetPendingChange()
+        {
+            if (original is null)
+                return new RecordDetailPendingChange(ToEdit(), $"新增 {FormatSummary()}");
+
+            var current = ToSnapshot();
+            if (current == original)
+                return null;
+
+            return new RecordDetailPendingChange(ToEdit(), $"修改 #{Id} {FormatSummary()}{Environment.NewLine}  {BuildFieldChanges(original.Value, current)}");
+        }
+
+        public RecordDetailEdit ToEdit()
+        {
+            return new RecordDetailEdit
+            {
+                Id = Id,
+                Date = Date,
+                AccountName = AccountName ?? "",
+                Amount = Amount,
+                Currency = Currency,
+                Reason = Reason ?? "",
+                DestAccount = DestAccount ?? "",
+                HoldingQuantity = HoldingQuantity,
+                IsInternal = IsInternal,
+                IsRefundMatched = IsRefundMatched,
+                Source = Source ?? ""
+            };
+        }
+
+        private RecordDetailSnapshot ToSnapshot()
+        {
+            return new RecordDetailSnapshot(
+                Date,
+                AccountName ?? "",
+                Amount,
+                Currency,
+                Reason ?? "",
+                DestAccount ?? "",
+                HoldingQuantity,
+                IsInternal,
+                IsRefundMatched,
+                Source ?? "");
+        }
+
+        private string FormatSummary()
+        {
+            var target = String.IsNullOrWhiteSpace(DestAccount) ? "" : $" / {DestAccount}";
+            return $"{Date:yyyy-MM-dd HH:mm} {AccountName} {Amount:0.##} {Currency} {Reason}{target}";
+        }
+
+        private static string BuildFieldChanges(RecordDetailSnapshot original, RecordDetailSnapshot current)
+        {
+            var changes = new List<string>();
+            AddChange(changes, "日期", original.Date.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture), current.Date.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+            AddChange(changes, "账户", original.AccountName, current.AccountName);
+            AddChange(changes, "金额", original.Amount.ToString("0.##", CultureInfo.InvariantCulture), current.Amount.ToString("0.##", CultureInfo.InvariantCulture));
+            AddChange(changes, "币种", original.Currency.ToString(), current.Currency.ToString());
+            AddChange(changes, "原因", original.Reason, current.Reason);
+            AddChange(changes, "对方", original.DestAccount, current.DestAccount);
+            AddChange(changes, "数量", original.HoldingQuantity.ToString(CultureInfo.InvariantCulture), current.HoldingQuantity.ToString(CultureInfo.InvariantCulture));
+            AddChange(changes, "内部", original.IsInternal ? "是" : "否", current.IsInternal ? "是" : "否");
+            AddChange(changes, "已抵消", original.IsRefundMatched ? "是" : "否", current.IsRefundMatched ? "是" : "否");
+            AddChange(changes, "来源", original.Source, current.Source);
+            return String.Join("；", changes);
+        }
+
+        private static void AddChange(List<string> changes, string name, string oldValue, string newValue)
+        {
+            if (oldValue == newValue)
+                return;
+
+            changes.Add($"{name}: {oldValue} -> {newValue}");
+        }
+    }
+
+    public class AccountBalanceRowViewModel
+    {
+        decimal originalAmount;
+
+        public CurrencyType Currency { get; set; }
+        public decimal Amount { get; set; }
+
+        public static AccountBalanceRowViewModel From(AccountBalanceDetailData data)
+        {
+            var row = new AccountBalanceRowViewModel
+            {
+                Currency = data.Currency,
+                Amount = data.Amount
+            };
+            row.originalAmount = row.Amount;
+            return row;
+        }
+
+        public RecordDetailPendingChange? GetPendingCorrection(string? accountName)
+        {
+            if (String.IsNullOrWhiteSpace(accountName))
+                return null;
+
+            var delta = Amount - originalAmount;
+            if (delta == 0)
+                return null;
+
+            var edit = new RecordDetailEdit
+            {
+                AccountName = accountName,
+                Amount = delta,
+                Currency = Currency,
+                Date = DateTime.Now,
+                Reason = "手动校正"
+            };
+            var description = $"余额校正 {accountName} {Currency}: {originalAmount:0.############} -> {Amount:0.############}，生成记录 {FormatSigned(delta)} {Currency}，原因 手动校正";
+            return new RecordDetailPendingChange(edit, description);
+        }
+
+        private static string FormatSigned(decimal value)
+        {
+            return value.ToString("+0.############;-0.############;0", CultureInfo.InvariantCulture);
+        }
+    }
+
+    public record RecordDetailPendingChange(RecordDetailEdit Edit, string Description);
+
+    readonly record struct RecordDetailSnapshot(
+        DateTime Date,
+        string AccountName,
+        decimal Amount,
+        CurrencyType Currency,
+        string Reason,
+        string DestAccount,
+        int HoldingQuantity,
+        bool IsInternal,
+        bool IsRefundMatched,
+        string Source);
 
     public class CurrencySummaryViewModel
     {

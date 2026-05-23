@@ -109,4 +109,44 @@ namespace MyBook
         public string Name { get; set; } = "";
         public decimal Total { get; set; }
     }
+
+    public class RecordDetailData
+    {
+        public int Id { get; set; }
+        public string AccountName { get; set; } = "";
+        public decimal Amount { get; set; }
+        public CurrencyType Currency { get; set; }
+        public DateTime Date { get; set; }
+        public string DestAccount { get; set; } = "";
+        public bool IsInternal { get; set; }
+        public bool IsRefundMatched { get; set; }
+        public int HoldingQuantity { get; set; }
+        public string Source { get; set; } = "";
+        public string Reason { get; set; } = "";
+        public StatementImportProvider StatementProvider { get; set; }
+        public string StatementKey { get; set; } = "";
+        public bool HasBackup { get; set; }
+    }
+
+    public class RecordDetailEdit
+    {
+        public int Id { get; set; }
+        public string AccountName { get; set; } = "";
+        public decimal Amount { get; set; }
+        public CurrencyType Currency { get; set; }
+        public DateTime Date { get; set; }
+        public string DestAccount { get; set; } = "";
+        public bool IsInternal { get; set; }
+        public bool IsRefundMatched { get; set; }
+        public int HoldingQuantity { get; set; }
+        public string Source { get; set; } = "";
+        public string Reason { get; set; } = "";
+    }
+
+    public class AccountBalanceDetailData
+    {
+        public string AccountName { get; set; } = "";
+        public CurrencyType Currency { get; set; }
+        public decimal Amount { get; set; }
+    }
 }
