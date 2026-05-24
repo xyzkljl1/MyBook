@@ -1328,6 +1328,13 @@ namespace MyBook
             var lifeRecords = records
                 .Where(record => lifeAccountIds.Contains(record._account_Id))
                 .ToList();
+            var monthlyAccountIds = accountList
+                .Where(account => account.usage != AccountUsage.Unknown)
+                .Select(account => account.Id)
+                .ToHashSet();
+            var monthlyRecords = records
+                .Where(record => monthlyAccountIds.Contains(record._account_Id))
+                .ToList();
             var balances = db.Queryable<AccountBalance>()
                 .Where(balance => balance.v != 0)
                 .ToList();
@@ -1363,8 +1370,13 @@ namespace MyBook
                     balances,
                     records.Where(record => record.date >= currentMonth && record.date < nextMonth).ToList(),
                     exchangeRates),
-                MonthlyFlowSeries = BuildMonthlyFlowSeries(records, firstMonth),
-                RmbMonthlyFlowSeries = BuildRmbMonthlyFlowSeries(records, firstMonth, exchangeRates),
+                MonthlyFlowSeries = BuildMonthlyFlowSeries(monthlyRecords, firstMonth),
+                RmbMonthlyFlowSeries = BuildRmbMonthlyFlowSeries(monthlyRecords, firstMonth, exchangeRates),
+                MonthlyAccounts = BuildMonthlyFlowAccountStatistics(
+                    accountList,
+                    records,
+                    firstMonth,
+                    exchangeRates),
                 RmbReasonFlowSeriesByMonth = reasonMonths
                     .Select(month => BuildRmbReasonFlowSeries(lifeRecords, month, month.AddMonths(1), exchangeRates))
                     .ToList(),
@@ -1711,6 +1723,77 @@ namespace MyBook
             };
         }
 
+        private static List<MonthlyFlowAccountStatistics> BuildMonthlyFlowAccountStatistics(
+            List<Account> accounts,
+            List<Record> records,
+            DateTime firstMonth,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var filterAccounts = accounts
+                .Where(account => account.usage != AccountUsage.Unknown)
+                .Select(account => new
+                {
+                    AccountId = account.Id,
+                    AccountName = account.name,
+                    AccountType = GetAccountType(account.name)
+                })
+                .OrderBy(account => account.AccountType)
+                .ThenBy(account => account.AccountName)
+                .ToList();
+            var allAccountIds = filterAccounts.Select(account => account.AccountId).ToHashSet();
+            var statistics = new List<MonthlyFlowAccountStatistics>
+            {
+                BuildMonthlyFlowAccountStatistic(
+                    "所有账户",
+                    records.Where(record => allAccountIds.Contains(record._account_Id)).ToList(),
+                    firstMonth,
+                    exchangeRates)
+            };
+
+            foreach (var group in filterAccounts
+                .GroupBy(account => account.AccountType, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(group => group.Key))
+            {
+                var groupAccounts = group
+                    .OrderBy(account => account.AccountName)
+                    .ToList();
+                if (groupAccounts.Count > 1)
+                {
+                    var accountIds = groupAccounts.Select(account => account.AccountId).ToHashSet();
+                    statistics.Add(BuildMonthlyFlowAccountStatistic(
+                        BuildAccountTypeDisplayName(group.Key),
+                        records.Where(record => accountIds.Contains(record._account_Id)).ToList(),
+                        firstMonth,
+                        exchangeRates));
+                }
+
+                foreach (var account in groupAccounts)
+                {
+                    statistics.Add(BuildMonthlyFlowAccountStatistic(
+                        account.AccountName,
+                        records.Where(record => record._account_Id == account.AccountId).ToList(),
+                        firstMonth,
+                        exchangeRates));
+                }
+            }
+
+            return statistics;
+        }
+
+        private static MonthlyFlowAccountStatistics BuildMonthlyFlowAccountStatistic(
+            string displayName,
+            List<Record> records,
+            DateTime firstMonth,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            return new MonthlyFlowAccountStatistics
+            {
+                DisplayName = displayName,
+                MonthlyFlowSeries = BuildMonthlyFlowSeries(records, firstMonth),
+                RmbMonthlyFlowSeries = BuildRmbMonthlyFlowSeries(records, firstMonth, exchangeRates)
+            };
+        }
+
         private static ReasonFlowSeries BuildRmbReasonFlowSeries(
             List<Record> records,
             DateTime start,
@@ -2031,7 +2114,7 @@ namespace MyBook
 
         private static bool IsUnknownAccount(Account account)
         {
-            return String.Equals(account.name, "UNKNOWN", StringComparison.OrdinalIgnoreCase);
+            return account.usage == AccountUsage.Unknown;
         }
 
         private static string NormalizeInternalCardToken(string value)

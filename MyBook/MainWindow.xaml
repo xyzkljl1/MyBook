@@ -198,12 +198,20 @@
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <DockPanel Margin="0,16,0,10">
-                        <CheckBox DockPanel.Dock="Right"
-                                  Content="单币种"
-                                  IsChecked="{Binding ShowSingleCurrencyMonthly, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                  FontSize="13"
-                                  Foreground="#334155"
-                                  VerticalAlignment="Center"/>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                            <CheckBox Content="单币种"
+                                      IsChecked="{Binding ShowSingleCurrencyMonthly, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      FontSize="13"
+                                      Foreground="#334155"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,12,0"/>
+                            <ComboBox Style="{StaticResource FilterComboBox}"
+                                      ItemsSource="{Binding MonthlyAccounts}"
+                                      SelectedItem="{Binding SelectedMonthlyAccount, Mode=TwoWay}"
+                                      DisplayMemberPath="DisplayName"
+                                      MinWidth="180"
+                                      Height="32"/>
+                        </StackPanel>
                         <TextBlock Text="过去12个月" FontSize="15" FontWeight="SemiBold" Foreground="#334155"/>
                     </DockPanel>
                     <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
