@@ -15,7 +15,6 @@ namespace MyBook
         Timer? dailyTimer;
         readonly SemaphoreSlim fetchLock = new(1, 1);
         const int MonthlyFetchIntervalDays = 27;
-        const int LowVolumeMailFetchIntervalDays = 14;
 
         public void RunSchedule()
         {
@@ -62,7 +61,7 @@ namespace MyBook
                 if (ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail))
                     await TryFetchAsync("ICBC", mail.FetchICBCBills);
                 await TryFetchAsync("IBKR", mail.FetchIBKRReports);
-                if (ShouldFetchProviderAfterDays("Wise", StatementImportProvider.WiseMail, LowVolumeMailFetchIntervalDays))
+                if (ShouldFetchMonthlyProvider("Wise", StatementImportProvider.WiseMail))
                     await TryFetchAsync("Wise", mail.FetchWiseReports);
                 if (ShouldFetchMonthlyProvider("OCBC", StatementImportProvider.OCBCStatementMail))
                     await TryFetchAsync("OCBC", mail.FetchOCBCReports);

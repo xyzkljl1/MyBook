@@ -222,7 +222,7 @@ namespace MyBook
                 .ToList();
             var accountInfos = accounts.Select(account => new OCBCAccountInfo(account, GetOCBCAccountTail(account))).ToList();
             var parsedBalances = ParseOCBCStatement(lines, words, accountInfos, statementEndDate, statementKey);
-            return BuildOCBCStatementImport(importTime, statementKey, accountInfos, parsedBalances, ReadConfigList("wise:own_names"));
+            return BuildOCBCStatementImport(importTime, statementKey, accountInfos, parsedBalances, []);
         }
 
         private OCBCParsedStatement BuildOCBCStatementImport(

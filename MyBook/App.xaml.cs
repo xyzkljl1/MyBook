@@ -20,12 +20,31 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--clean-wise-data", StringComparison.OrdinalIgnoreCase)))
+            {
+                var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                new DatabaseUtil(config).CleanWiseImportedData();
+                Console.WriteLine("Clean Wise imported data done.");
+                Shutdown();
+                return;
+            }
+
             if (e.Args.Any(arg => arg.Equals("--debug-fetch-local-ibkr-reports", StringComparison.OrdinalIgnoreCase)))
             {
                 var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
                 var database = new DatabaseUtil(config);
                 var mail = new MailUtil(config, database);
                 mail.DebugFetchLocalIBKRReports();
+                Shutdown();
+                return;
+            }
+
+            if (e.Args.Any(arg => arg.Equals("--debug-fetch-local-wise-reports", StringComparison.OrdinalIgnoreCase)))
+            {
+                var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                var database = new DatabaseUtil(config);
+                var mail = new MailUtil(config, database);
+                mail.DebugFetchLocalWiseReports(GetArgumentValue(e.Args, "--wise-local-dir"));
                 Shutdown();
                 return;
             }

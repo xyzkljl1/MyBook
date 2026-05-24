@@ -636,7 +636,8 @@ namespace MyBook
                     typedMatches = preferredMatches;
             }
 
-            var matchedAccounts = typedMatches
+            var prioritizedMatches = PreferKnownAccountMatches(typedMatches);
+            var matchedAccounts = prioritizedMatches
                 .Select(item => item.Account)
                 .GroupBy(account => account.Id)
                 .Select(group => group.First())
@@ -648,7 +649,7 @@ namespace MyBook
             }
 
             if (matchedAccounts.Count == 1)
-                LogInternalCardNoMatch(matchContext, typedMatches.First(), usefulTexts);
+                LogInternalCardNoMatch(matchContext, prioritizedMatches.First(), usefulTexts);
 
             return matchedAccounts.FirstOrDefault();
         }
@@ -1843,6 +1844,19 @@ namespace MyBook
             return null;
         }
 
+        private static List<InternalCardNoCandidate> PreferKnownAccountMatches(List<InternalCardNoCandidate> matches)
+        {
+            var knownMatches = matches
+                .Where(match => !IsUnknownAccount(match.Account))
+                .ToList();
+            return knownMatches.Count > 0 ? knownMatches : matches;
+        }
+
+        private static bool IsUnknownAccount(Account account)
+        {
+            return String.Equals(account.name, "UNKNOWN", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static string NormalizeInternalCardToken(string value)
         {
             return Regex.Replace(value, @"[^A-Za-z0-9]", "").ToUpperInvariant();
@@ -1993,6 +2007,52 @@ namespace MyBook
                     .OrderBy(it => it.provider)
                     .OrderBy(it => it.time)
                     .ToList());
+        }
+
+        public void CleanWiseImportedData()
+        {
+            ExecuteLockedTransaction(() =>
+            {
+                var wiseAccount = GetAccountByName("WISE");
+                db.Ado.ExecuteCommand("""
+                    delete record
+                    from `Records` record
+                    join `StatementImports` statementImport
+                        on record.`_statementImport_Id` = statementImport.`Id`
+                    where statementImport.`provider` = @provider
+                    """,
+                    new SugarParameter("@provider", StatementImportProvider.WiseMail.ToString()));
+                db.Deleteable<AccountBalance>()
+                    .Where(balance => balance._account_Id == wiseAccount.Id)
+                    .ExecuteCommand();
+                db.Deleteable<AccountInternalId>()
+                    .Where(internalId => internalId._account_Id == wiseAccount.Id
+                        && (internalId.desc == "XML statement balance id" || internalId.desc == "XML file balance id"))
+                    .ExecuteCommand();
+                db.Ado.ExecuteCommand("""
+                    delete statementImport
+                    from `StatementImports` statementImport
+                    left join (
+                        select `Id`
+                        from `StatementImports`
+                        where `provider` = @provider
+                        order by `time`, `Id`
+                        limit 1
+                    ) fixedImport
+                        on statementImport.`Id` = fixedImport.`Id`
+                    where statementImport.`provider` = @provider
+                        and fixedImport.`Id` is null
+                    """,
+                    new SugarParameter("@provider", StatementImportProvider.WiseMail.ToString()));
+
+                if (wiseAccount.relativeBalance)
+                {
+                    wiseAccount.relativeBalance = false;
+                    db.Updateable(wiseAccount)
+                        .UpdateColumns(account => new { account.relativeBalance })
+                        .ExecuteCommand();
+                }
+            });
         }
 
         private Dictionary<string, int> ReadCleanupCounts()
