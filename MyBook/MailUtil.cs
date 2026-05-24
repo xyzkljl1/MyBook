@@ -257,10 +257,10 @@ namespace MyBook
 
         private ImapMailbox CreateMailboxForEmail(string label, string email)
         {
-            if (String.Equals(config["gmail_user"], email, StringComparison.OrdinalIgnoreCase))
+            if (IsConfiguredMailboxEmail(config["gmail_user"], email, "gmail.com"))
                 return CreateGmailMailbox(label, email);
 
-            if (String.Equals(config["yahoo_user"], email, StringComparison.OrdinalIgnoreCase))
+            if (IsConfiguredMailboxEmail(config["yahoo_user"], email, "yahoo.com"))
                 return new ImapMailbox($"Yahoo {MaskEmail(email)}", "imap.mail.yahoo.com", 993, true, username, apppasswd, false);
 
             throw new InvalidOperationException($"Configured mail account mismatch for {label}: account email={MaskEmail(email)}");
@@ -272,10 +272,22 @@ namespace MyBook
             var gmailPassword = config["gmail_app_pwd"];
             if (String.IsNullOrWhiteSpace(gmailUser) || String.IsNullOrWhiteSpace(gmailPassword))
                 throw new InvalidOperationException("Missing gmail_user or gmail_app_pwd in config.json");
-            if (!String.Equals(gmailUser, email, StringComparison.OrdinalIgnoreCase))
+            if (!IsConfiguredMailboxEmail(gmailUser, email, "gmail.com"))
                 throw new InvalidOperationException($"Configured Gmail account mismatch for {label}: account email={MaskEmail(email)}, gmail_user={MaskEmail(gmailUser)}");
 
             return new ImapMailbox($"Gmail {MaskEmail(email)}", "imap.gmail.com", 993, true, gmailUser, gmailPassword, true);
+        }
+
+        private static bool IsConfiguredMailboxEmail(string? configuredUser, string email, string defaultDomain)
+        {
+            if (String.IsNullOrWhiteSpace(configuredUser))
+                return false;
+            if (String.Equals(configuredUser, email, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (configuredUser.Contains('@', StringComparison.Ordinal))
+                return false;
+
+            return String.Equals($"{configuredUser}@{defaultDomain}", email, StringComparison.OrdinalIgnoreCase);
         }
 
         private static async Task<IMailFolder> GetMailSearchFolder(ImapClient client, ImapMailbox mailbox)

@@ -7,11 +7,12 @@ using MimeKit;
 
 namespace MyBook
 {
-    // PayPal mail discovery. PayPal accounts opt in by setting Account.email;
-    // message parsing is intentionally left empty until the exact formats are known.
+    // PayPal mail discovery only. My PayPal accounts currently do not have PayPal balance enabled
+    // and are used only as a payment tool, so PayPal mails are not converted into Records.
     partial class MailUtil
     {
         private const string PayPalAccountPrefix = "PAYPAL";
+        private static readonly string[] PayPalSenders = ["service@intl.paypal.com", "service@paypal.com"];
         private static readonly DateTime PayPalSearchStartDate = new(2024, 1, 1);
 
         public async Task FetchPayPalReports()
@@ -34,11 +35,16 @@ namespace MyBook
                 return;
             }
 
-            foreach (var account in accounts)
+            foreach (var group in accounts
+                         .GroupBy(account => account.email ?? "", StringComparer.OrdinalIgnoreCase)
+                         .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
             {
-                var messages = await SearchPayPalMails(account, since, before);
-                Console.WriteLine($"Fetch PayPal mails {account.name}: count={messages.Count}");
-                ParsePayPalMails(account, messages);
+                if (String.IsNullOrWhiteSpace(group.Key))
+                    throw new InvalidOperationException($"Missing email for PayPal account {group.First().name}");
+
+                var messages = await SearchPayPalMails(group.Key, since, before);
+                Console.WriteLine($"Fetch PayPal mails {MaskEmail(group.Key)} {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}: count={messages.Count}");
+                ParsePayPalMails(group.ToList(), messages);
             }
         }
 
@@ -56,37 +62,33 @@ namespace MyBook
                 || account.name.StartsWith($"{PayPalAccountPrefix}_", StringComparison.OrdinalIgnoreCase);
         }
 
-        private async Task<List<MimeMessage>> SearchPayPalMails(Account account, DateTime since, DateTime before)
+        private async Task<List<MimeMessage>> SearchPayPalMails(string email, DateTime since, DateTime before)
         {
-            if (String.IsNullOrWhiteSpace(account.email))
-                throw new InvalidOperationException($"Missing email for PayPal account {account.name}");
+            var mailbox = CreateMailboxForEmail("PayPal", email);
+            SearchQuery senderQuery = SearchQuery.FromContains(PayPalSenders[0]);
+            foreach (var sender in PayPalSenders.Skip(1))
+                senderQuery = senderQuery.Or(SearchQuery.FromContains(sender));
 
-            var mailbox = CreateMailboxForEmail($"PayPal {account.name}", account.email);
-            var query = SearchQuery.FromContains("paypal")
+            var query = senderQuery
                 .And(SearchQuery.SentSince(since.Date))
                 .And(SearchQuery.SentBefore(before.Date));
             return await SearchMessagesFromMailbox(
                 mailbox,
-                $"PayPal {account.name} {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}",
+                $"PayPal {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}",
                 query,
-                IsPayPalMail,
+                IsPayPalSender,
                 GetMailDateTime);
         }
 
-        private static bool IsPayPalMail(MimeMessage message)
+        private static bool IsPayPalSender(MimeMessage message)
         {
-            return message.From.Mailboxes.Any(mailbox =>
-                    mailbox.Address.Contains("paypal", StringComparison.OrdinalIgnoreCase))
-                || message.Subject?.Contains("paypal", StringComparison.OrdinalIgnoreCase) == true;
+            return PayPalSenders.Any(sender => IsFrom(message, sender));
         }
 
-        private static void ParsePayPalMails(Account account, List<MimeMessage> messages)
+        private static void ParsePayPalMails(List<Account> accounts, List<MimeMessage> messages)
         {
-            foreach (var message in messages.OrderByDescending(GetMailDateTime).Take(3))
-            {
-                Console.WriteLine(
-                    $"PayPal mail {account.name}: {GetMailDateTime(message):yyyy-MM-dd HH:mm:ss} {message.Subject}");
-            }
+            // Intentionally empty. These mails describe PayPal acting as a payment channel;
+            // the real balance changes are imported from the linked card or bank statements.
         }
     }
 }
