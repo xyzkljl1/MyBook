@@ -14,6 +14,7 @@ namespace MyBook
         private const int DatabaseWriteLockTimeoutSeconds = 300;
         private const int CurrentSnapshotSchemaVersion = 1;
         private const int InternalTransferMatchWindowDays = 14;
+        private const decimal PrecisionResidualTotalLimit = 0.000001m;
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
         private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
@@ -95,6 +96,40 @@ namespace MyBook
                 throw new ArgumentException("Debug SQL is empty.", nameof(sql));
 
             return ExecuteLockedTransaction(() => db.Ado.ExecuteCommand(sql));
+        }
+
+        public void ValidatePrecisionResidualTotals()
+        {
+            var totals = db.Queryable<Record>()
+                .Where(record => record.Source.Contains("PrecisionResidual/"))
+                .ToList()
+                .GroupBy(record => record.t)
+                .Select(group => new
+                {
+                    Currency = group.Key,
+                    Amount = group.Sum(record => record.v),
+                    Count = group.Count()
+                })
+                .OrderBy(total => total.Currency)
+                .ToList();
+
+            var invalidTotals = totals
+                .Where(total => Math.Abs(total.Amount) > PrecisionResidualTotalLimit)
+                .ToList();
+            if (invalidTotals.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "Precision residual total exceeds limit: "
+                    + String.Join(
+                        ", ",
+                        invalidTotals.Select(total => $"{total.Currency}={total.Amount} count={total.Count} limit={PrecisionResidualTotalLimit}")));
+            }
+
+            Console.WriteLine(
+                "precision residual totals ok: "
+                + (totals.Count == 0
+                    ? "none"
+                    : String.Join(", ", totals.Select(total => $"{total.Currency}={total.Amount} count={total.Count}"))));
         }
 
         private void AcquireDatabaseWriteLock()

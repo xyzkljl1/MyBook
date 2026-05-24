@@ -70,11 +70,18 @@ namespace MyBook
                 if (stock is not null)
                     await TryFetchAsync("exchange rate", stock.FetchExchangeRates);
                 if (database is not null)
+                {
                     await TryFetchAsync("snapshot", () =>
                     {
                         database.CreateDailySnapshot();
                         return Task.CompletedTask;
                     });
+                    await TryFetchAsync("precision residual total validation", () =>
+                    {
+                        database.ValidatePrecisionResidualTotals();
+                        return Task.CompletedTask;
+                    });
+                }
             }
             finally
             {

@@ -1088,8 +1088,10 @@ namespace MyBook
                     case "股息":
                     case "代替股息的支付":
                     case "代扣税款":
-                    case "现金外汇换算收益/损失":
                         builder.Add(new Currency(amount, baseCurrency), label, $"CashReport/{FormatIBKRCsvRow(row)}", destAccount: baseCurrency.ToString());
+                        break;
+                    case "现金外汇换算收益/损失":
+                        // 已由 MTM 外汇行体现，避免同一基础货币折算影响重复生成 record。
                         break;
                     case "存款":
                     case "取款":
