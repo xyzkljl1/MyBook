@@ -24,6 +24,7 @@ namespace MyBook
         private readonly IConfigurationRoot config;
         private const int MailClientTimeoutMilliseconds = 30000;
         private static readonly TimeSpan MailClientTimeout = TimeSpan.FromMilliseconds(MailClientTimeoutMilliseconds);
+        private sealed record ImapMailbox(string Label, string Host, int Port, bool UseSsl, string Username, string Password, bool UseAllMail);
 
         public MailUtil(IConfigurationRoot config, DatabaseUtil database)
         {
@@ -56,6 +57,27 @@ namespace MyBook
                 throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
 
             return FirstDayOfMonth(latestTime.Value).AddMonths(1);
+        }
+
+        private async Task FetchMonthlyStatements(
+            StatementImportProvider provider,
+            string displayName,
+            Func<DateTime, Task<bool>> fetchStatement)
+        {
+            var month = GetNextMonthlyStatementDate(provider);
+            var currentMonth = FirstDayOfMonth(DateTime.Today);
+            while (month <= currentMonth)
+            {
+                var imported = await fetchStatement(month);
+                if (!imported)
+                {
+                    if (DateTime.Today >= month.AddMonths(1))
+                        throw new InvalidOperationException($"Missing {displayName} for {month:yyyy-MM}");
+                    return;
+                }
+
+                month = month.AddMonths(1);
+            }
         }
 
         private DateTime GetNextDailyStatementDate(StatementImportProvider provider)
@@ -160,7 +182,25 @@ namespace MyBook
         {
             try
             {
-                return await SearchMessagesCore(label, query, messageFilter, orderDateSelector);
+                return await SearchMessagesCore(CreateYahooMailbox(), label, query, messageFilter, orderDateSelector);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"fetch mail fail {label}: {e.Message}");
+                throw new InvalidOperationException($"Fetch mail failed: {label}: {e.Message}", e);
+            }
+        }
+
+        private async Task<List<MimeMessage>> SearchMessagesFromMailbox(
+            ImapMailbox mailbox,
+            string label,
+            SearchQuery query,
+            Func<MimeMessage, bool>? messageFilter,
+            Func<MimeMessage, DateTime>? orderDateSelector = null)
+        {
+            try
+            {
+                return await SearchMessagesCore(mailbox, label, query, messageFilter, orderDateSelector);
             }
             catch (Exception e)
             {
@@ -170,6 +210,7 @@ namespace MyBook
         }
 
         private async Task<List<MimeMessage>> SearchMessagesCore(
+            ImapMailbox mailbox,
             string label,
             SearchQuery query,
             Func<MimeMessage, bool>? messageFilter,
@@ -181,21 +222,21 @@ namespace MyBook
             client.ProxyClient = null;
 
             //client.ServerCertificateValidationCallback = (s, c, h, e) => true;
-            Console.WriteLine($"mail connect direct {label}");
-            await RunMailOperation(token => client.ConnectAsync("imap.mail.yahoo.com", 993, true, token));
+            Console.WriteLine($"mail connect direct {mailbox.Label} {label}");
+            await RunMailOperation(token => client.ConnectAsync(mailbox.Host, mailbox.Port, mailbox.UseSsl, token));
             Console.WriteLine("mail connected");
-            // 邮箱->security->generate app password。
-            await RunMailOperation(token => client.AuthenticateAsync(username, apppasswd, token));
+            await RunMailOperation(token => client.AuthenticateAsync(mailbox.Username, mailbox.Password, token));
             Console.WriteLine("mail authenticated");
-            await RunMailOperation(token => client.Inbox.OpenAsync(FolderAccess.ReadOnly, token));
-            Console.WriteLine("mail inbox opened");
+            var folder = await GetMailSearchFolder(client, mailbox);
+            await RunMailOperation(token => folder.OpenAsync(FolderAccess.ReadOnly, token));
+            Console.WriteLine($"mail folder opened {folder.FullName}");
 
-            var uids = await RunMailOperation(token => client.Inbox.SearchAsync(query, token));
+            var uids = await RunMailOperation(token => folder.SearchAsync(query, token));
             Console.WriteLine($"mail search {label} found {uids.Count}");
             var messages = new List<MimeMessage>();
             foreach (var uid in uids)
             {
-                var message = await RunMailOperation(token => client.Inbox.GetMessageAsync(uid, token));
+                var message = await RunMailOperation(token => folder.GetMessageAsync(uid, token));
                 if (messageFilter is not null && !messageFilter(message))
                     continue;
 
@@ -207,6 +248,88 @@ namespace MyBook
                 .OrderBy(orderDateSelector)
                 .ThenBy(message => message.Subject, StringComparer.Ordinal)
                 .ToList();
+        }
+
+        private ImapMailbox CreateYahooMailbox()
+        {
+            return new ImapMailbox("Yahoo", "imap.mail.yahoo.com", 993, true, username, apppasswd, false);
+        }
+
+        private ImapMailbox CreateMailboxForEmail(string label, string email)
+        {
+            if (String.Equals(config["gmail_user"], email, StringComparison.OrdinalIgnoreCase))
+                return CreateGmailMailbox(label, email);
+
+            if (String.Equals(config["yahoo_user"], email, StringComparison.OrdinalIgnoreCase))
+                return new ImapMailbox($"Yahoo {MaskEmail(email)}", "imap.mail.yahoo.com", 993, true, username, apppasswd, false);
+
+            throw new InvalidOperationException($"Configured mail account mismatch for {label}: account email={MaskEmail(email)}");
+        }
+
+        private ImapMailbox CreateGmailMailbox(string label, string email)
+        {
+            var gmailUser = config["gmail_user"];
+            var gmailPassword = config["gmail_app_pwd"];
+            if (String.IsNullOrWhiteSpace(gmailUser) || String.IsNullOrWhiteSpace(gmailPassword))
+                throw new InvalidOperationException("Missing gmail_user or gmail_app_pwd in config.json");
+            if (!String.Equals(gmailUser, email, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"Configured Gmail account mismatch for {label}: account email={MaskEmail(email)}, gmail_user={MaskEmail(gmailUser)}");
+
+            return new ImapMailbox($"Gmail {MaskEmail(email)}", "imap.gmail.com", 993, true, gmailUser, gmailPassword, true);
+        }
+
+        private static async Task<IMailFolder> GetMailSearchFolder(ImapClient client, ImapMailbox mailbox)
+        {
+            if (!mailbox.UseAllMail)
+                return client.Inbox;
+
+            try
+            {
+                return client.GetFolder(SpecialFolder.All);
+            }
+            catch
+            {
+                foreach (var folder in await ListMailFolders(client))
+                {
+                    if (folder.Attributes.HasFlag(FolderAttributes.All)
+                        || String.Equals(folder.Name, "All Mail", StringComparison.OrdinalIgnoreCase)
+                        || String.Equals(folder.Name, "所有邮件", StringComparison.OrdinalIgnoreCase))
+                        return folder;
+                }
+
+                return client.Inbox;
+            }
+        }
+
+        private static async Task<List<IMailFolder>> ListMailFolders(ImapClient client)
+        {
+            var result = new List<IMailFolder>();
+            foreach (var ns in client.PersonalNamespaces)
+            {
+                var root = client.GetFolder(ns);
+                await AddMailFolders(root, result);
+            }
+
+            return result;
+        }
+
+        private static async Task AddMailFolders(IMailFolder folder, List<IMailFolder> result)
+        {
+            result.Add(folder);
+            foreach (var child in await folder.GetSubfoldersAsync(false))
+                await AddMailFolders(child, result);
+        }
+
+        private static string MaskEmail(string? email)
+        {
+            if (String.IsNullOrWhiteSpace(email))
+                return "";
+
+            var at = email.IndexOf('@');
+            if (at <= 1)
+                return "***";
+
+            return $"{email[0]}***{email[(at - 1)..]}";
         }
 
         private static async Task RunMailOperation(Func<CancellationToken, Task> operation)

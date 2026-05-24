@@ -124,6 +124,40 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--fetch-paypal-reports", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    Console.WriteLine("FetchPayPalReports: load config");
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    Console.WriteLine("FetchPayPalReports: open database");
+                    var database = new DatabaseUtil(config);
+                    Console.WriteLine("FetchPayPalReports: create mail util");
+                    var mail = new MailUtil(config, database);
+                    var paypalMonth = GetArgumentValue(e.Args, "--paypal-month");
+                    Console.WriteLine(String.IsNullOrWhiteSpace(paypalMonth)
+                        ? "FetchPayPalReports: start"
+                        : $"FetchPayPalReports: start {paypalMonth}");
+                    Task.Run(String.IsNullOrWhiteSpace(paypalMonth)
+                            ? mail.FetchPayPalReports
+                            : () => mail.FetchPayPalReports(ParseMonthArgument(paypalMonth)))
+                        .WaitAsync(TimeSpan.FromMinutes(10))
+                        .GetAwaiter()
+                        .GetResult();
+                    Console.WriteLine("FetchPayPalReports: done");
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"FetchPayPalReports failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
             MainWindow = new MainWindow();
             MainWindow.Show();
         }

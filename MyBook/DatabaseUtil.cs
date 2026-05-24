@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using SqlSugar;
 using System.Globalization;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 
 namespace MyBook
@@ -14,10 +15,11 @@ namespace MyBook
         private const int CurrentSnapshotSchemaVersion = 1;
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
             new("fk_Accounts_primaryAccount", "Accounts", "_primaryAccount_Id", "Accounts", "Id"),
+            new("fk_AccountInternalIds_account", "AccountInternalIds", "_account_Id", "Accounts", "Id"),
             new("fk_AccountBalances_account", "AccountBalances", "_account_Id", "Accounts", "Id"),
             new("fk_Holdings_account", "Holdings", "_account_Id", "Accounts", "Id"),
             new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
@@ -216,6 +218,7 @@ namespace MyBook
                     SaveAccountBalancesCore(import.AccountBalances);
                     SaveAccountHoldingsCore(import.HoldingAccount, import.Holdings);
                     SaveRecordsCore(import.Records, statementImportId);
+                    EnsureAccountInternalCardNos(import.InternalCardNos);
                     saved.Add(true);
                 }
 
@@ -536,6 +539,118 @@ namespace MyBook
         public List<Account> GetAllAccounts()
         {
             return db.Queryable<Account>().ToList();
+        }
+
+        public void EnsureAccountInternalCardNos(IEnumerable<AccountInternalId> internalIds)
+        {
+            var uniqueInternalIds = new Dictionary<string, AccountInternalId>(StringComparer.OrdinalIgnoreCase);
+            foreach (var internalId in internalIds)
+            {
+                if (internalId.Account is null)
+                    throw new InvalidOperationException("Account internal id account is required.");
+
+                var cardNo = NormalizeInternalCardNoForStorage(internalId.cardNo);
+                if (String.IsNullOrWhiteSpace(cardNo))
+                    continue;
+
+                var key = $"{internalId.Account.name}|{cardNo}|{internalId.currencyType?.ToString() ?? ""}";
+                if (!uniqueInternalIds.ContainsKey(key))
+                    uniqueInternalIds.Add(key, internalId);
+            }
+
+            foreach (var internalId in uniqueInternalIds.Values)
+                EnsureAccountInternalCardNo(internalId);
+        }
+
+        public void EnsureAccountInternalCardNo(AccountInternalId internalId)
+        {
+            if (internalId.Account is null)
+                throw new InvalidOperationException("Account internal id account is required.");
+
+            var cardNo = NormalizeInternalCardNoForStorage(internalId.cardNo);
+            if (String.IsNullOrWhiteSpace(cardNo))
+                return;
+
+            var account = GetExistingAccountByName(internalId.Account);
+            var existing = db.Queryable<AccountInternalId>()
+                .Where(it => it._account_Id == account.Id && it.cardNo == cardNo)
+                .First();
+            if (existing is not null)
+            {
+                LogAccountInternalCardNoKnown("already exists", internalId, account, cardNo);
+                return;
+            }
+
+            internalId.Account = account;
+            internalId._account_Id = account.Id;
+            internalId.cardNo = cardNo;
+            db.Insertable(internalId).ExecuteCommand();
+            LogAccountInternalCardNoKnown("stored", internalId, account, cardNo);
+        }
+
+        public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, params string?[] texts)
+        {
+            var usefulTexts = texts
+                .Where(text => !String.IsNullOrWhiteSpace(text))
+                .Select(text => text!)
+                .ToList();
+            if (usefulTexts.Count == 0)
+                return null;
+
+            var accounts = db.Queryable<Account>()
+                .ToList()
+                .ToDictionary(account => account.Id);
+            var accountTypes = accounts.Values
+                .Select(account => GetAccountType(account.name))
+                .Where(type => !String.IsNullOrWhiteSpace(type))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var explicitTypes = ExtractAccountTypesFromTexts(usefulTexts, accountTypes);
+            var matches = db.Queryable<AccountInternalId>()
+                .ToList()
+                .Where(internalId => accounts.ContainsKey(internalId._account_Id))
+                .Select(internalId => new
+                {
+                    InternalId = internalId,
+                    Account = accounts[internalId._account_Id],
+                    AccountType = GetAccountType(accounts[internalId._account_Id].name),
+                    Match = FindInternalCardNoMatch(internalId.cardNo, usefulTexts)
+                })
+                .Where(item => item.Match is not null)
+                .Select(item => new InternalCardNoCandidate(item.InternalId, item.Account, item.AccountType, item.Match!))
+                .ToList();
+            if (matches.Count == 0)
+                return null;
+
+            var typedMatches = matches;
+            if (explicitTypes.Count > 0)
+                typedMatches = matches
+                    .Where(item => explicitTypes.Contains(item.AccountType, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+            else if (!String.IsNullOrWhiteSpace(preferredAccountType))
+            {
+                var preferredMatches = matches
+                    .Where(item => String.Equals(item.AccountType, preferredAccountType, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (preferredMatches.Count > 0)
+                    typedMatches = preferredMatches;
+            }
+
+            var matchedAccounts = typedMatches
+                .Select(item => item.Account)
+                .GroupBy(account => account.Id)
+                .Select(group => group.First())
+                .ToList();
+            if (matchedAccounts.Count > 1)
+            {
+                throw new InvalidOperationException(
+                    $"Ambiguous internal account id match: {String.Join(", ", matchedAccounts.Select(account => account.name))}; text={String.Join(" / ", usefulTexts)}");
+            }
+
+            if (matchedAccounts.Count == 1)
+                LogInternalCardNoMatch(matchContext, typedMatches.First(), usefulTexts);
+
+            return matchedAccounts.FirstOrDefault();
         }
 
         public Currency GetAccountBalance(Account account, CurrencyType currencyType)
@@ -1679,6 +1794,96 @@ namespace MyBook
                 : $"{accountType} 账户";
         }
 
+        private static string NormalizeInternalCardNoForStorage(string value)
+        {
+            return Regex.Replace(value.Trim(), @"\s+", "");
+        }
+
+        private static HashSet<string> ExtractAccountTypesFromTexts(List<string> texts, List<string> accountTypes)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var accountType in accountTypes)
+            {
+                var escapedType = Regex.Escape(accountType);
+                if (texts.Any(text => Regex.IsMatch(
+                        text,
+                        $@"(^|[^A-Za-z0-9]){escapedType}\s*[-_:]",
+                        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)))
+                    result.Add(accountType);
+            }
+
+            return result;
+        }
+
+        private static InternalCardNoMatchDetail? FindInternalCardNoMatch(string cardNo, List<string> texts)
+        {
+            var cardToken = NormalizeInternalCardToken(cardNo);
+            var cardDigits = NormalizeInternalCardDigits(cardNo);
+            if (cardToken.Length < 3 && cardDigits.Length < 3)
+                return null;
+
+            foreach (var text in texts)
+            {
+                var textToken = NormalizeInternalCardToken(text);
+                if (cardToken.Length >= 3 && textToken.Contains(cardToken, StringComparison.Ordinal))
+                    return new InternalCardNoMatchDetail(text, "normalized token contains full card number");
+
+                var textDigits = NormalizeInternalCardDigits(text);
+                if (cardDigits.Length >= 3 && textDigits.Contains(cardDigits, StringComparison.Ordinal))
+                    return new InternalCardNoMatchDetail(text, "digits contain full card number");
+
+                foreach (Match match in Regex.Matches(text, @"\d{3,}", RegexOptions.CultureInvariant))
+                {
+                    var digits = match.Value;
+                    if (cardDigits.EndsWith(digits, StringComparison.Ordinal))
+                        return new InternalCardNoMatchDetail(text, $"text digits {digits} match card suffix");
+                }
+            }
+
+            return null;
+        }
+
+        private static string NormalizeInternalCardToken(string value)
+        {
+            return Regex.Replace(value, @"[^A-Za-z0-9]", "").ToUpperInvariant();
+        }
+
+        private static string NormalizeInternalCardDigits(string value)
+        {
+            return Regex.Replace(value, @"\D", "");
+        }
+
+        private static void LogAccountInternalCardNoKnown(string action, AccountInternalId internalId, Account account, string cardNo)
+        {
+            if (String.IsNullOrWhiteSpace(internalId.sourceText))
+                return;
+
+            Console.WriteLine(
+                $"Internal card {action}: source=\"{NormalizeLogText(internalId.sourceText)}\"; account={account.name}; cardNo={cardNo}; currency={internalId.currencyType?.ToString() ?? ""}");
+        }
+
+        private static void LogInternalCardNoMatch(string? matchContext, InternalCardNoCandidate candidate, List<string> allTexts)
+        {
+            var source = String.IsNullOrWhiteSpace(matchContext)
+                ? "unspecified"
+                : NormalizeLogText(matchContext);
+            Console.WriteLine(
+                $"Internal card match: source=\"{source}\"; account={candidate.Account.name}; cardNo={candidate.InternalId.cardNo}; matchedText=\"{NormalizeLogText(candidate.Match.Text)}\"; match={candidate.Match.MatchReason}; allText=\"{NormalizeLogText(String.Join(" | ", allTexts))}\"");
+        }
+
+        private static string NormalizeLogText(string text)
+        {
+            return Regex.Replace(text, @"\s+", " ").Trim().Replace("\"", "'");
+        }
+
+        private sealed record InternalCardNoCandidate(
+            AccountInternalId InternalId,
+            Account Account,
+            string AccountType,
+            InternalCardNoMatchDetail Match);
+
+        private sealed record InternalCardNoMatchDetail(string Text, string MatchReason);
+
         private static InvestmentStatistics BuildInvestmentStatistics(
             List<Record> records,
             DateTime today,
@@ -1732,24 +1937,52 @@ namespace MyBook
             var beforeCounts = ReadCleanupCounts();
             ExecuteLockedTransaction(() =>
             {
-                db.Deleteable<SnapshotItem>().ExecuteCommand();
-                db.Deleteable<Snapshot>().ExecuteCommand();
+                db.Ado.ExecuteCommand("""
+                    delete snapshotItem
+                    from `SnapshotItems` snapshotItem
+                    left join (
+                        select `Id`
+                        from `Snapshots`
+                        where `source` = 'Manual'
+                        order by `time`, `Id`
+                        limit 1
+                    ) fixedSnapshot
+                        on snapshotItem.`_snapshot_Id` = fixedSnapshot.`Id`
+                    where fixedSnapshot.`Id` is null
+                    """);
+                db.Ado.ExecuteCommand("""
+                    delete snapshot
+                    from `Snapshots` snapshot
+                    left join (
+                        select `Id`
+                        from `Snapshots`
+                        where `source` = 'Manual'
+                        order by `time`, `Id`
+                        limit 1
+                    ) fixedSnapshot
+                        on snapshot.`Id` = fixedSnapshot.`Id`
+                    where fixedSnapshot.`Id` is null
+                    """);
                 db.Deleteable<Record>().ExecuteCommand();
                 db.Deleteable<Holding>().ExecuteCommand();
-                db.Deleteable<Finance>().ExecuteCommand();
                 db.Deleteable<AccountBalance>().ExecuteCommand();
                 db.Ado.ExecuteCommand("""
                     delete statementImport
                     from `StatementImports` statementImport
                     left join (
-                        select `provider`, min(`time`) as `time`
-                        from `StatementImports`
-                        where `provider` in ('IBKRReportMail', 'ICBCBillMail', 'OCBCStatementMail')
-                        group by `provider`
+                        select candidate.`provider`, min(candidate.`Id`) as `Id`
+                        from `StatementImports` candidate
+                        join (
+                            select `provider`, min(`time`) as `time`
+                            from `StatementImports`
+                            group by `provider`
+                        ) earliest
+                            on candidate.`provider` = earliest.`provider`
+                            and candidate.`time` = earliest.`time`
+                        group by candidate.`provider`
                     ) fixedImport
-                        on statementImport.`provider` = fixedImport.`provider`
-                        and statementImport.`time` = fixedImport.`time`
-                    where fixedImport.`provider` is null
+                        on statementImport.`Id` = fixedImport.`Id`
+                    where fixedImport.`Id` is null
                     """);
             });
 
@@ -1931,6 +2164,8 @@ namespace MyBook
         {
             if (type == typeof(Account))
                 return "Accounts";
+            if (type == typeof(AccountInternalId))
+                return "AccountInternalIds";
             if (type == typeof(AccountBalance))
                 return "AccountBalances";
             if (type == typeof(Record))
@@ -2169,7 +2404,8 @@ namespace MyBook
             List<Record> records,
             List<Holding> holdings,
             List<AccountBalance> accountBalances,
-            List<AccountBalance> beginningAccountBalances)
+            List<AccountBalance> beginningAccountBalances,
+            List<AccountInternalId>? internalCardNos = null)
         {
             Provider = provider;
             Time = time;
@@ -2179,6 +2415,7 @@ namespace MyBook
             Holdings = holdings;
             AccountBalances = accountBalances;
             BeginningAccountBalances = beginningAccountBalances;
+            InternalCardNos = internalCardNos ?? [];
         }
 
         public StatementImportProvider Provider { get; }
@@ -2189,5 +2426,6 @@ namespace MyBook
         public List<Holding> Holdings { get; }
         public List<AccountBalance> AccountBalances { get; }
         public List<AccountBalance> BeginningAccountBalances { get; }
+        public List<AccountInternalId> InternalCardNos { get; }
     }
 }
