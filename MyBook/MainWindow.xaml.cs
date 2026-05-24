@@ -345,6 +345,7 @@ namespace MyBook
         DateTime detailEndDate = DateTime.Today;
         bool showInvestmentByHolding;
         string? selectedDetailAccountName;
+        MonthlyFlowAccountStatisticsViewModel? selectedMonthlyAccount;
         InvestmentAccountStatisticsViewModel? selectedInvestmentAccount;
 
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -357,6 +358,7 @@ namespace MyBook
         public List<AssetSummaryViewModel> AssetSummaries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> RmbMonthlySeries { get; set; } = [];
+        public List<MonthlyFlowAccountStatisticsViewModel> MonthlyAccounts { get; set; } = [];
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
         public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
@@ -364,7 +366,18 @@ namespace MyBook
         public List<string> DetailAccountNames { get; private set; } = [];
         public List<CurrencyType> DetailCurrencyTypes { get; } = Enum.GetValues<CurrencyType>().ToList();
         public string DetailStatusText { get; private set; } = "";
-        public IEnumerable<MonthlyFlowSeriesViewModel> VisibleMonthlySeries => ShowSingleCurrencyMonthly ? MonthlySeries : RmbMonthlySeries;
+        public IEnumerable<MonthlyFlowSeriesViewModel> VisibleMonthlySeries
+        {
+            get
+            {
+                if (SelectedMonthlyAccount is null)
+                    return ShowSingleCurrencyMonthly ? MonthlySeries : RmbMonthlySeries;
+
+                return ShowSingleCurrencyMonthly
+                    ? SelectedMonthlyAccount.MonthlySeries
+                    : SelectedMonthlyAccount.RmbMonthlySeries;
+            }
+        }
         public IEnumerable<InvestmentStatisticsPeriodViewModel> VisibleInvestmentPeriods => SelectedInvestmentAccount is null
             ? Enumerable.Empty<InvestmentStatisticsPeriodViewModel>()
             : ShowInvestmentByHolding
@@ -434,6 +447,20 @@ namespace MyBook
 
                 showSingleCurrencyMonthly = value;
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowSingleCurrencyMonthly)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VisibleMonthlySeries)));
+            }
+        }
+
+        public MonthlyFlowAccountStatisticsViewModel? SelectedMonthlyAccount
+        {
+            get => selectedMonthlyAccount;
+            set
+            {
+                if (ReferenceEquals(selectedMonthlyAccount, value))
+                    return;
+
+                selectedMonthlyAccount = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedMonthlyAccount)));
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VisibleMonthlySeries)));
             }
         }
@@ -521,6 +548,17 @@ namespace MyBook
             var reasonSeries = data.RmbReasonFlowSeriesByMonth
                 .Select(ReasonFlowSeriesViewModel.From)
                 .ToList();
+            List<MonthlyFlowAccountStatistics> monthlyAccounts = data.MonthlyAccounts.Count == 0
+                ?
+                [
+                    new MonthlyFlowAccountStatistics
+                    {
+                        DisplayName = "所有账户",
+                        MonthlyFlowSeries = data.MonthlyFlowSeries,
+                        RmbMonthlyFlowSeries = data.RmbMonthlyFlowSeries
+                    }
+                ]
+                : data.MonthlyAccounts;
             List<InvestmentAccountStatistics> investmentAccounts = data.InvestmentAccounts.Count == 0
                 ?
                 [
@@ -543,11 +581,15 @@ namespace MyBook
                     .Select(MonthlyFlowSeriesViewModel.From)
                     .ToList(),
                 RmbMonthlySeries = [MonthlyFlowSeriesViewModel.From(data.RmbMonthlyFlowSeries)],
+                MonthlyAccounts = monthlyAccounts
+                    .Select(MonthlyFlowAccountStatisticsViewModel.From)
+                    .ToList(),
                 ReasonMonthSeries = reasonSeries,
                 InvestmentAccounts = investmentAccounts
                     .Select(InvestmentAccountStatisticsViewModel.From)
                     .ToList()
             };
+            viewModel.SelectedMonthlyAccount = viewModel.MonthlyAccounts.FirstOrDefault();
             viewModel.SelectedInvestmentAccount = viewModel.InvestmentAccounts.FirstOrDefault();
             viewModel.SelectedAssetSummaryOffset = viewModel.AssetSummaries.Count == 0 ? 0 : viewModel.AssetSummaries[^1].DayOffset;
             viewModel.SelectedReasonMonthIndex = Math.Clamp(data.DefaultReasonMonthIndex, 0, Math.Max(0, reasonSeries.Count - 1));
@@ -1038,6 +1080,25 @@ namespace MyBook
                 TotalExpenseText = $"支 {symbol}{series.TotalExpense:N2}",
                 NetChangeText = $"净变动 {MoneyText.From(series.NetChange, symbol).DisplayText}",
                 Points = series.Points.Select(MonthlyFlowPointViewModel.From).ToList()
+            };
+        }
+    }
+
+    public class MonthlyFlowAccountStatisticsViewModel
+    {
+        public string DisplayName { get; set; } = "";
+        public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
+        public List<MonthlyFlowSeriesViewModel> RmbMonthlySeries { get; set; } = [];
+
+        public static MonthlyFlowAccountStatisticsViewModel From(MonthlyFlowAccountStatistics account)
+        {
+            return new MonthlyFlowAccountStatisticsViewModel
+            {
+                DisplayName = account.DisplayName,
+                MonthlySeries = account.MonthlyFlowSeries
+                    .Select(MonthlyFlowSeriesViewModel.From)
+                    .ToList(),
+                RmbMonthlySeries = [MonthlyFlowSeriesViewModel.From(account.RmbMonthlyFlowSeries)]
             };
         }
     }
