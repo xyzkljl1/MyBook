@@ -189,6 +189,33 @@ namespace MyBook
         Transit
     }
 
+    [SugarIndex("unique_AccountInternalIds_account_card_no", nameof(AccountInternalId._account_Id), OrderByType.Asc, nameof(AccountInternalId.cardNo), OrderByType.Asc, true)]
+    [SugarTable("AccountInternalIds")]
+    public class AccountInternalId
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(MyBook.Account.Id))]
+        public Account? Account { get; set; }
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(128)")]
+        public string cardNo { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "''")]
+        public string desc { get; set; } = "";
+
+        // 只作为人工备注使用，匹配内部转账时不使用该列。
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public CurrencyType? currencyType { get; set; }
+
+        [SugarColumn(IsIgnore = true)]
+        public string sourceText { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "0")]
+        public int _account_Id { get; set; } = 0;
+    }
+
     // 账户。一个账户可以同时拥有多个币种余额，具体余额保存在 AccountBalances 中。
     // 主副卡关系按账户存储；副卡账户指向对应主卡账户。
     [SugarIndex("unique_Accounts_name", nameof(Account.name), OrderByType.Asc, true)]
@@ -207,6 +234,9 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "''")]
         public string desc { get; set; } = "";
+
+        [SugarColumn(IsNullable = true, ColumnDataType = "varchar(255)")]
+        public string? email { get; set; } = null;
 
         [SugarColumn(DefaultValue = "1")]
         public bool relativeBalance { get; set; } = true; // 无法直接获取真实余额，只能根据变动值推算。

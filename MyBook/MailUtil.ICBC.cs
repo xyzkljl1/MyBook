@@ -24,20 +24,7 @@ namespace MyBook
 
         public async Task FetchICBCBills()
         {
-            var month = GetNextMonthlyStatementDate(ICBCProvider);
-            var currentMonth = FirstDayOfMonth(DateTime.Today);
-            while (month <= currentMonth)
-            {
-                var imported = await FetchICBCBill(month);
-                if (!imported)
-                {
-                    if (DateTime.Today >= month.AddMonths(1))
-                        throw new InvalidOperationException($"Missing ICBC bill for {month:yyyy-MM}");
-                    return;
-                }
-
-                month = month.AddMonths(1);
-            }
+            await FetchMonthlyStatements(ICBCProvider, "ICBC bill", FetchICBCBill);
         }
 
         // 工行对账单，按卡号区分用途。
@@ -69,6 +56,8 @@ namespace MyBook
                     throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
                 var beginningAccountBalances = ParseICBCAccountBalances(tables[1], 1);
                 var accountBalances = ParseICBCAccountBalances(tables[1], 4);
+                // 只从汇总表登记卡号；交易明细里的卡号只用于该交易本身，不能作为卡号来源。
+                var internalCardNos = ParseICBCInternalCardNos(tables[1]);
 
                 records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细。
                 records.AddRange(ParseICBCTransactionRecords(tables[3])); // 外币交易明细。
@@ -79,7 +68,11 @@ namespace MyBook
                     accountBalances,
                     statementKey,
                     beginningAccountBalances,
-                    afterSaveInTransaction: statementImportId => OffsetMatchedICBCRefundRecords(statementImportId));
+                    afterSaveInTransaction: statementImportId =>
+                    {
+                        database.EnsureAccountInternalCardNos(internalCardNos);
+                        OffsetMatchedICBCRefundRecords(statementImportId);
+                    });
                 return true;
             }
             catch (Exception e)
@@ -115,6 +108,32 @@ namespace MyBook
             return accountBalances;
         }
 
+        private List<AccountInternalId> ParseICBCInternalCardNos(params FormUtil.FormTable[] tables)
+        {
+            var result = new List<AccountInternalId>();
+            foreach (var table in tables)
+            {
+                foreach (var line in table.Rows)
+                {
+                if (line.Count == 0 || line[0] == "鍚堣")
+                    continue;
+
+                    var cardNo = Regex.Replace(line[0], @"\D", "");
+                    if (String.IsNullOrWhiteSpace(cardNo))
+                        continue;
+
+                    result.Add(new AccountInternalId
+                    {
+                        Account = GetICBCCardAccount(cardNo),
+                        cardNo = cardNo,
+                        sourceText = $"ICBC table={table.Title}; row={String.Join(" | ", line)}"
+                    });
+                }
+            }
+
+            return result;
+        }
+
         private Records ParseICBCTransactionRecords(FormUtil.FormTable table)
         {
             if (table.Headers.Count != 7
@@ -138,6 +157,16 @@ namespace MyBook
                 record.DestAccount = line[4];
                 record.DescCurrency = Currency.Parse(line[5]);
                 record.CopyFrom(postingCurrency);
+                var internalCounterparty = database.FindAccountByInternalCardNoText(
+                    null,
+                    $"ICBC import table={table.Title}; date={line[1]}; card={line[0]}; type={line[3]}; row={String.Join(" | ", line)}",
+                    record.DestAccount);
+                if (internalCounterparty is not null && !IsSameAccount(database.GetPostingAccount(internalCounterparty), record.Account))
+                {
+                    record.DestAccount = internalCounterparty.name;
+                    record.isInternal = true;
+                }
+
                 if (line[3] == "消费" || line[3] == "跨行消费" || line[3] == "境外消费" || line[3] == "缴费")
                 {
                     record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。

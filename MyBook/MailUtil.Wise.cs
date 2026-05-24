@@ -103,7 +103,7 @@ namespace MyBook
             return IsFrom(message, WiseMailSender);
         }
 
-        private static List<WiseParsedMail> ParseWiseMails(List<MimeMessage> messages, Account account, WiseSettings settings)
+        private List<WiseParsedMail> ParseWiseMails(List<MimeMessage> messages, Account account, WiseSettings settings)
         {
             return messages
                 .Select(message => ParseWiseMail(message, account, settings))
@@ -119,7 +119,7 @@ namespace MyBook
                 .ToList();
         }
 
-        private static WiseParsedMail? ParseWiseMail(MimeMessage message, Account account, WiseSettings settings)
+        private WiseParsedMail? ParseWiseMail(MimeMessage message, Account account, WiseSettings settings)
         {
             if (!IsWiseTransactionMail(message))
                 return null;
@@ -141,7 +141,13 @@ namespace MyBook
 
             if (TryParseWiseDirectPayment(subject, text, out var directCounterparty, out var directAmount))
             {
-                var classification = ClassifyWiseCounterparty(settings, directCounterparty, directAmount, false);
+                var classification = ClassifyWiseCounterparty(
+                    settings,
+                    account,
+                    directCounterparty,
+                    directAmount,
+                    false,
+                    $"{source}; statementKey={statementKey}; counterparty={directCounterparty}; amount={directAmount.v} {directAmount.t}");
                 return CreateParsedMail(
                     time,
                     statementKey,
@@ -158,7 +164,13 @@ namespace MyBook
 
             if (TryParseWiseIncoming(text, out var incomingCounterparty, out var incomingAmount))
             {
-                var classification = ClassifyWiseCounterparty(settings, incomingCounterparty, incomingAmount, true);
+                var classification = ClassifyWiseCounterparty(
+                    settings,
+                    account,
+                    incomingCounterparty,
+                    incomingAmount,
+                    true,
+                    $"{source}; statementKey={statementKey}; counterparty={incomingCounterparty}; amount={incomingAmount.v} {incomingAmount.t}");
                 return CreateParsedMail(
                     time,
                     statementKey,
@@ -228,7 +240,13 @@ namespace MyBook
                 if (isPendingConversion)
                     return null;
 
-                var classification = ClassifyWiseCounterparty(settings, outgoingCounterparty, outgoingAmount, false);
+                var classification = ClassifyWiseCounterparty(
+                    settings,
+                    account,
+                    outgoingCounterparty,
+                    outgoingAmount,
+                    false,
+                    $"{source}; statementKey={statementKey}; counterparty={outgoingCounterparty}; amount={outgoingAmount.v} {outgoingAmount.t}");
                 var records = new List<Record>
                 {
                     CreateWiseRecord(
@@ -517,11 +535,13 @@ namespace MyBook
                 .ToList();
         }
 
-        private static WiseCounterpartyClassification ClassifyWiseCounterparty(
+        private WiseCounterpartyClassification ClassifyWiseCounterparty(
             WiseSettings settings,
+            Account currentAccount,
             string counterparty,
             Currency amount,
-            bool isIncoming)
+            bool isIncoming,
+            string matchContext)
         {
             var normalizedCounterparty = NormalizeNameForComparison(counterparty);
             if (settings.OwnNames.Any(name => NormalizeNameForComparison(name) == normalizedCounterparty))
@@ -550,6 +570,15 @@ namespace MyBook
                 && NormalizeNameForComparison(WiseRmbUnknownRecipientName) == normalizedCounterparty)
             {
                 var counterpartyText = FormatTransferCounterparty(WiseAccountName, WiseRmbUnknownRecipientAccount);
+                return new WiseCounterpartyClassification(counterpartyText, true);
+            }
+
+            var internalCounterparty = database.FindAccountByInternalCardNoText(null, matchContext, counterparty);
+            if (internalCounterparty is not null && !IsSameAccount(database.GetPostingAccount(internalCounterparty), currentAccount))
+            {
+                var counterpartyText = isIncoming
+                    ? FormatTransferCounterparty(internalCounterparty.name, WiseAccountName)
+                    : FormatTransferCounterparty(WiseAccountName, internalCounterparty.name);
                 return new WiseCounterpartyClassification(counterpartyText, true);
             }
 

@@ -25,20 +25,7 @@ namespace MyBook
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         public async Task FetchOCBCReports()
         {
-            var month = GetNextMonthlyStatementDate(OCBCProvider);
-            var currentMonth = FirstDayOfMonth(DateTime.Today);
-            while (month <= currentMonth)
-            {
-                var imported = await FetchOCBCReport(month);
-                if (!imported)
-                {
-                    Console.WriteLine($"Missing OCBC statement for {month:yyyy-MM}");
-                    month = month.AddMonths(1);
-                    continue;
-                }
-
-                month = month.AddMonths(1);
-            }
+            await FetchMonthlyStatements(OCBCProvider, "OCBC statement", FetchOCBCReport);
         }
 
         public async Task FetchOCBCReports(DateTime date)
@@ -76,7 +63,8 @@ namespace MyBook
                 parsed.Records,
                 parsed.EndingBalances,
                 parsed.StatementKey,
-                parsed.BeginningBalances);
+                parsed.BeginningBalances,
+                afterSaveInTransaction: _ => database.EnsureAccountInternalCardNos(parsed.InternalCardNos));
 
             Console.WriteLine(saved
                 ? $"Import OCBC statement {parsed.StatementKey}, records={parsed.Records.Count}"
@@ -269,7 +257,7 @@ namespace MyBook
                 endingBalances.Add(new AccountBalance(accountInfo.Account, new Currency(ending, currency)));
             }
 
-            return new OCBCParsedStatement(importTime, statementKey, records, beginningBalances, endingBalances);
+            return new OCBCParsedStatement(importTime, statementKey, records, beginningBalances, endingBalances, parsedBalances.InternalCardNos);
         }
 
         private static OCBCParsedBalances ParseOCBCStatement(
@@ -282,12 +270,23 @@ namespace MyBook
             var beginning = new Dictionary<(string AccountName, CurrencyType Currency), decimal>();
             var ending = new Dictionary<(string AccountName, CurrencyType Currency), decimal>();
             var transactions = new List<OCBCParsedTransaction>();
+            var internalCardNos = new List<AccountInternalId>();
             var presentAccounts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            AddOCBCSummaryEndingBalances(words, accounts, presentAccounts, ending);
+            AddOCBCSummaryEndingBalances(words, accounts, presentAccounts, ending, internalCardNos, statementKey);
             var sections = FindOCBCAccountSections(lines, accounts);
             foreach (var group in sections.GroupBy(section => section.Account.Account.name, StringComparer.OrdinalIgnoreCase))
             {
                 var accountInfo = group.First().Account;
+                internalCardNos.AddRange(group
+                    .Select(section => section.AccountNumber)
+                    .Where(accountNumber => !String.IsNullOrWhiteSpace(accountNumber))
+                    .Select(accountNumber => new AccountInternalId
+                    {
+                        Account = accountInfo.Account,
+                        cardNo = accountNumber,
+                        currencyType = GetOCBCAccountCurrency(accountInfo),
+                        sourceText = $"OCBC statement {statementKey}; section accountNumber={accountNumber}; account={accountInfo.Account.name}"
+                    }));
                 var sectionLines = group.SelectMany(section => section.Lines).ToList();
                 var currency = GetOCBCAccountCurrency(accountInfo);
                 var hasBeginningBalance = TryReadOCBCSectionBalance(sectionLines, "B/F", out var beginningBalance);
@@ -307,7 +306,7 @@ namespace MyBook
                     throw new MailParseException($"Parse OCBC Statement Fail, duplicate account section for {accountInfo.Account.name} in {statementKey}");
 
                 var sectionTransactions = ParseOCBCSectionTransactions(
-                    new OCBCAccountSection(accountInfo, sectionLines),
+                    new OCBCAccountSection(accountInfo, "", sectionLines),
                     statementEndDate,
                     statementKey,
                     beginningBalance,
@@ -325,20 +324,21 @@ namespace MyBook
                     throw new MailParseException($"Parse OCBC Statement Fail, missing ending balance for {accountInfo.Account.name}");
             }
 
-            return new OCBCParsedBalances(presentAccounts, beginning, ending, transactions);
+            return new OCBCParsedBalances(presentAccounts, beginning, ending, transactions, internalCardNos);
         }
 
         private static void AddOCBCSummaryEndingBalances(
             List<string> words,
             List<OCBCAccountInfo> accounts,
             HashSet<string> presentAccounts,
-            Dictionary<(string AccountName, CurrencyType Currency), decimal> ending)
+            Dictionary<(string AccountName, CurrencyType Currency), decimal> ending,
+            List<AccountInternalId> internalCardNos,
+            string statementKey)
         {
             var summaryEnd = FindOCBCSummaryEnd(words);
             for (var i = 0; i < summaryEnd; i++)
             {
-                var accountNumber = Regex.Replace(words[i], @"\D", "");
-                if (accountNumber.Length < 4)
+                if (!TryParseOCBCSummaryAccountNumber(words[i], out var accountNumber))
                     continue;
 
                 foreach (var account in accounts)
@@ -352,9 +352,28 @@ namespace MyBook
                         throw new MailParseException($"Parse OCBC Statement Fail, missing summary balance for {account.Account.name}");
 
                     presentAccounts.Add(account.Account.name);
+                    internalCardNos.Add(new AccountInternalId
+                    {
+                        Account = account.Account,
+                        cardNo = accountNumber,
+                        currencyType = GetOCBCAccountCurrency(account),
+                        sourceText = $"OCBC statement {statementKey}; summary accountNumber={accountNumber}; account={account.Account.name}"
+                    });
                     ending[(account.Account.name, GetOCBCAccountCurrency(account))] = ParseOCBCDecimal(words[amountIndex]);
                 }
             }
+        }
+
+        private static bool TryParseOCBCSummaryAccountNumber(string word, out string accountNumber)
+        {
+            accountNumber = "";
+            var token = word.Trim();
+            // OCBC 摘要里的账号是纯数字标识。不要去掉标点后再匹配，否则 670.01 这类金额会被误读成账号。
+            if (!Regex.IsMatch(token, @"^\d{8,}$", RegexOptions.CultureInvariant))
+                return false;
+
+            accountNumber = token;
+            return true;
         }
 
         private static int FindOCBCSummaryEnd(List<string> words)
@@ -373,7 +392,7 @@ namespace MyBook
 
         private static List<OCBCAccountSection> FindOCBCAccountSections(List<string> lines, List<OCBCAccountInfo> accounts)
         {
-            var starts = new List<(int Index, OCBCAccountInfo Account)>();
+            var starts = new List<(int Index, OCBCAccountInfo Account, string AccountNumber)>();
             for (var i = 0; i < lines.Count; i++)
             {
                 var match = Regex.Match(
@@ -387,7 +406,7 @@ namespace MyBook
                 foreach (var account in accounts)
                 {
                     if (accountNumber.EndsWith(account.Tail, StringComparison.Ordinal))
-                        starts.Add((i, account));
+                        starts.Add((i, account, accountNumber));
                 }
             }
 
@@ -397,6 +416,7 @@ namespace MyBook
                 var end = i + 1 < starts.Count ? starts[i + 1].Index : lines.Count;
                 sections.Add(new OCBCAccountSection(
                     starts[i].Account,
+                    starts[i].AccountNumber,
                     lines.Skip(starts[i].Index).Take(end - starts[i].Index).ToList()));
             }
 
@@ -700,7 +720,7 @@ namespace MyBook
             return result;
         }
 
-        private static Record CreateOCBCRecord(
+        private Record CreateOCBCRecord(
             OCBCParsedTransaction transaction,
             string statementKey,
             List<OCBCAccountInfo> accounts,
@@ -708,7 +728,7 @@ namespace MyBook
             List<string> ownCounterpartyMarkers,
             DateTime updateTime)
         {
-            var classification = ClassifyOCBCTransaction(transaction, accounts, fxCounterparties, ownCounterpartyMarkers);
+            var classification = ClassifyOCBCTransaction(transaction, statementKey, accounts, fxCounterparties, ownCounterpartyMarkers);
             return new Record
             {
                 Account = transaction.AccountInfo.Account,
@@ -723,8 +743,9 @@ namespace MyBook
             };
         }
 
-        private static OCBCTransactionClassification ClassifyOCBCTransaction(
+        private OCBCTransactionClassification ClassifyOCBCTransaction(
             OCBCParsedTransaction transaction,
+            string statementKey,
             List<OCBCAccountInfo> accounts,
             Dictionary<OCBCParsedTransaction, string> fxCounterparties,
             List<string> ownCounterpartyMarkers)
@@ -745,6 +766,17 @@ namespace MyBook
 
             var counterparty = ExtractOCBCCounterparty(transaction, accounts);
             var isInternal = IsOCBCOwnCounterparty(counterparty, transaction.DescriptionText, ownCounterpartyMarkers);
+            var internalCounterparty = database.FindAccountByInternalCardNoText(
+                null,
+                $"{BuildOCBCSource(statementKey, transaction)}; raw={transaction.RawLine}",
+                counterparty,
+                transaction.DescriptionText);
+            if (internalCounterparty is not null && !IsSameAccount(database.GetPostingAccount(internalCounterparty), transaction.AccountInfo.Account))
+            {
+                counterparty = internalCounterparty.name;
+                isInternal = true;
+            }
+
             if (IsOCBCTransferTransaction(transaction))
                 return new OCBCTransactionClassification("转账", counterparty, isInternal);
 
@@ -1014,13 +1046,14 @@ namespace MyBook
 
         private sealed record OCBCAccountInfo(Account Account, string Tail);
 
-        private sealed record OCBCAccountSection(OCBCAccountInfo Account, List<string> Lines);
+        private sealed record OCBCAccountSection(OCBCAccountInfo Account, string AccountNumber, List<string> Lines);
 
         private sealed record OCBCParsedBalances(
             HashSet<string> PresentAccounts,
             Dictionary<(string AccountName, CurrencyType Currency), decimal> Beginning,
             Dictionary<(string AccountName, CurrencyType Currency), decimal> Ending,
-            List<OCBCParsedTransaction> Transactions);
+            List<OCBCParsedTransaction> Transactions,
+            List<AccountInternalId> InternalCardNos);
 
         private sealed record OCBCTransactionLine(
             DateTime TransactionDate,
@@ -1073,6 +1106,7 @@ namespace MyBook
             string StatementKey,
             Records Records,
             List<AccountBalance> BeginningBalances,
-            List<AccountBalance> EndingBalances);
+            List<AccountBalance> EndingBalances,
+            List<AccountInternalId> InternalCardNos);
     }
 }

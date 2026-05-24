@@ -249,7 +249,8 @@ namespace MyBook
                     report.Records,
                     report.Holdings,
                     report.AccountBalances,
-                    report.BeginningAccountBalances)));
+                    report.BeginningAccountBalances,
+                    report.InternalCardNos)));
 
             for (var i = 0; i < reports.Count; i++)
             {
@@ -278,6 +279,17 @@ namespace MyBook
             var endingNav = ParseIBKREndingNav(report);
             var navChange = ParseIBKRNavChange(report);
             var records = ParseIBKRRecords(report, account, baseCurrency, contractInfos, reportDate.Date, sourceName, navChange);
+            var internalCardNos = new List<AccountInternalId>
+            {
+                new()
+                {
+                    Account = account,
+                    cardNo = accountId,
+                    desc = "IBKR report account id",
+                    currencyType = baseCurrency,
+                    sourceText = $"IBKR report {reportDate:yyyy-MM-dd}; source={sourceName}; accountId={accountId}; account={account.name}"
+                }
+            };
 
             return new IBKRParsedReport(
                 reportDate.Date,
@@ -288,7 +300,8 @@ namespace MyBook
                 records,
                 holdings,
                 [new AccountBalance(account, new Currency(endingNav, baseCurrency))],
-                [new AccountBalance(account, new Currency(startingNav, baseCurrency))]);
+                [new AccountBalance(account, new Currency(startingNav, baseCurrency))],
+                internalCardNos);
         }
 
         private static string BuildIBKRStatementKey(Account account, DateTime reportDate)
@@ -1607,7 +1620,8 @@ namespace MyBook
             Records Records,
             List<Holding> Holdings,
             List<AccountBalance> AccountBalances,
-            List<AccountBalance> BeginningAccountBalances);
+            List<AccountBalance> BeginningAccountBalances,
+            List<AccountInternalId> InternalCardNos);
 
         private sealed record IBKRContractInfo(string Code, string Description, HoldingType HoldingType, string DisplayText);
 
