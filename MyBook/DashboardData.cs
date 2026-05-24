@@ -119,6 +119,8 @@ namespace MyBook
         public DateTime Date { get; set; }
         public string DestAccount { get; set; } = "";
         public bool IsInternal { get; set; }
+        public int? MatchedRecordId { get; set; }
+        public string MatchedRecordReason { get; set; } = "";
         public bool IsRefundMatched { get; set; }
         public int HoldingQuantity { get; set; }
         public string Source { get; set; } = "";
