@@ -81,6 +81,22 @@ namespace MyBook
             });
         }
 
+        public System.Data.DataTable QueryDebugSql(string sql)
+        {
+            if (String.IsNullOrWhiteSpace(sql))
+                throw new ArgumentException("Debug SQL is empty.", nameof(sql));
+
+            return db.Ado.GetDataTable(sql);
+        }
+
+        public int ExecuteDebugSql(string sql)
+        {
+            if (String.IsNullOrWhiteSpace(sql))
+                throw new ArgumentException("Debug SQL is empty.", nameof(sql));
+
+            return ExecuteLockedTransaction(() => db.Ado.ExecuteCommand(sql));
+        }
+
         private void AcquireDatabaseWriteLock()
         {
             var result = db.Ado.GetInt(
@@ -181,6 +197,7 @@ namespace MyBook
                         AddAccountBalanceDeltas(recordList);
 
                     afterSaveInTransaction?.Invoke(statementImportId);
+                    MatchKnownInternalTransfersForStatements([statementImportId]);
                     MatchInternalTransfersAroundStatement(statementImportId);
                     return true;
                 });
@@ -199,6 +216,7 @@ namespace MyBook
             var saved = new List<bool>();
             return ExecuteLockedTransaction(() =>
             {
+                var savedStatementImportIds = new List<int>();
                 var shouldValidateBeginningBalances = importList
                     .Select(import => import.Provider)
                     .Distinct()
@@ -222,9 +240,13 @@ namespace MyBook
                     SaveAccountHoldingsCore(import.HoldingAccount, import.Holdings);
                     SaveRecordsCore(import.Records, statementImportId);
                     EnsureAccountInternalCardNos(import.InternalCardNos);
-                    MatchInternalTransfersAroundStatement(statementImportId);
+                    savedStatementImportIds.Add(statementImportId);
                     saved.Add(true);
                 }
+
+                MatchKnownInternalTransfersForStatements(savedStatementImportIds);
+                foreach (var statementImportId in savedStatementImportIds)
+                    MatchInternalTransfersAroundStatement(statementImportId);
 
                 return saved;
             });
@@ -512,6 +534,34 @@ namespace MyBook
                 .ToList()
                 .ToDictionary(account => account.name, StringComparer.OrdinalIgnoreCase);
 
+            MatchInternalTransfers(records, accountsByName, requireKnownCounterparty: false);
+        }
+
+        private void MatchKnownInternalTransfersForStatements(List<int> statementImportIds)
+        {
+            if (statementImportIds.Count == 0)
+                return;
+
+            var records = db.Queryable<Record>()
+                .Where(record => statementImportIds.Contains(record._statementImport_Id)
+                    && record.matchedRecordId == null
+                    && !record.isRefundMatched)
+                .ToList();
+            if (records.Count < 2)
+                return;
+
+            var accountsByName = db.Queryable<Account>()
+                .ToList()
+                .ToDictionary(account => account.name, StringComparer.OrdinalIgnoreCase);
+
+            MatchInternalTransfers(records, accountsByName, requireKnownCounterparty: true);
+        }
+
+        private void MatchInternalTransfers(
+            List<Record> records,
+            Dictionary<string, Account> accountsByName,
+            bool requireKnownCounterparty)
+        {
             foreach (var anchor in records
                          .Where(record => record.isInternal && record.matchedRecordId is null)
                          .OrderBy(record => record.date)
@@ -524,25 +574,23 @@ namespace MyBook
                 if (TryMatchCurrencyExchange(anchor, records))
                     continue;
 
-                TryMatchInternalTransfer(anchor, records, accountsByName);
+                TryMatchInternalTransfer(anchor, records, accountsByName, requireKnownCounterparty);
             }
         }
 
         private bool TryMatchCurrencyExchange(Record anchor, List<Record> records)
         {
-            var conversionCode = ExtractRecordSourceCode(anchor.Source);
-            if (String.IsNullOrWhiteSpace(conversionCode)
-                || !conversionCode.StartsWith("BALANCE-", StringComparison.OrdinalIgnoreCase))
+            var conversionCode = ExtractCurrencyExchangeCode(anchor.Source);
+            if (String.IsNullOrWhiteSpace(conversionCode))
                 return false;
 
             var candidates = records
                 .Where(record => record.Id != anchor.Id
                     && record.matchedRecordId is null
-                    && record._statementImport_Id != anchor._statementImport_Id
                     && record.isInternal
                     && !record.isRefundMatched
                     && HasOppositeSigns(anchor.v, record.v)
-                    && String.Equals(ExtractRecordSourceCode(record.Source), conversionCode, StringComparison.OrdinalIgnoreCase))
+                    && String.Equals(ExtractCurrencyExchangeCode(record.Source), conversionCode, StringComparison.OrdinalIgnoreCase))
                 .ToList();
             if (candidates.Count != 1)
                 return false;
@@ -554,13 +602,14 @@ namespace MyBook
         private bool TryMatchInternalTransfer(
             Record anchor,
             List<Record> records,
-            Dictionary<string, Account> accountsByName)
+            Dictionary<string, Account> accountsByName,
+            bool requireKnownCounterparty)
         {
             if (anchor.v == 0)
                 return false;
 
             var targetAccount = ResolveInternalTransferTargetAccount(anchor, accountsByName);
-            if (targetAccount is null || targetAccount.Id == anchor._account_Id)
+            if (requireKnownCounterparty && targetAccount is null)
                 return false;
 
             var start = anchor.date.AddDays(-InternalTransferMatchWindowDays);
@@ -568,18 +617,32 @@ namespace MyBook
             var candidates = records
                 .Where(record => record.Id != anchor.Id
                     && record.matchedRecordId is null
-                    && record._statementImport_Id != anchor._statementImport_Id
                     && !record.isRefundMatched
-                    && record._account_Id == targetAccount.Id
+                    && record.isInternal
+                    && (targetAccount is null || record._account_Id == targetAccount.Id)
                     && record.t == anchor.t
                     && record.v == -anchor.v
                     && record.date >= start
                     && record.date <= end)
                 .ToList();
+            if (requireKnownCounterparty)
+            {
+                candidates = candidates
+                    .Where(candidate =>
+                    {
+                        var candidateTarget = ResolveInternalTransferTargetAccount(candidate, accountsByName);
+                        return candidateTarget is not null && candidateTarget.Id == anchor._account_Id;
+                    })
+                    .ToList();
+            }
+
             if (candidates.Count != 1)
                 return false;
 
-            MatchInternalTransferPair(anchor, candidates[0], "CounterpartyAccountAmountDate");
+            MatchInternalTransferPair(
+                anchor,
+                candidates[0],
+                requireKnownCounterparty ? "KnownCounterpartyAccountAmountDate" : "CounterpartyAccountAmountDate");
             return true;
         }
 
@@ -648,6 +711,22 @@ namespace MyBook
         private static bool HasOppositeSigns(decimal left, decimal right)
         {
             return left != 0 && right != 0 && Math.Sign(left) == -Math.Sign(right);
+        }
+
+        private static string ExtractCurrencyExchangeCode(string source)
+        {
+            var recordSourceCode = ExtractRecordSourceCode(source);
+            if (recordSourceCode.StartsWith("BALANCE-", StringComparison.OrdinalIgnoreCase))
+                return recordSourceCode;
+
+            var ocbcFxMatch = Regex.Match(
+                source ?? "",
+                @"\bFX\s+Transaction\s*/\s*(?<code>[A-Za-z0-9_-]+)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (ocbcFxMatch.Success)
+                return $"OCBC-FX-{ocbcFxMatch.Groups["code"].Value.Trim()}";
+
+            return "";
         }
 
         private static string ExtractRecordSourceCode(string source)
@@ -2621,10 +2700,10 @@ namespace MyBook
 
             var balanceSums = accountBalances
                 .GroupBy(balance => balance.t)
-                .ToDictionary(group => group.Key, group => group.Sum(balance => balance.v));
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(balance => balance.v)));
             var holdingSums = holdings
                 .GroupBy(holding => holding.currentPrice.t)
-                .ToDictionary(group => group.Key, group => group.Sum(holding => holding.totalPrice.v));
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(holding => holding.totalPrice.v)));
             var currencies = balanceSums.Keys
                 .Union(holdingSums.Keys)
                 .ToList();

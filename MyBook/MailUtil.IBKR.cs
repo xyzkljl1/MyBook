@@ -21,6 +21,8 @@ namespace MyBook
         private const string IBKRStockYieldEnhancementLoanSection = "股票收益提升计划股证券出借活动";
         private const string IBKRInterestSection = "利息";
         private const string IBKRBondInterestReceivedSection = "收到的债券利息";
+        private const string IBKRDividendAccrualChangeSection = "应计股息的变化";
+        private const string IBKRTransferSection = "转账";
 
         private static readonly HashSet<string> IBKRAssetGroups = new(StringComparer.Ordinal)
         {
@@ -47,9 +49,11 @@ namespace MyBook
             "佣金细节",
             "应计利息",
             "未平仓应计股息",
+            IBKRDividendAccrualChangeSection,
             "借方利息细节",
             "基础货币汇率",
             "代码",
+            IBKRTransferSection,
             IBKRStockYieldEnhancementLoanSection,
             IBKRInterestSection,
             IBKRBondInterestReceivedSection
@@ -110,6 +114,10 @@ namespace MyBook
             [
                 ["资产分类", "货币", "代码", "除息日", "支付日期", "数量", "税", "费用", "总价", "总额", "净额", "代码"]
             ],
+            [IBKRDividendAccrualChangeSection] =
+            [
+                ["资产分类", "货币", "代码", "日期", "除息日", "支付日期", "数量", "税", "费用", "总股息率", "总额", "净额", "代码"]
+            ],
             ["借方利息细节"] =
             [
                 ["货币", "起息日", "等级差", "率（％）", "证券本金", "期货本金", "合计本金", "证券利息", "期货利息", "总利息", "代码"]
@@ -121,6 +129,10 @@ namespace MyBook
             ["代码"] =
             [
                 ["代码", "意思", "代码 （继续）", "意思 （继续）"]
+            ],
+            [IBKRTransferSection] =
+            [
+                ["资产分类", "货币", "代码", "日期", "类型", "方向", "转账公司", "转账账户", "数量", "转账价格", "市场价值", "已实现的损益", "现金金额", "代码"]
             ],
             [IBKRStockYieldEnhancementLoanSection] =
             [
@@ -513,6 +525,8 @@ namespace MyBook
             var interestAccrualTotals = ParseIBKRInterestAccrualRecords(report, builder, baseCurrency);
             var debitInterestTotals = ParseIBKRDebitInterestDetails(report);
             var dividendAccrualTotal = ParseIBKRDividendAccruals(report);
+            var dividendAccrualChangeTotal = ParseIBKRDividendAccrualChangeRecords(report, builder, baseCurrency, contractInfos);
+            var transferTotal = ParseIBKRTransferRecords(report, builder, baseCurrency, account, contractInfos);
             var cashTotals = ParseIBKRCashRecords(report, builder, baseCurrency, tradeTotals, commissionTotals);
 
             if (mtmTotals.HasData)
@@ -522,21 +536,32 @@ namespace MyBook
                 else
                     AssertIBKRMoneyEquals(mtmTotals.Commission, cashTotals.Commission, "IBKR cash commission", IBKRPrecisionResidualLimit);
 
-                AssertIBKRMoneyEquals(mtmTotals.Other, 0, "IBKR MTM other");
+                AssertIBKRMoneyEquals(mtmTotals.Other, ParseIBKRNavChangeComponent(report, "利息"), "IBKR MTM other");
             }
 
             var accruedInterest = ParseIBKRNavComponentChange(report, "应计利息");
             if (interestAccrualTotals.HasData)
                 AssertIBKRMoneyEquals(accruedInterest, interestAccrualTotals.Total, "IBKR interest accrual NAV");
 
-            var accruedBrokerInterest = ParseIBKRNavComponentChange(report, "应计经纪商利息");
             if (debitInterestTotals.HasData)
+            {
+                var accruedBrokerInterest = TryParseIBKRNavComponentChange(report, "应计经纪商利息") ?? accruedInterest;
                 AssertIBKRMoneyEquals(accruedBrokerInterest, debitInterestTotals.Total, "IBKR debit interest details");
+            }
 
             var accruedDividend = ParseIBKRNavComponent(report, "应计股息");
             if (dividendAccrualTotal.HasData)
                 AssertIBKRMoneyEquals(accruedDividend, dividendAccrualTotal.Total, "IBKR open dividend accrual");
 
+            var accruedDividendChange = ParseIBKRNavComponentChange(report, "应计股息");
+            if (dividendAccrualChangeTotal.HasData)
+                AssertIBKRMoneyEquals(accruedDividendChange, dividendAccrualChangeTotal.Total, "IBKR dividend accrual change");
+
+            var positionTransfer = ParseIBKRNavChangeComponent(report, "持仓转账");
+            if (transferTotal.HasData)
+                AssertIBKRMoneyEquals(positionTransfer, transferTotal.Total, "IBKR position transfer");
+
+            AddIBKROtherFxTranslationRecord(report, builder, baseCurrency);
             AddIBKRPrecisionResidualRecord(builder, baseCurrency, expectedNavChange);
             AssertIBKRMoneyEquals(expectedNavChange, builder.NetAssetChangeTotal, "IBKR NAV change records");
             return builder.Records;
@@ -859,6 +884,164 @@ namespace MyBook
             return new IBKRInterestTotals(true, total);
         }
 
+        private IBKRInterestTotals ParseIBKRDividendAccrualChangeRecords(
+            IBKRCsvReport report,
+            IBKRRecordBuilder builder,
+            CurrencyType baseCurrency,
+            Dictionary<string, IBKRContractInfo> contractInfos)
+        {
+            var rows = report.OptionalDataRows(IBKRDividendAccrualChangeSection).ToList();
+            if (rows.Count == 0)
+                return new IBKRInterestTotals(false, 0);
+
+            decimal detailTotal = 0;
+            decimal? reportedTotal = null;
+            decimal? openingTotal = null;
+            decimal? endingTotal = null;
+            foreach (var row in rows)
+            {
+                AssertIBKRFieldCount(row, 13);
+                var assetClass = row.Fields[0];
+                if (assetClass.StartsWith("期初应计股息", StringComparison.Ordinal))
+                {
+                    openingTotal = ParseIBKRDecimalAt(row, 11, "opening dividend accrual");
+                    continue;
+                }
+
+                if (assetClass.StartsWith("期末应计股息", StringComparison.Ordinal))
+                {
+                    endingTotal = ParseIBKRDecimalAt(row, 11, "ending dividend accrual");
+                    continue;
+                }
+
+                if (assetClass.StartsWith("总数", StringComparison.Ordinal))
+                {
+                    reportedTotal = ParseIBKRDecimalAt(row, 11, "dividend accrual change total");
+                    continue;
+                }
+
+                if (assetClass != "股票")
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Dividend Accrual Change Asset Class: {FormatIBKRCsvRow(row)}");
+
+                var currency = ParseIBKRCurrencyType(row.Fields[1]);
+                if (currency != baseCurrency)
+                    throw new MailParseException($"Parse IBKR Report Fail, Non-base Dividend Accrual Change: {FormatIBKRCsvRow(row)}");
+
+                var contract = ResolveIBKRContract(row.Fields[2], assetClass, contractInfos);
+                var date = ParseIBKRDate(row.Fields[3]);
+                _ = ParseIBKRDate(row.Fields[4]);
+                _ = ParseIBKRDate(row.Fields[5]);
+                var rawQuantity = ParseIBKRIntegerQuantityAt(row, 6, "dividend accrual quantity");
+                var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity);
+                var tax = Math.Abs(ParseIBKRDecimalAt(row, 7, "dividend accrual tax"));
+                var fee = Math.Abs(ParseIBKRDecimalAt(row, 8, "dividend accrual fee"));
+                var gross = ParseIBKRDecimalAt(row, 10, "dividend accrual gross");
+                var net = ParseIBKRDecimalAt(row, 11, "dividend accrual net");
+                AssertIBKRMoneyEquals(gross - tax - fee, net, "IBKR dividend accrual change net");
+
+                detailTotal += net;
+                builder.Add(
+                    new Currency(net, currency),
+                    "应计股息",
+                    $"DividendAccrualChange/{FormatIBKRCsvRow(row)}",
+                    date: date,
+                    destAccount: contract.Code,
+                    holdingQuantity: quantity);
+            }
+
+            if (reportedTotal.HasValue)
+                AssertIBKRMoneyEquals(reportedTotal.Value, detailTotal, "IBKR dividend accrual change total");
+            if (openingTotal.HasValue && endingTotal.HasValue)
+                AssertIBKRMoneyEquals(endingTotal.Value - openingTotal.Value, detailTotal, "IBKR dividend accrual opening ending");
+
+            return new IBKRInterestTotals(true, detailTotal);
+        }
+
+        private IBKRTransferTotals ParseIBKRTransferRecords(
+            IBKRCsvReport report,
+            IBKRRecordBuilder builder,
+            CurrencyType baseCurrency,
+            Account account,
+            Dictionary<string, IBKRContractInfo> contractInfos)
+        {
+            var rows = report.OptionalDataRows(IBKRTransferSection).ToList();
+            if (rows.Count == 0)
+                return new IBKRTransferTotals(false, 0);
+
+            decimal detailTotal = 0;
+            decimal? reportedMarketValue = null;
+            decimal? reportedRealizedPnl = null;
+            decimal? reportedCashAmount = null;
+            foreach (var row in rows)
+            {
+                AssertIBKRFieldCount(row, 14);
+                var assetClass = row.Fields[0];
+                if (assetClass.StartsWith("总数", StringComparison.Ordinal))
+                {
+                    reportedMarketValue = (reportedMarketValue ?? 0) + ParseIBKRDecimalAt(row, 10, "transfer market value total");
+                    reportedRealizedPnl = (reportedRealizedPnl ?? 0) + ParseIBKRDecimalAt(row, 11, "transfer realized pnl total");
+                    reportedCashAmount = (reportedCashAmount ?? 0) + ParseIBKRDecimalAt(row, 12, "transfer cash amount total");
+                    continue;
+                }
+
+                if (!IBKRAssetGroups.Contains(assetClass))
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Transfer Asset Class: {FormatIBKRCsvRow(row)}");
+
+                var currency = ParseIBKRCurrencyType(row.Fields[1]);
+                if (currency != baseCurrency)
+                    throw new MailParseException($"Parse IBKR Report Fail, Non-base Transfer: {FormatIBKRCsvRow(row)}");
+
+                var type = row.Fields[4];
+                if (type != "内部")
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Transfer Type: {FormatIBKRCsvRow(row)}");
+
+                var direction = row.Fields[5];
+                if (direction is not ("进" or "出"))
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Transfer Direction: {FormatIBKRCsvRow(row)}");
+
+                var contract = ResolveIBKRContract(row.Fields[2], assetClass, contractInfos);
+                var rawQuantity = ParseIBKRIntegerQuantityAt(row, 8, "transfer quantity");
+                var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity);
+                var marketValue = ParseIBKRDecimalAt(row, 10, "transfer market value");
+                var realizedPnl = ParseIBKRDecimalAt(row, 11, "transfer realized pnl");
+                var cashAmount = ParseIBKRDecimalAt(row, 12, "transfer cash amount");
+                if (realizedPnl != 0)
+                    throw new MailParseException($"Parse IBKR Report Fail, Unsupported Transfer Realized P/L: {FormatIBKRCsvRow(row)}");
+
+                var amount = marketValue + cashAmount;
+                detailTotal += amount;
+                builder.Add(
+                    new Currency(amount, currency),
+                    "内部转账",
+                    $"Transfer/{FormatIBKRCsvRow(row)}",
+                    isInternal: true,
+                    date: ParseIBKRDate(row.Fields[3]),
+                    destAccount: BuildIBKRTransferDestAccount(account, row.Fields[7], direction),
+                    holdingQuantity: quantity);
+            }
+
+            var reportedTotal = (reportedMarketValue ?? 0) + (reportedCashAmount ?? 0);
+            if (reportedMarketValue.HasValue || reportedCashAmount.HasValue)
+                AssertIBKRMoneyEquals(reportedTotal, detailTotal, "IBKR transfer total");
+            if (reportedRealizedPnl.HasValue)
+                AssertIBKRMoneyEquals(0, reportedRealizedPnl.Value, "IBKR transfer realized pnl total");
+
+            return new IBKRTransferTotals(true, detailTotal);
+        }
+
+        private static string BuildIBKRTransferDestAccount(Account account, string transferAccount, string direction)
+        {
+            var target = transferAccount.Trim();
+            if (String.IsNullOrWhiteSpace(target) || target == "--")
+                return target;
+            if (!target.StartsWith("IBKR_", StringComparison.OrdinalIgnoreCase))
+                target = $"IBKR_{target}";
+
+            return direction == "出"
+                ? $"{account.name}->{target}"
+                : $"{target}->{account.name}";
+        }
+
         private IBKRCashTotals ParseIBKRCashRecords(
             IBKRCsvReport report,
             IBKRRecordBuilder builder,
@@ -1077,7 +1260,7 @@ namespace MyBook
             if (quantity != 0 && currentPrice * quantity != currentValue)
                 currentPrice = currentValue / quantity;
             if (quantity != 0)
-                AssertIBKRMoneyEquals(currentValue, currentPrice * quantity, $"IBKR holding value {contract.Code}");
+                AssertIBKRMoneyEquals(currentValue, currentPrice * quantity, $"IBKR holding value {contract.Code}", IBKRPrecisionResidualLimit);
 
             var description = String.IsNullOrWhiteSpace(rowDescription) ? contract.Description : rowDescription;
             return new Holding(contract.Code, contract.HoldingType)
@@ -1214,7 +1397,7 @@ namespace MyBook
             {
                 if (label is "开始价值" or "结束价值")
                     continue;
-                if (label is "按市值计价" or "应计利息变更" or "佣金")
+                if (label is "按市值计价" or "持仓转账" or "利息" or "应计利息变更" or "应计股息的变化" or "其它外汇换算" or "佣金")
                 {
                     componentTotal += amount;
                     continue;
@@ -1227,12 +1410,32 @@ namespace MyBook
             return (start, end);
         }
 
+        private static decimal ParseIBKRNavChangeComponent(IBKRCsvReport report, string component)
+        {
+            var row = report.RequireDataRows("净资产值变更")
+                .FirstOrDefault(row => row.Fields.Count > 1 && row.Fields[0] == component);
+            return row is null ? 0 : ParseIBKRDecimalAt(row, 1, $"NAV change component {component}");
+        }
+
+        private static void AddIBKROtherFxTranslationRecord(
+            IBKRCsvReport report,
+            IBKRRecordBuilder builder,
+            CurrencyType baseCurrency)
+        {
+            var amount = ParseIBKRNavChangeComponent(report, "其它外汇换算");
+            builder.Add(
+                new Currency(amount, baseCurrency),
+                "其它外汇换算",
+                $"NAVChange/其它外汇换算/{amount}",
+                destAccount: baseCurrency.ToString());
+        }
+
         private static void ValidateIBKRNavTotals(IBKRCsvReport report, decimal start, decimal end)
         {
             var totalRow = FindIBKRNavRow(report, "总数");
             AssertIBKRMoneyEquals(start, ParseIBKRDecimalAt(totalRow, 1, "NAV previous total"), "IBKR NAV previous total");
             AssertIBKRMoneyEquals(end, ParseIBKRDecimalAt(totalRow, 4, "NAV current total"), "IBKR NAV current total");
-            AssertIBKRMoneyEquals(end - start, ParseIBKRDecimalAt(totalRow, 5, "NAV change"), "IBKR NAV total change");
+            AssertIBKRMoneyEquals(end - start, ParseIBKRDecimalAt(totalRow, 5, "NAV change"), "IBKR NAV total change", IBKRPrecisionResidualLimit);
 
             decimal previousTotal = 0;
             decimal currentLongTotal = 0;
@@ -1292,6 +1495,13 @@ namespace MyBook
             return row is null ? 0 : ParseIBKRDecimalAt(row, 5, $"NAV component change {component}");
         }
 
+        private static decimal? TryParseIBKRNavComponentChange(IBKRCsvReport report, string component)
+        {
+            var row = report.RequireDataRows("净资产值")
+                .FirstOrDefault(row => row.Fields.Count > 5 && row.Fields[0] == component);
+            return row is null ? null : ParseIBKRDecimalAt(row, 5, $"NAV component change {component}");
+        }
+
         private static IBKRCsvRow FindIBKRNavRow(IBKRCsvReport report, string label)
         {
             return report.RequireDataRows("净资产值")
@@ -1340,21 +1550,23 @@ namespace MyBook
             foreach (var (sectionName, section) in report.Sections)
             {
                 var expectedHeaders = IBKRCsvHeaders[sectionName];
-                if (section.HeaderRows.Count != expectedHeaders.Length)
+                if (section.HeaderRows.Count < expectedHeaders.Length
+                    || section.HeaderRows.Count % expectedHeaders.Length != 0)
                 {
                     throw new MailParseException(
                         $"Parse IBKR Report Fail, Header Count Mismatch: {sectionName}, expected={expectedHeaders.Length}, actual={section.HeaderRows.Count}");
                 }
 
-                for (var i = 0; i < expectedHeaders.Length; i++)
+                for (var i = 0; i < section.HeaderRows.Count; i++)
                 {
                     if (sectionName == "现金报告" && IsKnownIBKRCashReportHeaders(section.HeaderRows))
                         continue;
 
-                    if (!section.HeaderRows[i].Fields.SequenceEqual(expectedHeaders[i], StringComparer.Ordinal))
+                    var expectedHeader = expectedHeaders[i % expectedHeaders.Length];
+                    if (!section.HeaderRows[i].Fields.SequenceEqual(expectedHeader, StringComparer.Ordinal))
                     {
                         throw new MailParseException(
-                            $"Parse IBKR Report Fail, Header Mismatch: {sectionName}, expected={String.Join("|", expectedHeaders[i])}, actual={String.Join("|", section.HeaderRows[i].Fields)}");
+                            $"Parse IBKR Report Fail, Header Mismatch: {sectionName}, expected={String.Join("|", expectedHeader)}, actual={String.Join("|", section.HeaderRows[i].Fields)}");
                     }
                 }
             }
@@ -1391,7 +1603,7 @@ namespace MyBook
 
             ValidateIBKRStockYieldEnhancementLoanSection(report);
             var interestTotal = ValidateIBKRMoneyDetailSection(report, IBKRInterestSection, 4);
-            var bondInterestTotal = ValidateIBKRMoneyDetailSection(report, IBKRBondInterestReceivedSection, 5);
+            var bondInterestTotal = ValidateIBKRMoneyDetailSection(report, IBKRBondInterestReceivedSection, 5, 3);
             if (interestTotal.HasValue && bondInterestTotal.HasValue)
                 AssertIBKRMoneyEquals(interestTotal.Value, bondInterestTotal.Value, "IBKR interest detail sections", IBKRPrecisionResidualLimit);
         }
@@ -1443,12 +1655,17 @@ namespace MyBook
             }
         }
 
-        private static decimal? ValidateIBKRMoneyDetailSection(IBKRCsvReport report, string sectionName, int fieldCount)
+        private static decimal? ValidateIBKRMoneyDetailSection(
+            IBKRCsvReport report,
+            string sectionName,
+            int fieldCount,
+            int? totalAmountIndex = null)
         {
             var rows = report.OptionalDataRows(sectionName).ToList();
             if (rows.Count == 0)
                 return null;
 
+            var totalIndex = totalAmountIndex ?? fieldCount - 1;
             decimal total = 0;
             decimal? reportedTotal = null;
             foreach (var row in rows)
@@ -1458,10 +1675,15 @@ namespace MyBook
                 {
                     if (reportedTotal.HasValue)
                         throw new MailParseException($"Parse IBKR Report Fail, Duplicate {sectionName} Total: {FormatIBKRCsvRow(row)}");
-                    if (row.Fields.Skip(1).Take(fieldCount - 2).Any(field => !String.IsNullOrWhiteSpace(field)))
+                    if (row.Fields
+                        .Select((field, index) => (field, index))
+                        .Where(item => item.index != 0 && item.index != totalIndex)
+                        .Any(item => !String.IsNullOrWhiteSpace(item.field)))
+                    {
                         throw new MailParseException($"Parse IBKR Report Fail, Invalid {sectionName} Total: {FormatIBKRCsvRow(row)}");
+                    }
 
-                    reportedTotal = ParseIBKRDecimalAt(row, fieldCount - 1, $"{sectionName} total");
+                    reportedTotal = ParseIBKRDecimalAt(row, totalIndex, $"{sectionName} total");
                     continue;
                 }
 
@@ -1798,6 +2020,8 @@ namespace MyBook
         private sealed record IBKRInterestTotals(bool HasData, decimal Total);
 
         private sealed record IBKRCashTotals(decimal Commission, decimal TradeBuy, decimal TradeSell);
+
+        private sealed record IBKRTransferTotals(bool HasData, decimal Total);
 
         private sealed record IBKRReportAttachmentInfo(string ReportType, string ReportId, DateTime ReportDate);
 
