@@ -13,6 +13,7 @@ namespace MyBook
         private const string DatabaseWriteLockName = "MyBook.DatabaseWrite";
         private const int DatabaseWriteLockTimeoutSeconds = 300;
         private const int CurrentSnapshotSchemaVersion = 1;
+        private const int InternalTransferMatchWindowDays = 14;
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
         private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
@@ -24,6 +25,7 @@ namespace MyBook
             new("fk_Holdings_account", "Holdings", "_account_Id", "Accounts", "Id"),
             new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
             new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id"),
+            new("fk_Records_matchedRecord", "Records", "matchedRecordId", "Records", "Id"),
             new("fk_SnapshotItems_snapshot", "SnapshotItems", "_snapshot_Id", "Snapshots", "Id"),
             new("fk_SnapshotItems_account", "SnapshotItems", "_account_Id", "Accounts", "Id")
         ];
@@ -179,6 +181,7 @@ namespace MyBook
                         AddAccountBalanceDeltas(recordList);
 
                     afterSaveInTransaction?.Invoke(statementImportId);
+                    MatchInternalTransfersAroundStatement(statementImportId);
                     return true;
                 });
             }
@@ -219,6 +222,7 @@ namespace MyBook
                     SaveAccountHoldingsCore(import.HoldingAccount, import.Holdings);
                     SaveRecordsCore(import.Records, statementImportId);
                     EnsureAccountInternalCardNos(import.InternalCardNos);
+                    MatchInternalTransfersAroundStatement(statementImportId);
                     saved.Add(true);
                 }
 
@@ -262,6 +266,8 @@ namespace MyBook
                         Date = record.date,
                         DestAccount = record.DestAccount,
                         IsInternal = record.isInternal,
+                        MatchedRecordId = record.matchedRecordId,
+                        MatchedRecordReason = record.matchedRecordReason,
                         IsRefundMatched = record.isRefundMatched,
                         HoldingQuantity = record.HoldingQuantity,
                         Source = record.Source,
@@ -485,6 +491,174 @@ namespace MyBook
             }
         }
 
+        private void MatchInternalTransfersAroundStatement(int statementImportId)
+        {
+            var importedRecords = GetRecordsByStatementImport(statementImportId);
+            if (importedRecords.Count == 0)
+                return;
+
+            var start = importedRecords.Min(record => record.date).AddDays(-InternalTransferMatchWindowDays);
+            var end = importedRecords.Max(record => record.date).AddDays(InternalTransferMatchWindowDays);
+            var records = db.Queryable<Record>()
+                .Where(record => record.matchedRecordId == null
+                    && !record.isRefundMatched
+                    && record.date >= start
+                    && record.date <= end)
+                .ToList();
+            if (records.Count < 2)
+                return;
+
+            var accountsByName = db.Queryable<Account>()
+                .ToList()
+                .ToDictionary(account => account.name, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var anchor in records
+                         .Where(record => record.isInternal && record.matchedRecordId is null)
+                         .OrderBy(record => record.date)
+                         .ThenBy(record => record.Id)
+                         .ToList())
+            {
+                if (anchor.matchedRecordId is not null)
+                    continue;
+
+                if (TryMatchCurrencyExchange(anchor, records))
+                    continue;
+
+                TryMatchInternalTransfer(anchor, records, accountsByName);
+            }
+        }
+
+        private bool TryMatchCurrencyExchange(Record anchor, List<Record> records)
+        {
+            var conversionCode = ExtractRecordSourceCode(anchor.Source);
+            if (String.IsNullOrWhiteSpace(conversionCode)
+                || !conversionCode.StartsWith("BALANCE-", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var candidates = records
+                .Where(record => record.Id != anchor.Id
+                    && record.matchedRecordId is null
+                    && record._statementImport_Id != anchor._statementImport_Id
+                    && record.isInternal
+                    && !record.isRefundMatched
+                    && HasOppositeSigns(anchor.v, record.v)
+                    && String.Equals(ExtractRecordSourceCode(record.Source), conversionCode, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (candidates.Count != 1)
+                return false;
+
+            MatchInternalTransferPair(anchor, candidates[0], $"SameConversionCode:{conversionCode}");
+            return true;
+        }
+
+        private bool TryMatchInternalTransfer(
+            Record anchor,
+            List<Record> records,
+            Dictionary<string, Account> accountsByName)
+        {
+            if (anchor.v == 0)
+                return false;
+
+            var targetAccount = ResolveInternalTransferTargetAccount(anchor, accountsByName);
+            if (targetAccount is null || targetAccount.Id == anchor._account_Id)
+                return false;
+
+            var start = anchor.date.AddDays(-InternalTransferMatchWindowDays);
+            var end = anchor.date.AddDays(InternalTransferMatchWindowDays);
+            var candidates = records
+                .Where(record => record.Id != anchor.Id
+                    && record.matchedRecordId is null
+                    && record._statementImport_Id != anchor._statementImport_Id
+                    && !record.isRefundMatched
+                    && record._account_Id == targetAccount.Id
+                    && record.t == anchor.t
+                    && record.v == -anchor.v
+                    && record.date >= start
+                    && record.date <= end)
+                .ToList();
+            if (candidates.Count != 1)
+                return false;
+
+            MatchInternalTransferPair(anchor, candidates[0], "CounterpartyAccountAmountDate");
+            return true;
+        }
+
+        private Account? ResolveInternalTransferTargetAccount(
+            Record record,
+            Dictionary<string, Account> accountsByName)
+        {
+            if (TryResolveCounterpartyName(record, out var counterpartyName)
+                && accountsByName.TryGetValue(counterpartyName, out var namedAccount)
+                && !IsUnknownAccount(namedAccount))
+            {
+                return GetPostingAccount(namedAccount);
+            }
+
+            var matchedAccount = FindAccountByInternalCardNoText(
+                null,
+                $"record {record.Id} internal transfer match",
+                record.DestAccount);
+            if (matchedAccount is null || IsUnknownAccount(matchedAccount))
+                return null;
+
+            return GetPostingAccount(matchedAccount);
+        }
+
+        private static bool TryResolveCounterpartyName(Record record, out string counterpartyName)
+        {
+            counterpartyName = "";
+            var destAccount = record.DestAccount.Trim();
+            if (String.IsNullOrWhiteSpace(destAccount))
+                return false;
+
+            var parts = destAccount.Split("->", 2, StringSplitOptions.TrimEntries);
+            if (parts.Length == 2)
+            {
+                counterpartyName = record.v < 0 ? parts[1] : parts[0];
+                return !String.IsNullOrWhiteSpace(counterpartyName);
+            }
+
+            counterpartyName = destAccount;
+            return true;
+        }
+
+        private void MatchInternalTransferPair(Record left, Record right, string reason)
+        {
+            if (left.Id == right.Id)
+                throw new InvalidOperationException($"Record cannot match itself: {left.Id}");
+            if (left.matchedRecordId is not null || right.matchedRecordId is not null)
+                return;
+
+            var updateTime = DateTime.Now;
+            left.matchedRecordId = right.Id;
+            left.matchedRecordReason = reason;
+            left.updateTime = updateTime;
+            right.matchedRecordId = left.Id;
+            right.matchedRecordReason = reason;
+            right.updateTime = updateTime;
+
+            db.Updateable(left)
+                .UpdateColumns(record => new { record.matchedRecordId, record.matchedRecordReason, record.updateTime })
+                .ExecuteCommand();
+            db.Updateable(right)
+                .UpdateColumns(record => new { record.matchedRecordId, record.matchedRecordReason, record.updateTime })
+                .ExecuteCommand();
+        }
+
+        private static bool HasOppositeSigns(decimal left, decimal right)
+        {
+            return left != 0 && right != 0 && Math.Sign(left) == -Math.Sign(right);
+        }
+
+        private static string ExtractRecordSourceCode(string source)
+        {
+            var match = Regex.Match(
+                source ?? "",
+                @"(?:^|;\s*)code=(?<code>[^;]+)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return match.Success ? match.Groups["code"].Value.Trim() : "";
+        }
+
         private static DateTime NormalizeRecordDetailDate(DateTime date)
         {
             if (date.Year < 1900)
@@ -510,6 +684,8 @@ namespace MyBook
                     record.updateTime,
                     record.DestAccount,
                     record.isInternal,
+                    record.matchedRecordId,
+                    record.matchedRecordReason,
                     record.isRefundMatched,
                     record.HoldingQuantity,
                     record.Source,
@@ -1142,7 +1318,7 @@ namespace MyBook
                 .Select(reasonFirstMonth.AddMonths)
                 .ToList();
             var records = db.Queryable<Record>()
-                .Where(record => !record.isInternal && !record.isRefundMatched && record.date >= reasonFirstMonth && record.date < nextMonth)
+                .Where(record => !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.date >= reasonFirstMonth && record.date < nextMonth)
                 .ToList();
             var accountList = db.Queryable<Account>().ToList();
             var lifeAccountIds = accountList
@@ -1161,7 +1337,7 @@ namespace MyBook
                 .Select(account => account.Id)
                 .ToHashSet();
             var investmentRecords = db.Queryable<Record>()
-                .Where(record => !record.isInternal && !record.isRefundMatched && record.v > 0 && record.date < today.Date.AddDays(1))
+                .Where(record => !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.v > 0 && record.date < today.Date.AddDays(1))
                 .ToList()
                 .Where(record => investmentAccountIds.Contains(record._account_Id))
                 .ToList();
@@ -1334,6 +1510,7 @@ namespace MyBook
             var targetEnd = targetDate.Date.AddDays(1);
             var records = db.Queryable<Record>()
                 .Where(record => !record.isInternal
+                    && record.matchedRecordId == null
                     && !record.isRefundMatched
                     && record.date > baseDate
                     && record.date < targetEnd)
@@ -1977,6 +2154,7 @@ namespace MyBook
                         on snapshot.`Id` = fixedSnapshot.`Id`
                     where fixedSnapshot.`Id` is null
                     """);
+                ClearAllRecordMatches();
                 db.Deleteable<Record>().ExecuteCommand();
                 db.Deleteable<Holding>().ExecuteCommand();
                 db.Deleteable<AccountBalance>().ExecuteCommand();
@@ -2014,6 +2192,7 @@ namespace MyBook
             ExecuteLockedTransaction(() =>
             {
                 var wiseAccount = GetAccountByName("WISE");
+                ClearRecordMatchesForStatementProvider(StatementImportProvider.WiseMail);
                 db.Ado.ExecuteCommand("""
                     delete record
                     from `Records` record
@@ -2053,6 +2232,35 @@ namespace MyBook
                         .ExecuteCommand();
                 }
             });
+        }
+
+        private void ClearAllRecordMatches()
+        {
+            db.Ado.ExecuteCommand("""
+                update `Records`
+                set `matchedRecordId` = null,
+                    `matchedRecordReason` = ''
+                where `matchedRecordId` is not null
+                    or `matchedRecordReason` <> ''
+                """);
+        }
+
+        private void ClearRecordMatchesForStatementProvider(StatementImportProvider provider)
+        {
+            db.Ado.ExecuteCommand("""
+                update `Records` record
+                left join `Records` matchedRecord
+                    on record.`matchedRecordId` = matchedRecord.`Id`
+                left join `StatementImports` recordImport
+                    on record.`_statementImport_Id` = recordImport.`Id`
+                left join `StatementImports` matchedImport
+                    on matchedRecord.`_statementImport_Id` = matchedImport.`Id`
+                set record.`matchedRecordId` = null,
+                    record.`matchedRecordReason` = ''
+                where recordImport.`provider` = @provider
+                    or matchedImport.`provider` = @provider
+                """,
+                new SugarParameter("@provider", provider.ToString()));
         }
 
         private Dictionary<string, int> ReadCleanupCounts()
@@ -2379,6 +2587,8 @@ namespace MyBook
             DateTime UpdateTime,
             string DestAccount,
             bool IsInternal,
+            int? MatchedRecordId,
+            string MatchedRecordReason,
             bool IsRefundMatched,
             int HoldingQuantity,
             string Source,

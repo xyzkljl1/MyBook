@@ -303,11 +303,20 @@ namespace MyBook
         [Navigate(NavigateType.ManyToOne, nameof(_statementImport_Id), nameof(MyBook.StatementImport.Id))]
         public StatementImport? StatementImport { get; set; }
 
+        [Navigate(NavigateType.ManyToOne, nameof(matchedRecordId), nameof(MyBook.Record.Id))]
+        public Record? MatchedRecord { get; set; }
+
         [SugarColumn(DefaultValue = "''")]
         public string DestAccount { get; set; } = ""; // 对方账户描述
 
         [SugarColumn(DefaultValue = "0")]
-        public bool isInternal { get; set; } = false; // 是否自己账户间的交易
+        public bool isInternal { get; set; } = false; // 原始账单/解析逻辑直接确认的内部交易。
+
+        [SugarColumn(IsNullable = true)]
+        public int? matchedRecordId { get; set; } = null; // 跨账单一对一匹配到的另一侧内部交易记录。
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(1024)")]
+        public string matchedRecordReason { get; set; } = ""; // 跨账单匹配依据，仅用英文原因标识。
 
         [SugarColumn(DefaultValue = "0")]
         public bool isRefundMatched { get; set; } = false; // 是否已匹配到对应退款/消费；默认不计入界面统计图表。

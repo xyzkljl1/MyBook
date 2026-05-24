@@ -718,6 +718,8 @@ namespace MyBook
         public string DestAccount { get; set; } = "";
         public int HoldingQuantity { get; set; }
         public bool IsInternal { get; set; }
+        public int? MatchedRecordId { get; set; }
+        public string MatchedRecordReason { get; set; } = "";
         public bool IsRefundMatched { get; set; }
         public string Source { get; set; } = "";
         public StatementImportProvider StatementProvider { get; set; }
@@ -741,6 +743,8 @@ namespace MyBook
                 DestAccount = data.DestAccount,
                 HoldingQuantity = data.HoldingQuantity,
                 IsInternal = data.IsInternal,
+                MatchedRecordId = data.MatchedRecordId,
+                MatchedRecordReason = data.MatchedRecordReason,
                 IsRefundMatched = data.IsRefundMatched,
                 Source = data.Source,
                 StatementProvider = data.StatementProvider,
