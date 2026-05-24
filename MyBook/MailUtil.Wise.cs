@@ -1,500 +1,583 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Xml.Linq;
 using MailKit.Search;
 using MimeKit;
 
 namespace MyBook
 {
-    // Wise mail discovery and parsing. Wise mails only provide balance deltas,
-    // so imports save Records without updating AccountBalances.
+    // Wise monthly XML statement discovery and parsing. XML statements contain exact
+    // opening/closing balances, so imports save Records and AccountBalances together.
     partial class MailUtil
     {
         private const StatementImportProvider WiseProvider = StatementImportProvider.WiseMail;
         private const string WiseMailSender = "noreply@wise.com";
         private const string WiseAccountName = "WISE";
-        private const string WiseSgdOwnIncomingSourceAccount = "OCBC";
-        private const string WisePaypalSourceAccount = "PAYPAL_US";
-        private const string WiseRmbUnknownRecipientName = "Wise汇款收款方";
-        private const string WiseRmbUnknownRecipientAccount = "Alipay";
-        private const string WiseReceivedFundsDestinationAccount = "OCBC";
-
-        private static readonly DateTime WiseSearchStartDate = new(2025, 1, 1);
-        private static readonly string[] WisePaypalCounterpartyNames = ["PAYPAL"];
-        private static readonly string[] WiseTransactionSubjectKeywords =
-        [
-            "付款",
-            "汇款",
-            "款项",
-            "消费",
-            "充值"
-        ];
+        private static readonly XNamespace WiseCamtNamespace = "urn:iso:std:iso:20022:tech:xsd:camt.053.001.10";
+        private static readonly Regex WiseStatementFileNameRegex = new(
+            @"^statement_(?<statementId>[^_]+)_(?<currency>[A-Z]{3})_(?<from>\d{4}-\d{2}-\d{2})_(?<to>\d{4}-\d{2}-\d{2})\.xml$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex WiseConvertedRegex = new(
+            @"^Converted\s+(?<fromAmount>[\d,]+(?:\.\d+)?)\s+(?<fromCurrency>[A-Z]{3})\s+to\s+(?<toAmount>[\d,]+(?:\.\d+)?)\s+(?<toCurrency>[A-Z]{3})(?:\s+\(fee:\s+(?<feeAmount>[\d,]+(?:\.\d+)?)\s+(?<feeCurrency>[A-Z]{3})\))?$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex WiseSentMoneyRegex = new(
+            @"^Sent money to\s+(?<counterparty>.+?)(?:\s+\(fee:\s+(?<feeAmount>[\d,]+(?:\.\d+)?)\s+(?<feeCurrency>[A-Z]{3})\))?$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex WiseReceivedMoneyRegex = new(
+            @"^Received money from\s+(?<counterparty>.+?)(?:\s+with reference.*)?$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex WiseCardTransactionRegex = new(
+            @"^Card transaction of\s+(?<amount>[\d,]+(?:\.\d+)?)\s+(?<currency>[A-Z]{3})\s+issued by\s+(?<merchant>.+)$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex WiseDirectDebitRegex = new(
+            @"^Paid to\s+(?<counterparty>.+)$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         public async Task FetchWiseReports()
         {
-            await FetchWiseReports(WiseSearchStartDate, DateTime.Today.AddDays(1));
+            await FetchMonthlyStatements(WiseProvider, "Wise statement", FetchWiseReport);
         }
 
         public async Task FetchWiseReports(DateTime date)
         {
-            var range = GetMonthRange(date);
-            await FetchWiseReports(range.Since, range.Before);
+            await FetchWiseReport(date);
         }
 
-        private async Task FetchWiseReports(DateTime since, DateTime before)
+        public void DebugFetchLocalWiseReports(string? directory = null)
         {
-            var account = database.GetAccountByName(WiseAccountName);
-            var settings = ReadWiseSettings();
-            var messages = await SearchWiseMails(since, before);
-            Console.WriteLine($"Fetch Wise mails: {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}, count={messages.Count}");
+            var files = FindLocalWiseStatementXmlFiles(directory);
+            var attachments = files
+                .Select(file => new InMemoryWiseStatementAttachment(
+                    Path.GetFileName(file),
+                    null,
+                    File.ReadAllBytes(file)))
+                .ToList();
+            var parsed = ParseWiseStatementAttachments(attachments)
+                .OrderBy(statement => statement.StatementStartDate)
+                .ThenBy(statement => statement.StatementEndDate)
+                .ToList();
+            if (parsed.Count != 1)
+                throw new MailParseException($"Local Wise XML test expects exactly one statement group, actual={parsed.Count}");
 
-            var savedCount = 0;
-            var skippedCount = 0;
-            var recordCount = 0;
-            foreach (var parsed in ParseWiseMails(messages, account, settings))
-            {
-                var saved = database.SaveStatementRecordsOnce(
-                    WiseProvider,
-                    parsed.Time,
-                    parsed.Records,
-                    statementKey: parsed.StatementKey);
-                if (saved)
-                {
-                    savedCount++;
-                    recordCount += parsed.Records.Count;
-                    Console.WriteLine($"Import Wise mail {parsed.Time:yyyy-MM-dd} {parsed.StatementKey}, records={parsed.Records.Count}");
-                }
-                else
-                {
-                    skippedCount++;
-                    Console.WriteLine($"Skip imported Wise mail {parsed.Time:yyyy-MM-dd} {parsed.StatementKey}");
-                }
-            }
-
-            Console.WriteLine($"Fetch Wise mails done: saved={savedCount}, skipped={skippedCount}, records={recordCount}");
+            var saved = SaveWiseParsedStatement(parsed[0]);
+            PrintWiseParsedStatementSummary("Local Wise XML", parsed[0], saved);
         }
 
-        private async Task<List<MimeMessage>> SearchWiseMails(DateTime since, DateTime before)
+        private async Task<bool> FetchWiseReport(DateTime date)
+        {
+            var statementMonth = FirstDayOfMonth(date);
+            var messages = await SearchWiseStatementMails(statementMonth);
+            var attachments = messages
+                .SelectMany(ReadWiseStatementAttachments)
+                .ToList();
+            if (attachments.Count == 0)
+                return false;
+
+            var statements = ParseWiseStatementAttachments(attachments)
+                .Where(statement => FirstDayOfMonth(statement.StatementEndDate) == statementMonth)
+                .OrderBy(statement => statement.StatementEndDate)
+                .ToList();
+            if (statements.Count == 0)
+                return false;
+            if (statements.Count > 1)
+                throw new MailParseException($"Found multiple Wise XML statements for {statementMonth:yyyy-MM}");
+
+            var saved = SaveWiseParsedStatement(statements[0]);
+            PrintWiseParsedStatementSummary($"Wise XML {statementMonth:yyyy-MM}", statements[0], saved);
+            return true;
+        }
+
+        private async Task<List<MimeMessage>> SearchWiseStatementMails(DateTime statementMonth)
         {
             var query = SearchQuery.FromContains(WiseMailSender)
-                .And(SearchQuery.SentSince(since.Date))
-                .And(SearchQuery.SentBefore(before.Date));
+                .And(SearchQuery.SentSince(statementMonth.Date))
+                .And(SearchQuery.SentBefore(statementMonth.AddMonths(2).Date));
             return await SearchMessages(
-                $"Wise {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}",
+                $"Wise XML statement {statementMonth:yyyy-MM}",
                 query,
-                IsWiseTransactionMail,
+                IsWiseStatementMail,
                 GetMailDateTime);
         }
 
-        private static bool IsWiseTransactionMail(MimeMessage message)
+        private static bool IsWiseStatementMail(MimeMessage message)
         {
-            return IsWiseMail(message)
-                && WiseTransactionSubjectKeywords.Any(keyword =>
-                    message.Subject?.Contains(keyword, StringComparison.OrdinalIgnoreCase) == true);
+            return IsFrom(message, WiseMailSender)
+                && message.Attachments.Any(IsWiseXmlStatementAttachment);
         }
 
-        private static bool IsWiseMail(MimeMessage message)
+        private static bool IsWiseXmlStatementAttachment(MimeEntity attachment)
         {
-            return IsFrom(message, WiseMailSender);
+            var fileName = GetAttachmentFileName(attachment);
+            return fileName.StartsWith("statement_", StringComparison.OrdinalIgnoreCase)
+                && Path.GetExtension(fileName).Equals(".xml", StringComparison.OrdinalIgnoreCase);
         }
 
-        private List<WiseParsedMail> ParseWiseMails(List<MimeMessage> messages, Account account, WiseSettings settings)
+        private static List<InMemoryWiseStatementAttachment> ReadWiseStatementAttachments(MimeMessage message)
         {
-            return messages
-                .Select(message => ParseWiseMail(message, account, settings))
-                .Where(parsed => parsed is not null)
-                .Cast<WiseParsedMail>()
-                .GroupBy(parsed => parsed.StatementKey, StringComparer.Ordinal)
-                .Select(group => group
-                    .OrderByDescending(parsed => parsed.Priority)
-                    .ThenByDescending(parsed => parsed.Time)
-                    .First())
-                .OrderBy(parsed => parsed.Time)
-                .ThenBy(parsed => parsed.StatementKey, StringComparer.Ordinal)
+            return message.Attachments
+                .OfType<MimePart>()
+                .Where(IsWiseXmlStatementAttachment)
+                .Select(attachment => new InMemoryWiseStatementAttachment(
+                    GetAttachmentFileName(attachment),
+                    GetMailDate(message),
+                    ReadMimePartBytes(attachment)))
                 .ToList();
         }
 
-        private WiseParsedMail? ParseWiseMail(MimeMessage message, Account account, WiseSettings settings)
+        private List<string> FindLocalWiseStatementXmlFiles(string? directory)
         {
-            if (!IsWiseTransactionMail(message))
-                return null;
-
-            var subject = NormalizeWiseText(message.Subject ?? "");
-            var text = NormalizeWiseText(GetMessageText(message));
-            var time = GetMailDateTime(message);
-            var source = $"Wise mail: {subject}";
-            var statementKey = BuildWiseStatementKey(message, subject, text);
-
-            if (TryParseWiseBalanceTopUp(text, out var topUpAmount))
-            {
-                return CreateParsedMail(
-                    time,
-                    statementKey,
-                    WiseImportPriority.Normal,
-                    [CreateWiseRecord(account, time, topUpAmount, "Wise余额充值来源", "余额充值", false, source)]);
-            }
-
-            if (TryParseWiseDirectPayment(subject, text, out var directCounterparty, out var directAmount))
-            {
-                var classification = ClassifyWiseCounterparty(
-                    settings,
-                    account,
-                    directCounterparty,
-                    directAmount,
-                    false,
-                    $"{source}; statementKey={statementKey}; counterparty={directCounterparty}; amount={directAmount.v} {directAmount.t}");
-                return CreateParsedMail(
-                    time,
-                    statementKey,
-                    WiseImportPriority.Normal,
-                    [CreateWiseRecord(
-                        account,
-                        time,
-                        Negate(directAmount),
-                        classification.CounterpartyText,
-                        "直接付款",
-                        classification.IsInternal,
-                        source)]);
-            }
-
-            if (TryParseWiseIncoming(text, out var incomingCounterparty, out var incomingAmount))
-            {
-                var classification = ClassifyWiseCounterparty(
-                    settings,
-                    account,
-                    incomingCounterparty,
-                    incomingAmount,
-                    true,
-                    $"{source}; statementKey={statementKey}; counterparty={incomingCounterparty}; amount={incomingAmount.v} {incomingAmount.t}");
-                return CreateParsedMail(
-                    time,
-                    statementKey,
-                    WiseImportPriority.Normal,
-                    [CreateWiseRecord(
-                        account,
-                        time,
-                        incomingAmount,
-                        classification.CounterpartyText,
-                        GetWiseIncomingReason(subject, incomingCounterparty),
-                        classification.IsInternal,
-                        source)]);
-            }
-
-            if (TryParseWiseReceivedFunds(text, out var sourceAmount, out var receivedAmount, out var fee))
-            {
-                if (fee.t != sourceAmount.t)
-                    throw new MailParseException($"Wise fee currency mismatch: {fee.v}/{fee.t}, source={sourceAmount.v}/{sourceAmount.t}");
-                if (fee.v < 0 || fee.v > sourceAmount.v)
-                    throw new MailParseException($"Invalid Wise fee: {fee.v}/{fee.t}, source={sourceAmount.v}/{sourceAmount.t}");
-
-                var transferAmount = new Currency(sourceAmount.v - fee.v, sourceAmount.t);
-                var counterparty = FormatTransferCounterparty(WiseAccountName, WiseReceivedFundsDestinationAccount);
-                var records = new List<Record>();
-                if (transferAmount.v > 0)
+            var directories = new[]
                 {
-                    records.Add(CreateWiseRecord(
-                        account,
-                        time,
-                        Negate(transferAmount),
-                        counterparty,
-                        "款项汇出",
-                        true,
-                        source));
+                    directory,
+                    Path.Combine(Directory.GetCurrentDirectory(), "archive"),
+                    Path.Combine(Directory.GetCurrentDirectory(), "..", "archive"),
+                    Directory.GetCurrentDirectory()
                 }
+                .Where(value => !String.IsNullOrWhiteSpace(value))
+                .Select(value => Path.GetFullPath(value!))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(Directory.Exists)
+                .ToList();
 
-                if (fee.v > 0)
+            var files = directories
+                .SelectMany(dir => Directory.GetFiles(dir, "statement_*.xml"))
+                .Where(file => WiseStatementFileNameRegex.IsMatch(Path.GetFileName(file)))
+                .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (files.Count == 0)
+                throw new FileNotFoundException("No local Wise XML statement found.");
+
+            return files;
+        }
+
+        private List<WiseParsedStatement> ParseWiseStatementAttachments(List<InMemoryWiseStatementAttachment> attachments)
+        {
+            var account = database.GetAccountByName(WiseAccountName);
+            var currencyStatements = attachments
+                .Select(attachment => ParseWiseCurrencyStatement(attachment, account))
+                .ToList();
+            if (currencyStatements.Count == 0)
+                throw new MailParseException("Wise XML statement contains no currency statements.");
+
+            return currencyStatements
+                .GroupBy(statement => new
                 {
-                    records.Add(CreateWiseRecord(
-                        account,
-                        time,
-                        Negate(fee),
-                        counterparty,
-                        "手续费",
-                        false,
-                        source));
-                }
-
-                return CreateParsedMail(
-                    time,
-                    statementKey,
-                    WiseImportPriority.Detailed,
-                    records);
-            }
-
-            if (TryParseWiseCardPayment(subject, text, out var merchant, out var cardAmount))
-            {
-                return CreateParsedMail(
-                    time,
-                    statementKey,
-                    WiseImportPriority.Normal,
-                    [CreateWiseRecord(account, time, Negate(cardAmount), merchant, "消费", false, source)]);
-            }
-
-            if (TryParseWiseOutgoing(text, out var outgoingCounterparty, out var outgoingAmount, out var outgoingFee, out var outgoingInternal, out var isPendingConversion))
-            {
-                if (isPendingConversion)
-                    return null;
-
-                var classification = ClassifyWiseCounterparty(
-                    settings,
-                    account,
-                    outgoingCounterparty,
-                    outgoingAmount,
-                    false,
-                    $"{source}; statementKey={statementKey}; counterparty={outgoingCounterparty}; amount={outgoingAmount.v} {outgoingAmount.t}");
-                var records = new List<Record>
-                {
-                    CreateWiseRecord(
-                        account,
-                        time,
-                        Negate(outgoingAmount),
-                        classification.CounterpartyText,
-                        GetWiseOutgoingReason(subject, outgoingCounterparty),
-                        outgoingInternal || classification.IsInternal,
-                        source)
-                };
-
-                if (outgoingFee.v > 0)
-                {
-                    records.Add(CreateWiseRecord(
-                        account,
-                        time,
-                        Negate(outgoingFee),
-                        classification.CounterpartyText,
-                        "手续费",
-                        false,
-                        source));
-                }
-
-                return CreateParsedMail(
-                    time,
-                    statementKey,
-                    WiseImportPriority.Pending,
-                    records);
-            }
-
-            throw new MailParseException($"Unsupported Wise mail format: subject={subject}; text={TrimForError(text)}");
+                    statement.StatementStartDate,
+                    statement.StatementEndDate,
+                    statement.CustomerId
+                })
+                .Select(group => BuildWiseParsedStatement(group.ToList()))
+                .ToList();
         }
 
-        private static WiseParsedMail CreateParsedMail(
-            DateTime time,
-            string statementKey,
-            WiseImportPriority priority,
-            List<Record> records)
+        private WiseParsedStatement BuildWiseParsedStatement(List<WiseCurrencyStatement> statements)
         {
-            if (records.Count == 0)
-                throw new MailParseException($"Wise mail contains no records: {statementKey}");
+            var first = statements[0];
+            var duplicateCurrency = statements
+                .GroupBy(statement => statement.Currency)
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicateCurrency is not null)
+                throw new MailParseException($"Duplicate Wise XML currency statement: {duplicateCurrency.Key}");
 
-            return new WiseParsedMail(time, statementKey, records, priority);
+            var statementKey = first.StatementEndDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            var importTime = statements
+                .Select(statement => statement.ImportTime)
+                .Where(time => time.HasValue)
+                .DefaultIfEmpty(first.StatementEndDate)
+                .Max()!.Value
+                .Date;
+
+            return new WiseParsedStatement(
+                first.StatementStartDate,
+                first.StatementEndDate,
+                importTime,
+                statementKey,
+                first.Account,
+                statements.SelectMany(statement => statement.Records)
+                    .OrderBy(record => record.date)
+                    .ThenBy(record => record.Source, StringComparer.Ordinal)
+                    .ToRecords(),
+                statements.Select(statement => new AccountBalance(first.Account, statement.BeginningBalance)).ToList(),
+                statements.Select(statement => new AccountBalance(first.Account, statement.EndingBalance)).ToList(),
+                statements.SelectMany(statement => statement.InternalCardNos).ToList());
         }
 
-        private static bool TryParseWiseBalanceTopUp(string text, out Currency amount)
+        private WiseCurrencyStatement ParseWiseCurrencyStatement(
+            InMemoryWiseStatementAttachment attachment,
+            Account account)
         {
-            var match = Regex.Match(
-                text,
-                @"您已充值了\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})\s*至您的余额",
-                RegexOptions.Singleline);
-            if (match.Success)
-            {
-                amount = ParseWiseCurrency(match.Groups["amount"].Value, match.Groups["currency"].Value);
-                return true;
-            }
+            var document = XDocument.Parse(ReadWiseXmlText(attachment.Content), LoadOptions.None);
+            var statement = RequireElement(
+                RequireElement(document.Root, WiseCamtNamespace + "BkToCstmrStmt", attachment.FileName),
+                WiseCamtNamespace + "Stmt",
+                attachment.FileName);
+            var statementId = RequireText(statement, WiseCamtNamespace + "Id", attachment.FileName);
+            var customerId = OptionalText(
+                statement,
+                WiseCamtNamespace + "Acct",
+                WiseCamtNamespace + "Ownr",
+                WiseCamtNamespace + "Id",
+                WiseCamtNamespace + "PrvtId",
+                WiseCamtNamespace + "Othr",
+                WiseCamtNamespace + "Id");
+            var currencyCode = RequireText(
+                statement,
+                [WiseCamtNamespace + "Acct", WiseCamtNamespace + "Ccy"],
+                attachment.FileName);
+            var currency = ParseWiseCurrencyType(currencyCode);
+            ValidateWiseStatementFileName(attachment.FileName, currencyCode);
 
-            amount = new Currency();
-            return false;
+            var statementStart = ParseWiseXmlDateTime(RequireText(
+                statement,
+                [WiseCamtNamespace + "FrToDt", WiseCamtNamespace + "FrDtTm"],
+                attachment.FileName)).Date;
+            var statementEnd = GetWiseStatementEndDate(ParseWiseXmlDateTime(RequireText(
+                statement,
+                [WiseCamtNamespace + "FrToDt", WiseCamtNamespace + "ToDtTm"],
+                attachment.FileName)));
+            var balances = ParseWiseBalances(statement, currency, currencyCode, attachment.FileName);
+            var records = statement.Elements(WiseCamtNamespace + "Ntry")
+                .Select(entry => ParseWiseRecord(entry, account, currency, currencyCode, attachment.FileName))
+                .ToRecords();
+            ValidateWiseTransactionSummary(statement, records, attachment.FileName);
+            ValidateWiseCurrencyStatementBalance(balances.Beginning, balances.Ending, records, attachment.FileName);
+
+            var internalCardNos = ParseWiseInternalCardNos(
+                statement,
+                attachment.FileName,
+                statementId,
+                statementEnd,
+                account,
+                currency);
+            return new WiseCurrencyStatement(
+                statementStart,
+                statementEnd,
+                attachment.ImportTime,
+                customerId,
+                account,
+                currency,
+                balances.Beginning,
+                balances.Ending,
+                records,
+                internalCardNos);
         }
 
-        private static bool TryParseWiseDirectPayment(
-            string subject,
-            string text,
-            out string counterparty,
-            out Currency amount)
+        private static string ReadWiseXmlText(byte[] bytes)
         {
-            var counterpartyMatch = Regex.Match(subject, @"直接付款给\s*(?<counterparty>.+)$", RegexOptions.Singleline);
-            var amountMatch = Regex.Match(
-                text,
-                @"这笔交易使用了您账户中的\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})",
-                RegexOptions.Singleline);
-            if (counterpartyMatch.Success && amountMatch.Success)
-            {
-                counterparty = NormalizeCounterparty(counterpartyMatch.Groups["counterparty"].Value);
-                amount = ParseWiseCurrency(amountMatch.Groups["amount"].Value, amountMatch.Groups["currency"].Value);
-                return true;
-            }
-
-            counterparty = "";
-            amount = new Currency();
-            return false;
+            using var stream = new MemoryStream(bytes);
+            using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
+            return reader.ReadToEnd();
         }
 
-        private static bool TryParseWiseIncoming(string text, out string counterparty, out Currency amount)
+        private static void ValidateWiseStatementFileName(string fileName, string currencyCode)
         {
-            var match = Regex.Match(
-                text,
-                @"您已收到来自\s*(?<counterparty>.+?)\s*的\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})",
-                RegexOptions.Singleline);
-            if (match.Success)
-                return TryBuildWiseParseResult(match, out counterparty, out amount);
-
-            var amountMatch = Regex.Match(
-                text,
-                @"已收到的金额：\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})",
-                RegexOptions.Singleline);
-            var counterpartyMatch = Regex.Match(
-                text,
-                @"来自：\s*(?<counterparty>.+?)\s+已收到的金额：",
-                RegexOptions.Singleline);
-            if (amountMatch.Success && counterpartyMatch.Success)
-            {
-                counterparty = NormalizeCounterparty(counterpartyMatch.Groups["counterparty"].Value);
-                amount = ParseWiseCurrency(amountMatch.Groups["amount"].Value, amountMatch.Groups["currency"].Value);
-                return true;
-            }
-
-            counterparty = "";
-            amount = new Currency();
-            return false;
-        }
-
-        private static bool TryParseWiseReceivedFunds(
-            string text,
-            out Currency sourceAmount,
-            out Currency receivedAmount,
-            out Currency fee)
-        {
-            var receivedMatch = Regex.Match(
-                text,
-                @"(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})\s*现已汇入您的账户",
-                RegexOptions.Singleline);
-            var sourceMatch = Regex.Match(
-                text,
-                @"金额：\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})",
-                RegexOptions.Singleline);
-            var feeMatch = Regex.Match(
-                text,
-                @"Wise\s*的手续费：\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})",
-                RegexOptions.Singleline);
-            if (receivedMatch.Success && sourceMatch.Success && feeMatch.Success)
-            {
-                sourceAmount = ParseWiseCurrency(sourceMatch.Groups["amount"].Value, sourceMatch.Groups["currency"].Value);
-                receivedAmount = ParseWiseCurrency(receivedMatch.Groups["amount"].Value, receivedMatch.Groups["currency"].Value);
-                fee = ParseWiseCurrency(feeMatch.Groups["amount"].Value, feeMatch.Groups["currency"].Value);
-                return true;
-            }
-
-            sourceAmount = new Currency();
-            receivedAmount = new Currency();
-            fee = new Currency();
-            return false;
-        }
-
-        private static bool TryParseWiseCardPayment(
-            string subject,
-            string text,
-            out string merchant,
-            out Currency amount)
-        {
-            var match = Regex.Match(
-                text,
-                @"您在\s*(?<counterparty>.+?)\s*消费了\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})",
-                RegexOptions.Singleline);
-            if (match.Success)
-                return TryBuildWiseParseResult(match, out merchant, out amount);
-
-            match = Regex.Match(
-                subject,
-                @"已在\s*(?<counterparty>.+?)\s*消费\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})",
-                RegexOptions.Singleline);
-            if (match.Success)
-                return TryBuildWiseParseResult(match, out merchant, out amount);
-
-            merchant = "";
-            amount = new Currency();
-            return false;
-        }
-
-        private static bool TryParseWiseOutgoing(
-            string text,
-            out string counterparty,
-            out Currency amount,
-            out Currency fee,
-            out bool isInternal,
-            out bool isPendingConversion)
-        {
-            var match = Regex.Match(
-                text,
-                @"(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})\s*已存入\s*(?<counterparty>.+?)\s*的账户",
-                RegexOptions.Singleline);
-            if (match.Success)
-            {
-                var parsed = TryBuildWiseParseResult(match, out counterparty, out amount);
-                fee = ParseWiseFeeOrZero(text, amount.t);
-                isInternal = IsBrokerTransfer(counterparty);
-                isPendingConversion = false;
-                return parsed;
-            }
-
-            match = Regex.Match(
-                text,
-                @"您发送给\s*(?<counterparty>.+?)\s*的\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})\s*汇款",
-                RegexOptions.Singleline);
-            if (match.Success)
-            {
-                var parsed = TryBuildWiseParseResult(match, out counterparty, out amount);
-                fee = ParseWiseFeeOrZero(text, amount.t);
-                isInternal = IsBrokerTransfer(counterparty);
-                isPendingConversion = false;
-                return parsed;
-            }
-
-            match = Regex.Match(
-                text,
-                @"您将会收到\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})\s*的汇款",
-                RegexOptions.Singleline);
-            if (match.Success)
-            {
-                counterparty = "Wise汇款收款方";
-                amount = ParseWiseCurrency(match.Groups["amount"].Value, match.Groups["currency"].Value);
-                fee = ParseWiseFeeOrZero(text, amount.t);
-                isInternal = false;
-                isPendingConversion = text.Contains("汇率为", StringComparison.Ordinal)
-                    && text.Contains("手续费", StringComparison.Ordinal);
-                return true;
-            }
-
-            counterparty = "";
-            amount = new Currency();
-            fee = new Currency();
-            isInternal = false;
-            isPendingConversion = false;
-            return false;
-        }
-
-        private static Currency ParseWiseFeeOrZero(string text, CurrencyType defaultCurrency)
-        {
-            var match = Regex.Match(
-                text,
-                @"Wise\s*的手续费：\s*(?<amount>[\d,]+(?:\.\d+)?)\s*(?<currency>[A-Z]{3})",
-                RegexOptions.Singleline);
+            var match = WiseStatementFileNameRegex.Match(fileName);
             if (!match.Success)
-                return new Currency(0, defaultCurrency);
+                return;
 
-            var fee = ParseWiseCurrency(match.Groups["amount"].Value, match.Groups["currency"].Value);
-            if (fee.v < 0)
-                throw new MailParseException($"Invalid Wise fee: {fee.v}/{fee.t}");
-            return fee;
+            if (!String.Equals(match.Groups["currency"].Value, currencyCode, StringComparison.OrdinalIgnoreCase))
+                throw new MailParseException($"Wise XML file currency mismatch: {fileName}, xml={currencyCode}");
         }
 
-        private static bool TryBuildWiseParseResult(Match match, out string counterparty, out Currency amount)
+        private static (Currency Beginning, Currency Ending) ParseWiseBalances(
+            XElement statement,
+            CurrencyType currency,
+            string currencyCode,
+            string context)
         {
-            counterparty = NormalizeCounterparty(match.Groups["counterparty"].Value);
-            amount = ParseWiseCurrency(match.Groups["amount"].Value, match.Groups["currency"].Value);
-            return true;
+            var balances = new Dictionary<string, Currency>(StringComparer.OrdinalIgnoreCase);
+            foreach (var balance in statement.Elements(WiseCamtNamespace + "Bal"))
+            {
+                var code = RequireText(
+                    balance,
+                    [WiseCamtNamespace + "Tp", WiseCamtNamespace + "CdOrPrtry", WiseCamtNamespace + "Cd"],
+                    context);
+                var amount = ParseWiseSignedAmount(balance, currency, currencyCode, context);
+                if (!balances.TryAdd(code, amount))
+                    throw new MailParseException($"Duplicate Wise balance type {code}: {context}");
+            }
+
+            if (!balances.TryGetValue("OPBD", out var beginning))
+                throw new MailParseException($"Missing Wise opening balance: {context}");
+            if (!balances.TryGetValue("CLBD", out var ending))
+                throw new MailParseException($"Missing Wise closing balance: {context}");
+
+            return (beginning, ending);
+        }
+
+        private Record ParseWiseRecord(
+            XElement entry,
+            Account account,
+            CurrencyType statementCurrency,
+            string statementCurrencyCode,
+            string fileName)
+        {
+            var status = RequireText(entry, [WiseCamtNamespace + "Sts", WiseCamtNamespace + "Cd"], fileName);
+            if (!String.Equals(status, "BOOK", StringComparison.OrdinalIgnoreCase))
+                throw new MailParseException($"Unsupported Wise entry status {status}: {fileName}");
+
+            var amount = ParseWiseSignedAmount(entry, statementCurrency, statementCurrencyCode, fileName);
+            var time = ParseWiseXmlDateTime(RequireText(
+                entry,
+                [WiseCamtNamespace + "BookgDt", WiseCamtNamespace + "DtTm"],
+                fileName)).DateTime;
+            var code = RequireText(
+                entry,
+                [WiseCamtNamespace + "BkTxCd", WiseCamtNamespace + "Prtry", WiseCamtNamespace + "Cd"],
+                fileName);
+            var addtlInfo = RequireText(entry, WiseCamtNamespace + "AddtlNtryInf", $"{fileName} {code}");
+            var raw = new WiseXmlEntry(
+                fileName,
+                code,
+                OptionalText(entry, WiseCamtNamespace + "NtryRef"),
+                time,
+                amount,
+                addtlInfo,
+                OptionalText(
+                    entry,
+                    WiseCamtNamespace + "NtryDtls",
+                    WiseCamtNamespace + "TxDtls",
+                    WiseCamtNamespace + "Refs",
+                    WiseCamtNamespace + "EndToEndId"),
+                OptionalText(
+                    entry,
+                    WiseCamtNamespace + "NtryDtls",
+                    WiseCamtNamespace + "TxDtls",
+                    WiseCamtNamespace + "Refs",
+                    WiseCamtNamespace + "TxId"),
+                OptionalText(
+                    entry,
+                    WiseCamtNamespace + "NtryDtls",
+                    WiseCamtNamespace + "TxDtls",
+                    WiseCamtNamespace + "RltdPties",
+                    WiseCamtNamespace + "Dbtr",
+                    WiseCamtNamespace + "Pty",
+                    WiseCamtNamespace + "Nm"),
+                OptionalFirstText(
+                    entry,
+                    [
+                        WiseCamtNamespace + "NtryDtls",
+                        WiseCamtNamespace + "TxDtls",
+                        WiseCamtNamespace + "RltdPties",
+                        WiseCamtNamespace + "DbtrAcct",
+                        WiseCamtNamespace + "Id",
+                        WiseCamtNamespace + "Othr",
+                        WiseCamtNamespace + "Id"
+                    ],
+                    [
+                        WiseCamtNamespace + "NtryDtls",
+                        WiseCamtNamespace + "TxDtls",
+                        WiseCamtNamespace + "RltdPties",
+                        WiseCamtNamespace + "DbtrAcct",
+                        WiseCamtNamespace + "Id",
+                        WiseCamtNamespace + "IBAN"
+                    ]),
+                OptionalText(
+                    entry,
+                    WiseCamtNamespace + "NtryDtls",
+                    WiseCamtNamespace + "TxDtls",
+                    WiseCamtNamespace + "RltdPties",
+                    WiseCamtNamespace + "Cdtr",
+                    WiseCamtNamespace + "Pty",
+                    WiseCamtNamespace + "Nm"),
+                OptionalFirstText(
+                    entry,
+                    [
+                        WiseCamtNamespace + "NtryDtls",
+                        WiseCamtNamespace + "TxDtls",
+                        WiseCamtNamespace + "RltdPties",
+                        WiseCamtNamespace + "CdtrAcct",
+                        WiseCamtNamespace + "Id",
+                        WiseCamtNamespace + "Othr",
+                        WiseCamtNamespace + "Id"
+                    ],
+                    [
+                        WiseCamtNamespace + "NtryDtls",
+                        WiseCamtNamespace + "TxDtls",
+                        WiseCamtNamespace + "RltdPties",
+                        WiseCamtNamespace + "CdtrAcct",
+                        WiseCamtNamespace + "Id",
+                        WiseCamtNamespace + "IBAN"
+                    ]),
+                OptionalText(
+                    entry,
+                    WiseCamtNamespace + "NtryDtls",
+                    WiseCamtNamespace + "TxDtls",
+                    WiseCamtNamespace + "RmtInf",
+                    WiseCamtNamespace + "Ustrd"),
+                OptionalText(
+                    entry,
+                    WiseCamtNamespace + "AmtDtls",
+                    WiseCamtNamespace + "TxAmt",
+                    WiseCamtNamespace + "CcyXchg",
+                    WiseCamtNamespace + "SrcCcy"),
+                OptionalText(
+                    entry,
+                    WiseCamtNamespace + "AmtDtls",
+                    WiseCamtNamespace + "TxAmt",
+                    WiseCamtNamespace + "CcyXchg",
+                    WiseCamtNamespace + "TrgtCcy"),
+                OptionalText(
+                    entry,
+                    WiseCamtNamespace + "AmtDtls",
+                    WiseCamtNamespace + "TxAmt",
+                    WiseCamtNamespace + "CcyXchg",
+                    WiseCamtNamespace + "XchgRate"));
+            var classification = ClassifyWiseXmlEntry(raw, account);
+            return CreateWiseRecord(
+                account,
+                raw.Time,
+                raw.Amount,
+                classification.CounterpartyText,
+                classification.Reason,
+                classification.IsInternal,
+                BuildWiseRecordSource(raw));
+        }
+
+        private WiseXmlClassification ClassifyWiseXmlEntry(WiseXmlEntry entry, Account account)
+        {
+            if (entry.Code.StartsWith("FEE-", StringComparison.OrdinalIgnoreCase))
+            {
+                if (entry.Amount.v >= 0)
+                    throw new MailParseException($"Wise fee should be negative: {entry.Code} {entry.Amount.v}/{entry.Amount.t}");
+
+                return new WiseXmlClassification(ExtractWiseFeeTarget(entry.AdditionalInfo), "手续费", false);
+            }
+
+            if (entry.Code.StartsWith("BALANCE-", StringComparison.OrdinalIgnoreCase))
+                return ClassifyWiseConversion(entry);
+
+            if (entry.Code.StartsWith("CARD-", StringComparison.OrdinalIgnoreCase))
+                return ClassifyWiseCardTransaction(entry);
+
+            if (entry.Code.StartsWith("DIRECT_DEBIT-", StringComparison.OrdinalIgnoreCase))
+                return ClassifyWiseDirectDebit(entry, account);
+
+            if (entry.Code.StartsWith("TRANSFER-", StringComparison.OrdinalIgnoreCase))
+                return ClassifyWiseTransfer(entry, account);
+
+            throw new MailParseException($"Unsupported Wise transaction code: {entry.Code}; text={entry.AdditionalInfo}");
+        }
+
+        private static WiseXmlClassification ClassifyWiseConversion(WiseXmlEntry entry)
+        {
+            var match = WiseConvertedRegex.Match(entry.AdditionalInfo);
+            if (!match.Success)
+                throw new MailParseException($"Unsupported Wise conversion text: {entry.Code}; text={entry.AdditionalInfo}");
+            if (String.IsNullOrWhiteSpace(entry.ExchangeFromCurrency) || String.IsNullOrWhiteSpace(entry.ExchangeToCurrency))
+                throw new MailParseException($"Wise conversion missing exchange fields: {entry.Code}");
+            if (!String.Equals(entry.ExchangeFromCurrency, match.Groups["fromCurrency"].Value, StringComparison.OrdinalIgnoreCase)
+                || !String.Equals(entry.ExchangeToCurrency, match.Groups["toCurrency"].Value, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new MailParseException($"Wise conversion currency mismatch: {entry.Code}; text={entry.AdditionalInfo}");
+            }
+
+            var currentCurrencyCode = ToWiseCurrencyCode(entry.Amount.t);
+            if (entry.Amount.v > 0
+                && !String.Equals(currentCurrencyCode, entry.ExchangeToCurrency, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new MailParseException($"Wise conversion credit currency mismatch: {entry.Code}");
+            }
+
+            if (entry.Amount.v < 0
+                && !String.Equals(currentCurrencyCode, entry.ExchangeFromCurrency, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new MailParseException($"Wise conversion debit currency mismatch: {entry.Code}");
+            }
+
+            return new WiseXmlClassification($"{entry.ExchangeFromCurrency} -> {entry.ExchangeToCurrency}", "兑换", true);
+        }
+
+        private static WiseXmlClassification ClassifyWiseCardTransaction(WiseXmlEntry entry)
+        {
+            var match = WiseCardTransactionRegex.Match(entry.AdditionalInfo);
+            if (!match.Success)
+                throw new MailParseException($"Unsupported Wise card text: {entry.Code}; text={entry.AdditionalInfo}");
+            if (entry.Amount.v >= 0)
+                throw new MailParseException($"Wise card transaction should be negative: {entry.Code}");
+
+            return new WiseXmlClassification(NormalizeCounterparty(match.Groups["merchant"].Value), "消费", false);
+        }
+
+        private WiseXmlClassification ClassifyWiseDirectDebit(WiseXmlEntry entry, Account account)
+        {
+            var match = WiseDirectDebitRegex.Match(entry.AdditionalInfo);
+            if (!match.Success)
+                throw new MailParseException($"Unsupported Wise direct debit text: {entry.Code}; text={entry.AdditionalInfo}");
+            if (entry.Amount.v >= 0)
+                throw new MailParseException($"Wise direct debit should be negative: {entry.Code}");
+
+            var counterparty = NormalizeCounterparty(match.Groups["counterparty"].Value);
+            var classification = ClassifyWiseCounterparty(
+                account,
+                counterparty,
+                false,
+                entry);
+            return new WiseXmlClassification(classification.CounterpartyText, "直接付款", classification.IsInternal);
+        }
+
+        private WiseXmlClassification ClassifyWiseTransfer(WiseXmlEntry entry, Account account)
+        {
+            if (String.Equals(entry.AdditionalInfo, "Topped up account", StringComparison.OrdinalIgnoreCase))
+            {
+                if (entry.Amount.v <= 0)
+                    throw new MailParseException($"Wise top-up should be positive: {entry.Code}");
+
+                return new WiseXmlClassification("余额充值来源", "余额充值", false);
+            }
+
+            var sentMatch = WiseSentMoneyRegex.Match(entry.AdditionalInfo);
+            if (sentMatch.Success)
+            {
+                if (entry.Amount.v >= 0)
+                    throw new MailParseException($"Wise outgoing transfer should be negative: {entry.Code}");
+
+                var counterparty = NormalizeCounterparty(String.IsNullOrWhiteSpace(entry.CreditorName)
+                    ? sentMatch.Groups["counterparty"].Value
+                    : entry.CreditorName);
+                var classification = ClassifyWiseCounterparty(
+                    account,
+                    counterparty,
+                    false,
+                    entry);
+                return new WiseXmlClassification(
+                    classification.CounterpartyText,
+                    "款项汇出",
+                    classification.IsInternal);
+            }
+
+            var receivedMatch = WiseReceivedMoneyRegex.Match(entry.AdditionalInfo);
+            if (receivedMatch.Success)
+            {
+                if (entry.Amount.v <= 0)
+                    throw new MailParseException($"Wise incoming transfer should be positive: {entry.Code}");
+
+                var counterparty = NormalizeCounterparty(receivedMatch.Groups["counterparty"].Value);
+                var classification = ClassifyWiseCounterparty(
+                    account,
+                    counterparty,
+                    true,
+                    entry);
+                return new WiseXmlClassification(
+                    classification.CounterpartyText,
+                    "汇款收款",
+                    classification.IsInternal);
+            }
+
+            throw new MailParseException($"Unsupported Wise transfer text: {entry.Code}; text={entry.AdditionalInfo}");
+        }
+
+        private static string ExtractWiseFeeTarget(string text)
+        {
+            const string prefix = "Wise Charges for:";
+            return text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                ? text[prefix.Length..].Trim()
+                : "手续费";
         }
 
         private static Record CreateWiseRecord(
@@ -520,60 +603,197 @@ namespace MyBook
             };
         }
 
-        private WiseSettings ReadWiseSettings()
+        private List<AccountInternalId> ParseWiseInternalCardNos(
+            XElement statement,
+            string fileName,
+            string statementId,
+            DateTime statementEndDate,
+            Account account,
+            CurrencyType currency)
         {
-            return new WiseSettings(ReadConfigList("wise:own_names"));
+            var result = new List<AccountInternalId>();
+            AddWiseInternalCardNo(
+                result,
+                account,
+                OptionalText(
+                    statement,
+                    WiseCamtNamespace + "Acct",
+                    WiseCamtNamespace + "Id",
+                    WiseCamtNamespace + "Othr",
+                    WiseCamtNamespace + "Id"),
+                currency,
+                "XML account id",
+                fileName,
+                statementEndDate);
+            AddWiseInternalCardNo(
+                result,
+                account,
+                OptionalText(
+                    statement,
+                    WiseCamtNamespace + "Acct",
+                    WiseCamtNamespace + "Id",
+                    WiseCamtNamespace + "IBAN"),
+                currency,
+                "XML IBAN",
+                fileName,
+                statementEndDate);
+
+            return result;
         }
 
-        private List<string> ReadConfigList(string key)
+        private static void AddWiseInternalCardNo(
+            List<AccountInternalId> result,
+            Account account,
+            string value,
+            CurrencyType currency,
+            string desc,
+            string fileName,
+            DateTime statementEndDate)
         {
-            return config.GetSection(key)
-                .GetChildren()
-                .Select(child => child.Value)
-                .Where(value => !String.IsNullOrWhiteSpace(value))
-                .Select(value => value!.Trim())
-                .ToList();
+            if (String.IsNullOrWhiteSpace(value))
+                return;
+
+            if (result.Any(item => String.Equals(item.cardNo, value, StringComparison.OrdinalIgnoreCase)))
+                return;
+
+            result.Add(new AccountInternalId
+            {
+                Account = account,
+                cardNo = value,
+                currencyType = currency,
+                desc = desc,
+                sourceText = $"Wise XML statement {statementEndDate:yyyy-MM-dd}; {fileName}; {desc}={value}"
+            });
+        }
+
+        private bool SaveWiseParsedStatement(WiseParsedStatement parsed)
+        {
+            return database.SaveStatementRecordsOnce(
+                WiseProvider,
+                parsed.ImportTime,
+                parsed.Records,
+                parsed.EndingBalances,
+                parsed.StatementKey,
+                parsed.BeginningBalances,
+                afterSaveInTransaction: _ => database.EnsureAccountInternalCardNos(parsed.InternalCardNos));
+        }
+
+        private static void PrintWiseParsedStatementSummary(string label, WiseParsedStatement parsed, bool saved)
+        {
+            Console.WriteLine(saved
+                ? $"Import {label} {parsed.StatementKey}, records={parsed.Records.Count}"
+                : $"Skip imported {label} {parsed.StatementKey}");
+            Console.WriteLine("Wise cards:");
+            foreach (var card in parsed.InternalCardNos.OrderBy(card => card.currencyType).ThenBy(card => card.cardNo))
+                Console.WriteLine($"{card.cardNo}\t{card.currencyType}\t{card.desc}");
+            Console.WriteLine("Wise balances:");
+            foreach (var balance in parsed.EndingBalances.OrderBy(balance => balance.t))
+                Console.WriteLine($"{balance.t}\t{balance.v}");
+            Console.WriteLine("Wise records:");
+            foreach (var record in parsed.Records.OrderBy(record => record.date).ThenBy(record => record.t).ThenBy(record => record.v))
+            {
+                Console.WriteLine(
+                    $"{record.date:yyyy-MM-dd HH:mm:ss.ffffff}\t{record.t}\t{record.v}\tinternal={record.isInternal}\treason={record.Reason}\tdest={record.DestAccount}\tsource={record.Source}");
+            }
+        }
+
+        private static void ValidateWiseTransactionSummary(XElement statement, Records records, string context)
+        {
+            var summary = statement.Element(WiseCamtNamespace + "TxsSummry");
+            if (summary is null)
+                return;
+
+            var totalEntries = TryParseWiseInt(OptionalText(
+                summary,
+                WiseCamtNamespace + "TtlNtries",
+                WiseCamtNamespace + "NbOfNtries"));
+            var totalSum = TryParseWiseDecimal(OptionalText(
+                summary,
+                WiseCamtNamespace + "TtlNtries",
+                WiseCamtNamespace + "Sum"));
+            var creditEntries = TryParseWiseInt(OptionalText(
+                summary,
+                WiseCamtNamespace + "TtlCdtNtries",
+                WiseCamtNamespace + "NbOfNtries"));
+            var creditSum = TryParseWiseDecimal(OptionalText(
+                summary,
+                WiseCamtNamespace + "TtlCdtNtries",
+                WiseCamtNamespace + "Sum"));
+            var debitEntries = TryParseWiseInt(OptionalText(
+                summary,
+                WiseCamtNamespace + "TtlDbtNtries",
+                WiseCamtNamespace + "NbOfNtries"));
+            var debitSum = TryParseWiseDecimal(OptionalText(
+                summary,
+                WiseCamtNamespace + "TtlDbtNtries",
+                WiseCamtNamespace + "Sum"));
+
+            if (totalEntries.HasValue && totalEntries.Value != records.Count)
+                throw new MailParseException($"Wise summary entry count mismatch: {context}");
+            if (totalSum.HasValue && totalSum.Value != records.Sum(record => record.v))
+                throw new MailParseException($"Wise summary total mismatch: {context}");
+            if (creditEntries.HasValue && creditEntries.Value != records.Count(record => record.v > 0))
+                throw new MailParseException($"Wise summary credit count mismatch: {context}");
+            if (creditSum.HasValue && creditSum.Value != records.Where(record => record.v > 0).Sum(record => record.v))
+                throw new MailParseException($"Wise summary credit sum mismatch: {context}");
+            if (debitEntries.HasValue && debitEntries.Value != records.Count(record => record.v < 0))
+                throw new MailParseException($"Wise summary debit count mismatch: {context}");
+            if (debitSum.HasValue && Math.Abs(debitSum.Value) != Math.Abs(records.Where(record => record.v < 0).Sum(record => record.v)))
+                throw new MailParseException($"Wise summary debit sum mismatch: {context}");
+        }
+
+        private static void ValidateWiseCurrencyStatementBalance(Currency beginning, Currency ending, Records records, string context)
+        {
+            var expected = beginning.v + records.Sum(record => record.v);
+            if (expected != ending.v)
+            {
+                throw new MailParseException(
+                    $"Wise balance mismatch: {context}, beginning={beginning.v}, records={records.Sum(record => record.v)}, ending={ending.v}");
+            }
+        }
+
+        private static Currency ParseWiseSignedAmount(XElement element, CurrencyType expectedCurrency, string expectedCurrencyCode, string context)
+        {
+            var amountElement = RequireElement(element, WiseCamtNamespace + "Amt", context);
+            var amountCurrencyCode = amountElement.Attribute("Ccy")?.Value ?? "";
+            if (!String.Equals(amountCurrencyCode, expectedCurrencyCode, StringComparison.OrdinalIgnoreCase))
+                throw new MailParseException($"Wise amount currency mismatch: {context}, expected={expectedCurrencyCode}, actual={amountCurrencyCode}");
+
+            var amount = ParseWiseDecimal(amountElement.Value);
+            var direction = RequireText(element, WiseCamtNamespace + "CdtDbtInd", context);
+            return direction.ToUpperInvariant() switch
+            {
+                "CRDT" => new Currency(amount, expectedCurrency),
+                "DBIT" => new Currency(-amount, expectedCurrency),
+                _ => throw new MailParseException($"Unsupported Wise credit/debit indicator {direction}: {context}")
+            };
+        }
+
+        private static DateTimeOffset ParseWiseXmlDateTime(string value)
+        {
+            return DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.None);
+        }
+
+        private static DateTime GetWiseStatementEndDate(DateTimeOffset toDateTime)
+        {
+            return toDateTime.TimeOfDay == TimeSpan.Zero
+                ? toDateTime.Date.AddDays(-1)
+                : toDateTime.Date;
         }
 
         private WiseCounterpartyClassification ClassifyWiseCounterparty(
-            WiseSettings settings,
             Account currentAccount,
             string counterparty,
-            Currency amount,
             bool isIncoming,
-            string matchContext)
+            WiseXmlEntry entry)
         {
-            var normalizedCounterparty = NormalizeNameForComparison(counterparty);
-            if (settings.OwnNames.Any(name => NormalizeNameForComparison(name) == normalizedCounterparty))
-            {
-                var counterpartyText = isIncoming && amount.t == CurrencyType.SGD
-                    ? FormatTransferCounterparty(WiseSgdOwnIncomingSourceAccount, WiseAccountName)
-                    : counterparty;
-                return new WiseCounterpartyClassification(counterpartyText, true);
-            }
-
-            if (WisePaypalCounterpartyNames.Any(name => NormalizeNameForComparison(name) == normalizedCounterparty))
-            {
-                if (amount.t == CurrencyType.USD)
-                {
-                    var counterpartyText = isIncoming
-                        ? FormatTransferCounterparty(WisePaypalSourceAccount, WiseAccountName)
-                        : FormatTransferCounterparty(WiseAccountName, WisePaypalSourceAccount);
-                    return new WiseCounterpartyClassification(counterpartyText, true);
-                }
-
-                return new WiseCounterpartyClassification(counterparty, false);
-            }
-
-            if (!isIncoming
-                && amount.t == CurrencyType.RMB
-                && NormalizeNameForComparison(WiseRmbUnknownRecipientName) == normalizedCounterparty)
-            {
-                var counterpartyText = FormatTransferCounterparty(WiseAccountName, WiseRmbUnknownRecipientAccount);
-                return new WiseCounterpartyClassification(counterpartyText, true);
-            }
-
-            var internalCounterparty = database.FindAccountByInternalCardNoText(null, matchContext, counterparty);
+            var internalCounterparty = database.FindAccountByInternalCardNoText(
+                null,
+                BuildWiseMatchContext(entry, counterparty),
+                counterparty,
+                entry.CreditorAccount,
+                entry.Reference,
+                entry.AdditionalInfo);
             if (internalCounterparty is not null && !IsSameAccount(database.GetPostingAccount(internalCounterparty), currentAccount))
             {
                 var counterpartyText = isIncoming
@@ -585,44 +805,42 @@ namespace MyBook
             return new WiseCounterpartyClassification(counterparty, false);
         }
 
+        private static string BuildWiseMatchContext(WiseXmlEntry entry, string counterparty)
+        {
+            return $"Wise XML statement {entry.FileName}; code={entry.Code}; counterparty={counterparty}; creditorAccount={entry.CreditorAccount}; text={entry.AdditionalInfo}";
+        }
+
+        private static string BuildWiseRecordSource(WiseXmlEntry entry)
+        {
+            var parts = new List<string>
+            {
+                $"Wise XML statement {entry.FileName}",
+                $"code={entry.Code}"
+            };
+            AddWiseSourcePart(parts, "ref", entry.Reference);
+            AddWiseSourcePart(parts, "endToEndId", entry.EndToEndId);
+            AddWiseSourcePart(parts, "txId", entry.TransactionId);
+            AddWiseSourcePart(parts, "payer", entry.DebtorName);
+            AddWiseSourcePart(parts, "payerAccount", entry.DebtorAccount);
+            AddWiseSourcePart(parts, "payee", entry.CreditorName);
+            AddWiseSourcePart(parts, "payeeAccount", entry.CreditorAccount);
+            AddWiseSourcePart(parts, "remittance", entry.RemittanceInfo);
+            AddWiseSourcePart(parts, "exchangeFrom", entry.ExchangeFromCurrency);
+            AddWiseSourcePart(parts, "exchangeTo", entry.ExchangeToCurrency);
+            AddWiseSourcePart(parts, "exchangeRate", entry.ExchangeRate);
+            AddWiseSourcePart(parts, "text", entry.AdditionalInfo);
+            return LimitWiseText(String.Join("; ", parts));
+        }
+
+        private static void AddWiseSourcePart(List<string> parts, string name, string value)
+        {
+            if (!String.IsNullOrWhiteSpace(value))
+                parts.Add($"{name}={NormalizeCounterparty(value)}");
+        }
+
         private static string FormatTransferCounterparty(string sourceAccount, string destinationAccount)
         {
             return $"{sourceAccount} -> {destinationAccount}";
-        }
-
-        private static bool IsIncomingTransferSubject(string subject)
-        {
-            return subject.Contains("汇款", StringComparison.Ordinal)
-                && subject.Contains("已收到", StringComparison.Ordinal);
-        }
-
-        private static string GetWiseIncomingReason(string subject, string counterparty)
-        {
-            if (IsBrokerTransfer(counterparty))
-                return "出金";
-
-            return IsIncomingTransferSubject(subject)
-                ? "汇款收款"
-                : "付款收款";
-        }
-
-        private static string GetWiseOutgoingReason(string subject, string counterparty)
-        {
-            if (IsBrokerTransfer(counterparty))
-                return "入金";
-
-            return subject.Contains("款项已汇出", StringComparison.Ordinal)
-                ? "款项汇出"
-                : "汇款已发送";
-        }
-
-        private static Currency ParseWiseCurrency(string value, string currencyCode)
-        {
-            var amount = decimal.Parse(
-                value.Replace(",", "", StringComparison.Ordinal),
-                NumberStyles.AllowDecimalPoint | NumberStyles.AllowThousands,
-                CultureInfo.InvariantCulture);
-            return new Currency(amount, ParseWiseCurrencyType(currencyCode));
         }
 
         private static CurrencyType ParseWiseCurrencyType(string currencyCode)
@@ -637,75 +855,155 @@ namespace MyBook
             throw new MailParseException($"Unsupported Wise currency: {currencyCode}");
         }
 
-        private static Currency Negate(Currency amount)
+        private static string ToWiseCurrencyCode(CurrencyType currencyType)
         {
-            if (amount.v < 0)
-                throw new MailParseException($"Wise amount should be positive before applying direction: {amount.v}/{amount.t}");
-
-            return new Currency(-amount.v, amount.t);
-        }
-
-        private static bool IsBrokerTransfer(string counterparty)
-        {
-            return counterparty.Contains("Interactive Brokers", StringComparison.OrdinalIgnoreCase)
-                || counterparty.Contains("IBKR", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static string BuildWiseStatementKey(MimeMessage message, string subject, string text)
-        {
-            var match = Regex.Match(subject + " " + text, @"#(?<id>\d+)");
-            if (match.Success)
-                return $"Wise_{match.Groups["id"].Value}";
-
-            if (!String.IsNullOrWhiteSpace(message.MessageId))
-                return $"WiseMessage_{message.MessageId.Trim()}";
-
-            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(subject + "\n" + text)));
-            return $"WiseHash_{hash[..16]}";
-        }
-
-        private static string NormalizeWiseText(string text)
-        {
-            var withoutInvisibleCharacters = Regex.Replace(
-                text,
-                @"[\u00AD\u034F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]+",
-                " ");
-            return NormalizeMailText(withoutInvisibleCharacters);
+            return currencyType == CurrencyType.RMB ? "CNY" : currencyType.ToString();
         }
 
         private static string NormalizeCounterparty(string counterparty)
         {
-            return NormalizeWiseText(counterparty)
+            return Regex.Replace(counterparty, @"\s+", " ")
                 .Trim(' ', '。', '，', ',', '.');
         }
 
-        private static string NormalizeNameForComparison(string name)
+        private static decimal ParseWiseDecimal(string value)
         {
-            return Regex.Replace(name, @"\s+", "").ToUpperInvariant();
+            return decimal.Parse(
+                value.Replace(",", "", StringComparison.Ordinal),
+                NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign | NumberStyles.AllowThousands,
+                CultureInfo.InvariantCulture);
         }
 
-        private static string TrimForError(string text)
+        private static decimal? TryParseWiseDecimal(string value)
         {
-            const int maxLength = 240;
-            return text.Length <= maxLength ? text : text[..maxLength] + "...";
+            return String.IsNullOrWhiteSpace(value) ? null : ParseWiseDecimal(value);
         }
 
-        private sealed record WiseParsedMail(
-            DateTime Time,
+        private static int? TryParseWiseInt(string value)
+        {
+            return String.IsNullOrWhiteSpace(value)
+                ? null
+                : Int32.Parse(value, NumberStyles.Integer, CultureInfo.InvariantCulture);
+        }
+
+        private static XElement RequireElement(XElement? parent, XName name, string context)
+        {
+            if (parent is null)
+                throw new MailParseException($"Missing Wise XML parent for {name.LocalName}: {context}");
+
+            var child = parent.Element(name);
+            if (child is null)
+                throw new MailParseException($"Missing Wise XML element {name.LocalName}: {context}");
+
+            return child;
+        }
+
+        private static string RequireText(XElement parent, XName name, string context)
+        {
+            var value = OptionalText(parent, name);
+            if (String.IsNullOrWhiteSpace(value))
+                throw new MailParseException($"Missing Wise XML text {name.LocalName}: {context}");
+
+            return value;
+        }
+
+        private static string RequireText(XElement parent, XName[] path, string context)
+        {
+            var value = OptionalText(parent, path);
+            if (String.IsNullOrWhiteSpace(value))
+                throw new MailParseException($"Missing Wise XML path {String.Join("/", path.Select(item => item.LocalName))}: {context}");
+
+            return value;
+        }
+
+        private static string OptionalText(XElement parent, params XName[] path)
+        {
+            var current = parent;
+            foreach (var name in path)
+            {
+                current = current.Element(name);
+                if (current is null)
+                    return "";
+            }
+
+            return current.Value.Trim();
+        }
+
+        private static string OptionalFirstText(XElement parent, params XName[][] paths)
+        {
+            foreach (var path in paths)
+            {
+                var value = OptionalText(parent, path);
+                if (!String.IsNullOrWhiteSpace(value))
+                    return value;
+            }
+
+            return "";
+        }
+
+        private static string LimitWiseText(string text)
+        {
+            return text.Length <= 1024 ? text : text[..1024];
+        }
+
+        private sealed record InMemoryWiseStatementAttachment(
+            string FileName,
+            DateTime? ImportTime,
+            byte[] Content);
+
+        private sealed record WiseCurrencyStatement(
+            DateTime StatementStartDate,
+            DateTime StatementEndDate,
+            DateTime? ImportTime,
+            string CustomerId,
+            Account Account,
+            CurrencyType Currency,
+            Currency BeginningBalance,
+            Currency EndingBalance,
+            Records Records,
+            List<AccountInternalId> InternalCardNos);
+
+        private sealed record WiseParsedStatement(
+            DateTime StatementStartDate,
+            DateTime StatementEndDate,
+            DateTime ImportTime,
             string StatementKey,
-            List<Record> Records,
-            WiseImportPriority Priority);
+            Account Account,
+            Records Records,
+            List<AccountBalance> BeginningBalances,
+            List<AccountBalance> EndingBalances,
+            List<AccountInternalId> InternalCardNos);
 
-        private sealed record WiseSettings(
-            List<string> OwnNames);
+        private sealed record WiseXmlEntry(
+            string FileName,
+            string Code,
+            string Reference,
+            DateTime Time,
+            Currency Amount,
+            string AdditionalInfo,
+            string EndToEndId,
+            string TransactionId,
+            string DebtorName,
+            string DebtorAccount,
+            string CreditorName,
+            string CreditorAccount,
+            string RemittanceInfo,
+            string ExchangeFromCurrency,
+            string ExchangeToCurrency,
+            string ExchangeRate);
+
+        private sealed record WiseXmlClassification(string CounterpartyText, string Reason, bool IsInternal);
 
         private sealed record WiseCounterpartyClassification(string CounterpartyText, bool IsInternal);
+    }
 
-        private enum WiseImportPriority
+    static class WiseRecordEnumerableExtensions
+    {
+        public static Records ToRecords(this IEnumerable<Record> records)
         {
-            Pending = 0,
-            Normal = 1,
-            Detailed = 2
+            var result = new Records();
+            result.AddRange(records);
+            return result;
         }
     }
 }
