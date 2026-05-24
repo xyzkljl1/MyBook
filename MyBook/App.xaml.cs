@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Configuration;
+using System.Data;
 using System.Globalization;
+using System.IO;
 using System.Windows;
 
 namespace MyBook
@@ -26,6 +28,38 @@ namespace MyBook
                 new DatabaseUtil(config).CleanWiseImportedData();
                 Console.WriteLine("Clean Wise imported data done.");
                 Shutdown();
+                return;
+            }
+
+            if (e.Args.Any(arg => arg.Equals("--debug-sql", StringComparison.OrdinalIgnoreCase))
+                || e.Args.Any(arg => arg.StartsWith("--debug-sql=", StringComparison.OrdinalIgnoreCase))
+                || e.Args.Any(arg => arg.Equals("--debug-sql-file", StringComparison.OrdinalIgnoreCase))
+                || e.Args.Any(arg => arg.StartsWith("--debug-sql-file=", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    var sql = ReadDebugSqlArgument(e.Args);
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    var database = new DatabaseUtil(config);
+                    if (IsQueryDebugSql(sql))
+                    {
+                        WriteDebugSqlResult(database.QueryDebugSql(sql));
+                    }
+                    else
+                    {
+                        var affectedRows = database.ExecuteDebugSql(sql);
+                        Console.WriteLine($"Debug SQL done: affectedRows={affectedRows}");
+                    }
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"Debug SQL failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
                 return;
             }
 
@@ -208,6 +242,83 @@ namespace MyBook
             }
 
             return null;
+        }
+
+        private static string ReadDebugSqlArgument(string[] args)
+        {
+            var file = GetArgumentValue(args, "--debug-sql-file");
+            if (!String.IsNullOrWhiteSpace(file))
+                return File.ReadAllText(file);
+
+            var sql = GetArgumentValue(args, "--debug-sql");
+            if (!String.IsNullOrWhiteSpace(sql))
+                return sql;
+
+            throw new ArgumentException("Missing --debug-sql or --debug-sql-file value.");
+        }
+
+        private static bool IsQueryDebugSql(string sql)
+        {
+            var trimmed = TrimSqlLeadingTrivia(sql);
+            return trimmed.StartsWith("select", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("show", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("describe", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("desc", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("with", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string TrimSqlLeadingTrivia(string sql)
+        {
+            var current = sql.TrimStart();
+            while (true)
+            {
+                if (current.StartsWith("--", StringComparison.Ordinal))
+                {
+                    var newline = current.IndexOf('\n');
+                    current = newline < 0 ? "" : current[(newline + 1)..].TrimStart();
+                    continue;
+                }
+
+                if (current.StartsWith("/*", StringComparison.Ordinal))
+                {
+                    var end = current.IndexOf("*/", StringComparison.Ordinal);
+                    current = end < 0 ? "" : current[(end + 2)..].TrimStart();
+                    continue;
+                }
+
+                return current;
+            }
+        }
+
+        private static void WriteDebugSqlResult(DataTable table)
+        {
+            Console.WriteLine($"Rows: {table.Rows.Count}");
+            if (table.Columns.Count == 0)
+                return;
+
+            Console.WriteLine(String.Join("\t", table.Columns.Cast<DataColumn>().Select(column => column.ColumnName)));
+            foreach (DataRow row in table.Rows)
+            {
+                Console.WriteLine(String.Join(
+                    "\t",
+                    table.Columns.Cast<DataColumn>().Select(column => FormatDebugSqlValue(row[column]))));
+            }
+        }
+
+        private static string FormatDebugSqlValue(object? value)
+        {
+            if (value is null || value == DBNull.Value)
+                return "NULL";
+            if (value is DateTime dateTime)
+                return dateTime.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
+            if (value is byte[] bytes)
+                return Convert.ToHexString(bytes);
+
+            return Convert.ToString(value, CultureInfo.InvariantCulture)?
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n")
+                .Replace("\t", "    ")
+                ?? "";
         }
 
         private static DateTime ParseMonthArgument(string value)
