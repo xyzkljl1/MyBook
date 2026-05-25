@@ -1350,10 +1350,15 @@ namespace MyBook
         {
             var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity);
             var currentPrice = statementPrice;
-            if (quantity != 0 && currentPrice * quantity != currentValue)
+            if (contract.HoldingType == HoldingType.UST)
+            {
+                AssertIBKRMoneyFieldEquals(currentPrice * quantity, currentValue, currentValueText, $"IBKR bond holding value {contract.Code}");
+            }
+            else if (quantity != 0 && currentPrice * quantity != currentValue)
+            {
                 currentPrice = currentValue / quantity;
-            if (quantity != 0)
                 AssertIBKRMoneyFieldEquals(currentPrice * quantity, currentValue, currentValueText, $"IBKR holding value {contract.Code}");
+            }
 
             var description = String.IsNullOrWhiteSpace(rowDescription) ? contract.Description : rowDescription;
             return new Holding(contract.Code, contract.HoldingType)
