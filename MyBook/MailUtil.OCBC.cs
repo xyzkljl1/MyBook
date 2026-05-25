@@ -137,14 +137,14 @@ namespace MyBook
 
         private byte[] ReadOCBCStatementPdfAttachment(MimeMessage message)
         {
-            var pdfAttachments = message.Attachments
-                .OfType<MimePart>()
-                .Where(attachment => GetAttachmentFileName(attachment).EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
-                .ToList();
+            var pdfAttachments = ReadMatchingAttachments(message, (attachment, fileName) =>
+                fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
+                    ? ReadMimePartBytes(attachment)
+                    : null);
             if (pdfAttachments.Count != 1)
                 throw new MailParseException($"OCBC statement mail should contain exactly one PDF attachment: {message.Subject}");
 
-            return ReadMimePartBytes(pdfAttachments[0]);
+            return pdfAttachments[0];
         }
 
         private string ReadOCBCStatementPdfText(byte[] pdfBytes)

@@ -107,26 +107,24 @@ namespace MyBook
         private static bool IsWiseStatementMail(MimeMessage message)
         {
             return IsFrom(message, WiseMailSender)
-                && message.Attachments.Any(IsWiseXmlStatementAttachment);
+                && HasMatchingAttachment(message, (_, fileName) => IsWiseXmlStatementAttachment(fileName));
         }
 
-        private static bool IsWiseXmlStatementAttachment(MimeEntity attachment)
+        private static bool IsWiseXmlStatementAttachment(string fileName)
         {
-            var fileName = GetAttachmentFileName(attachment);
             return fileName.StartsWith("statement_", StringComparison.OrdinalIgnoreCase)
                 && Path.GetExtension(fileName).Equals(".xml", StringComparison.OrdinalIgnoreCase);
         }
 
         private static List<InMemoryWiseStatementAttachment> ReadWiseStatementAttachments(MimeMessage message)
         {
-            return message.Attachments
-                .OfType<MimePart>()
-                .Where(IsWiseXmlStatementAttachment)
-                .Select(attachment => new InMemoryWiseStatementAttachment(
-                    GetAttachmentFileName(attachment),
-                    GetMailDate(message),
-                    ReadMimePartBytes(attachment)))
-                .ToList();
+            return ReadMatchingAttachments(message, (attachment, fileName) =>
+                IsWiseXmlStatementAttachment(fileName)
+                    ? new InMemoryWiseStatementAttachment(
+                        fileName,
+                        GetMailDate(message),
+                        ReadMimePartBytes(attachment))
+                    : null);
         }
 
         private List<string> FindLocalWiseStatementXmlFiles(string? directory)
