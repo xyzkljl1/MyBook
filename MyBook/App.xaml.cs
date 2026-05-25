@@ -83,136 +83,91 @@ namespace MyBook
                 return;
             }
 
-            if (e.Args.Any(arg => arg.Equals("--fetch-ibkr-reports", StringComparison.OrdinalIgnoreCase)))
-            {
-                var exitCode = 0;
-                try
-                {
-                    Console.WriteLine("FetchIBKRReports: load config");
-                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
-                    Console.WriteLine("FetchIBKRReports: open database");
-                    var database = new DatabaseUtil(config);
-                    Console.WriteLine("FetchIBKRReports: create mail util");
-                    var mail = new MailUtil(config, database);
-                    Console.WriteLine("FetchIBKRReports: start");
-                    Task.Run(mail.FetchIBKRReports).WaitAsync(TimeSpan.FromSeconds(60)).GetAwaiter().GetResult();
-                    Console.WriteLine("FetchIBKRReports: done");
-                }
-                catch (Exception exception)
-                {
-                    exitCode = 1;
-                    Console.WriteLine($"FetchIBKRReports failed: {exception.Message}");
-                }
-
-                Shutdown(exitCode);
-                Environment.Exit(exitCode);
+            if (RunMailFetchCommand(
+                    e.Args,
+                    "--fetch-ibkr-reports",
+                    "FetchIBKRReports",
+                    null,
+                    TimeSpan.FromSeconds(60),
+                    (mail, _) => mail.FetchIBKRReports()))
                 return;
-            }
 
-            if (e.Args.Any(arg => arg.Equals("--fetch-wise-reports", StringComparison.OrdinalIgnoreCase)))
-            {
-                var exitCode = 0;
-                try
-                {
-                    Console.WriteLine("FetchWiseReports: load config");
-                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
-                    Console.WriteLine("FetchWiseReports: open database");
-                    var database = new DatabaseUtil(config);
-                    Console.WriteLine("FetchWiseReports: create mail util");
-                    var mail = new MailUtil(config, database);
-                    var wiseMonth = GetArgumentValue(e.Args, "--wise-month");
-                    Console.WriteLine(String.IsNullOrWhiteSpace(wiseMonth)
-                        ? "FetchWiseReports: start"
-                        : $"FetchWiseReports: start {wiseMonth}");
-                    Task.Run(String.IsNullOrWhiteSpace(wiseMonth)
-                            ? mail.FetchWiseReports
-                            : () => mail.FetchWiseReports(ParseMonthArgument(wiseMonth)))
-                        .WaitAsync(TimeSpan.FromMinutes(20))
-                        .GetAwaiter()
-                        .GetResult();
-                    Console.WriteLine("FetchWiseReports: done");
-                }
-                catch (Exception exception)
-                {
-                    exitCode = 1;
-                    Console.WriteLine($"FetchWiseReports failed: {exception.Message}");
-                }
-
-                Shutdown(exitCode);
-                Environment.Exit(exitCode);
+            if (RunMailFetchCommand(
+                    e.Args,
+                    "--fetch-wise-reports",
+                    "FetchWiseReports",
+                    "--wise-month",
+                    TimeSpan.FromMinutes(20),
+                    (mail, month) => String.IsNullOrWhiteSpace(month)
+                        ? mail.FetchWiseReports()
+                        : mail.FetchWiseReports(ParseMonthArgument(month))))
                 return;
-            }
 
-            if (e.Args.Any(arg => arg.Equals("--fetch-ocbc-reports", StringComparison.OrdinalIgnoreCase)))
-            {
-                var exitCode = 0;
-                try
-                {
-                    Console.WriteLine("FetchOCBCReports: load config");
-                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
-                    Console.WriteLine("FetchOCBCReports: open database");
-                    var database = new DatabaseUtil(config);
-                    Console.WriteLine("FetchOCBCReports: create mail util");
-                    var mail = new MailUtil(config, database);
-                    var ocbcMonth = GetArgumentValue(e.Args, "--ocbc-month");
-                    Console.WriteLine(String.IsNullOrWhiteSpace(ocbcMonth)
-                        ? "FetchOCBCReports: start"
-                        : $"FetchOCBCReports: start {ocbcMonth}");
-                    Task.Run(String.IsNullOrWhiteSpace(ocbcMonth)
-                            ? mail.FetchOCBCReports
-                            : () => mail.FetchOCBCReports(ParseMonthArgument(ocbcMonth)))
-                        .WaitAsync(TimeSpan.FromMinutes(20))
-                        .GetAwaiter()
-                        .GetResult();
-                    Console.WriteLine("FetchOCBCReports: done");
-                }
-                catch (Exception exception)
-                {
-                    exitCode = 1;
-                    Console.WriteLine($"FetchOCBCReports failed: {exception.Message}");
-                }
-
-                Shutdown(exitCode);
-                Environment.Exit(exitCode);
+            if (RunMailFetchCommand(
+                    e.Args,
+                    "--fetch-ocbc-reports",
+                    "FetchOCBCReports",
+                    "--ocbc-month",
+                    TimeSpan.FromMinutes(20),
+                    (mail, month) => String.IsNullOrWhiteSpace(month)
+                        ? mail.FetchOCBCReports()
+                        : mail.FetchOCBCReports(ParseMonthArgument(month))))
                 return;
-            }
 
-            if (e.Args.Any(arg => arg.Equals("--fetch-paypal-reports", StringComparison.OrdinalIgnoreCase)))
-            {
-                var exitCode = 0;
-                try
-                {
-                    Console.WriteLine("FetchPayPalReports: load config");
-                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
-                    Console.WriteLine("FetchPayPalReports: open database");
-                    var database = new DatabaseUtil(config);
-                    Console.WriteLine("FetchPayPalReports: create mail util");
-                    var mail = new MailUtil(config, database);
-                    var paypalMonth = GetArgumentValue(e.Args, "--paypal-month");
-                    Console.WriteLine(String.IsNullOrWhiteSpace(paypalMonth)
-                        ? "FetchPayPalReports: start"
-                        : $"FetchPayPalReports: start {paypalMonth}");
-                    Task.Run(String.IsNullOrWhiteSpace(paypalMonth)
-                            ? mail.FetchPayPalReports
-                            : () => mail.FetchPayPalReports(ParseMonthArgument(paypalMonth)))
-                        .WaitAsync(TimeSpan.FromMinutes(10))
-                        .GetAwaiter()
-                        .GetResult();
-                    Console.WriteLine("FetchPayPalReports: done");
-                }
-                catch (Exception exception)
-                {
-                    exitCode = 1;
-                    Console.WriteLine($"FetchPayPalReports failed: {exception.Message}");
-                }
-
-                Shutdown(exitCode);
-                Environment.Exit(exitCode);
+            if (RunMailFetchCommand(
+                    e.Args,
+                    "--fetch-paypal-reports",
+                    "FetchPayPalReports",
+                    "--paypal-month",
+                    TimeSpan.FromMinutes(10),
+                    (mail, month) => String.IsNullOrWhiteSpace(month)
+                        ? mail.FetchPayPalReports()
+                        : mail.FetchPayPalReports(ParseMonthArgument(month))))
                 return;
-            }
 
             MainWindow = new MainWindow();
             MainWindow.Show();
+        }
+
+        private bool RunMailFetchCommand(
+            string[] args,
+            string flag,
+            string displayName,
+            string? monthArgument,
+            TimeSpan timeout,
+            Func<MailUtil, string?, Task> fetch)
+        {
+            if (!args.Any(arg => arg.Equals(flag, StringComparison.OrdinalIgnoreCase)))
+                return false;
+
+            var exitCode = 0;
+            try
+            {
+                Console.WriteLine($"{displayName}: load config");
+                var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                Console.WriteLine($"{displayName}: open database");
+                var database = new DatabaseUtil(config);
+                Console.WriteLine($"{displayName}: create mail util");
+                var mail = new MailUtil(config, database);
+                var month = monthArgument is null ? null : GetArgumentValue(args, monthArgument);
+                Console.WriteLine(String.IsNullOrWhiteSpace(month)
+                    ? $"{displayName}: start"
+                    : $"{displayName}: start {month}");
+                Task.Run(() => fetch(mail, month))
+                    .WaitAsync(timeout)
+                    .GetAwaiter()
+                    .GetResult();
+                Console.WriteLine($"{displayName}: done");
+            }
+            catch (Exception exception)
+            {
+                exitCode = 1;
+                Console.WriteLine($"{displayName} failed: {exception.Message}");
+            }
+
+            Shutdown(exitCode);
+            Environment.Exit(exitCode);
+            return true;
         }
 
         private static void WriteCleanupResult(DatabaseCleanupResult result)

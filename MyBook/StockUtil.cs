@@ -36,7 +36,7 @@ namespace MyBook
                     ret = new Currency(await FetchGoogleFinanceStock(finance.code, "NYSEARCA"), CurrencyType.USD);
                     break;
                 case HoldingType.UST:
-                    Console.WriteLine("skip UST price: IB Gateway fetcher is marked Not used");
+                    Console.WriteLine("skip UST price: fetcher is not configured");
                     break;
                 case HoldingType.SHANGHAI:
                     ret = new Currency(await FetchShanghaiStock(finance.code), CurrencyType.RMB);
@@ -78,7 +78,7 @@ namespace MyBook
 
         public Task<List<Holding>> Fetch(Account account)
         {
-            Console.WriteLine("skip account holding fetch: IB Gateway fetcher is marked Not used");
+            Console.WriteLine("skip account holding fetch: fetcher is not configured");
             return Task.FromResult(new List<Holding>());
         }
 

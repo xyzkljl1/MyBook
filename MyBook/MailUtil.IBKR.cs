@@ -1563,17 +1563,6 @@ namespace MyBook
             return new IBKRPreciseCashValues(previousTotal, currentTotal);
         }
 
-        private static decimal ParseIBKREndingNav(IBKRCsvReport report)
-        {
-            var row = FindIBKRNavRow(report, "总数");
-            return ParseIBKRDecimalAt(row, 4, "ending NAV");
-        }
-
-        private static decimal ParseIBKRStartingNav(IBKRCsvReport report)
-        {
-            return ParseIBKRNavChangeValues(report).Start;
-        }
-
         private static decimal ParseIBKRNavChange(IBKRCsvReport report)
         {
             var (start, end) = ParseIBKRNavChangeValues(report);
@@ -2152,37 +2141,27 @@ namespace MyBook
             MimeMessage message,
             DateTime reportDate)
         {
-            var attachments = new List<InMemoryIBKRReportAttachment>();
-            foreach (var attachment in message.Attachments)
+            return ReadMatchingAttachments(message, (attachment, fileName) =>
             {
-                if (attachment is not MimePart mimePart)
-                    continue;
-
-                var fileName = GetAttachmentFileName(attachment);
                 if (!TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
                     || !IsDailyMyBookReportType(attachmentInfo.ReportType)
                     || attachmentInfo.ReportDate.Date != reportDate.Date
                     || !IsIBKRCsvAttachment(fileName))
-                {
-                    continue;
-                }
+                    return null;
 
-                attachments.Add(new InMemoryIBKRReportAttachment(
+                return new InMemoryIBKRReportAttachment(
                     fileName,
                     attachmentInfo.ReportType,
                     attachmentInfo.ReportId,
                     attachmentInfo.ReportDate,
-                    ReadMimePartBytes(mimePart)));
-            }
-
-            return attachments;
+                    ReadMimePartBytes(attachment));
+            });
         }
 
         private static bool HasIBKRReportAttachment(MimeMessage message, DateTime reportDate)
         {
-            return message.Attachments.Any(attachment =>
+            return HasMatchingAttachment(message, (_, fileName) =>
             {
-                var fileName = GetAttachmentFileName(attachment);
                 return TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
                     && IsDailyMyBookReportType(attachmentInfo.ReportType)
                     && attachmentInfo.ReportDate.Date == reportDate.Date

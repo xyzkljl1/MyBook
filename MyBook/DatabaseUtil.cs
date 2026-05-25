@@ -169,36 +169,24 @@ namespace MyBook
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
             var beginningAccountBalanceList = beginningAccountBalances?.ToList() ?? [];
-            var hasExternalBalances = accountBalanceList.Count > 0 || beginningAccountBalanceList.Count > 0;
             try
             {
                 return ExecuteLockedTransaction(() =>
                 {
-                    if (IsStatementImported(provider, time, statementKey))
+                    var statementImportId = SaveStatementImportCore(
+                        provider,
+                        time,
+                        statementKey,
+                        recordList,
+                        accountBalanceList,
+                        beginningAccountBalanceList,
+                        ShouldValidateBeginningAccountBalances(provider),
+                        afterSaveInTransaction: afterSaveInTransaction);
+                    if (!statementImportId.HasValue)
                         return false;
 
-                    var statementImportId = InsertStatementImport(provider, time, statementKey);
-                    if (hasExternalBalances)
-                    {
-                        ValidateBeginningAccountBalances(
-                            provider,
-                            beginningAccountBalanceList,
-                            ShouldValidateBeginningAccountBalances(provider));
-                        ValidateRecordBalanceChanges(provider, recordList, beginningAccountBalanceList, accountBalanceList);
-                        SaveAccountBalancesCore(accountBalanceList);
-                    }
-                    else
-                    {
-                        ValidateRelativeBalanceRecords(provider, recordList);
-                    }
-
-                    SaveRecordsCore(recordList, statementImportId);
-                    if (!hasExternalBalances)
-                        AddAccountBalanceDeltas(recordList);
-
-                    afterSaveInTransaction?.Invoke(statementImportId);
-                    MatchKnownInternalTransfersForStatements([statementImportId]);
-                    MatchInternalTransfersAroundStatement(statementImportId);
+                    MatchKnownInternalTransfersForStatements([statementImportId.Value]);
+                    MatchInternalTransfersAroundStatement(statementImportId.Value);
                     return true;
                 });
             }
@@ -224,23 +212,24 @@ namespace MyBook
 
                 foreach (var import in importList)
                 {
-                    if (IsStatementImported(import.Provider, import.Time, import.StatementKey))
+                    var statementImportId = SaveStatementImportCore(
+                        import.Provider,
+                        import.Time,
+                        import.StatementKey,
+                        import.Records,
+                        import.AccountBalances,
+                        import.BeginningAccountBalances,
+                        shouldValidateBeginningBalances[import.Provider],
+                        import.HoldingAccount,
+                        import.Holdings,
+                        import.InternalCardNos);
+                    if (!statementImportId.HasValue)
                     {
                         saved.Add(false);
                         continue;
                     }
 
-                    ValidateBeginningAccountBalances(
-                        import.Provider,
-                        import.BeginningAccountBalances,
-                        shouldValidateBeginningBalances[import.Provider]);
-                    ValidateRecordBalanceChanges(import.Provider, import.Records, import.BeginningAccountBalances, import.AccountBalances);
-                    var statementImportId = InsertStatementImport(import.Provider, import.Time, import.StatementKey);
-                    SaveAccountBalancesCore(import.AccountBalances);
-                    SaveAccountHoldingsCore(import.HoldingAccount, import.Holdings);
-                    SaveRecordsCore(import.Records, statementImportId);
-                    EnsureAccountInternalCardNos(import.InternalCardNos);
-                    savedStatementImportIds.Add(statementImportId);
+                    savedStatementImportIds.Add(statementImportId.Value);
                     saved.Add(true);
                 }
 
@@ -250,6 +239,54 @@ namespace MyBook
 
                 return saved;
             });
+        }
+
+        private int? SaveStatementImportCore(
+            StatementImportProvider provider,
+            DateTime time,
+            string statementKey,
+            List<Record> records,
+            List<AccountBalance> accountBalances,
+            List<AccountBalance> beginningAccountBalances,
+            bool shouldValidateBeginningBalances,
+            Account? holdingAccount = null,
+            List<Holding>? holdings = null,
+            List<AccountInternalId>? internalCardNos = null,
+            Action<int>? afterSaveInTransaction = null)
+        {
+            if (IsStatementImported(provider, time, statementKey))
+                return null;
+
+            var hasExternalBalances = accountBalances.Count > 0 || beginningAccountBalances.Count > 0;
+            if (hasExternalBalances)
+            {
+                ValidateBeginningAccountBalances(
+                    provider,
+                    beginningAccountBalances,
+                    shouldValidateBeginningBalances);
+                ValidateRecordBalanceChanges(provider, records, beginningAccountBalances, accountBalances);
+            }
+            else
+            {
+                ValidateRelativeBalanceRecords(provider, records);
+            }
+
+            var statementImportId = InsertStatementImport(provider, time, statementKey);
+            if (hasExternalBalances)
+                SaveAccountBalancesCore(accountBalances);
+
+            if (holdingAccount is not null && holdings is not null)
+                SaveAccountHoldingsCore(holdingAccount, holdings);
+
+            SaveRecordsCore(records, statementImportId);
+            if (!hasExternalBalances)
+                AddAccountBalanceDeltas(records);
+
+            if (internalCardNos is not null)
+                EnsureAccountInternalCardNos(internalCardNos);
+
+            afterSaveInTransaction?.Invoke(statementImportId);
+            return statementImportId;
         }
 
         public List<RecordDetailData> GetRecordDetails(DateTime start, DateTime end, string? accountName)

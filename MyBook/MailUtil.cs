@@ -149,10 +149,30 @@ namespace MyBook
                 ?? "";
         }
 
-        private async Task<string> SearchBill(string sender, string subject, DateTime date)
+        private static List<TAttachment> ReadMatchingAttachments<TAttachment>(
+            MimeMessage message,
+            Func<MimePart, string, TAttachment?> readAttachment)
+            where TAttachment : class
         {
-            var message = await SearchBill(sender, subject, date, null);
-            return message?.HtmlBody ?? message?.TextBody ?? "";
+            var result = new List<TAttachment>();
+            foreach (var attachment in message.Attachments.OfType<MimePart>())
+            {
+                var fileName = GetAttachmentFileName(attachment);
+                var parsed = readAttachment(attachment, fileName);
+                if (parsed is not null)
+                    result.Add(parsed);
+            }
+
+            return result;
+        }
+
+        private static bool HasMatchingAttachment(
+            MimeMessage message,
+            Func<MimePart, string, bool> predicate)
+        {
+            return message.Attachments
+                .OfType<MimePart>()
+                .Any(attachment => predicate(attachment, GetAttachmentFileName(attachment)));
         }
 
         private async Task<MimeMessage?> SearchBill(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
