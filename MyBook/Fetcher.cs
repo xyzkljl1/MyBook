@@ -76,11 +76,6 @@ namespace MyBook
                         database.CreateDailySnapshot();
                         return Task.CompletedTask;
                     });
-                    await TryFetchAsync("precision residual total validation", () =>
-                    {
-                        database.ValidatePrecisionResidualTotals();
-                        return Task.CompletedTask;
-                    });
                 }
             }
             finally
