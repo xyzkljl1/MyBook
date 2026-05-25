@@ -105,7 +105,7 @@ namespace MyBook
         }
 
         // 用于存储
-        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(24,12)")]
+        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public decimal _currentPrice_v { get; set; } = 0;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -164,7 +164,7 @@ namespace MyBook
         }
 
         // 用于存储
-        [SugarColumn(DefaultValue = "0", ColumnDataType = "decimal(24,12)")]
+        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public decimal _currentPrice_v { get; set; } = 0;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -180,6 +180,11 @@ namespace MyBook
         public const string SnapshotSource = "enum('AutoDaily','Manual')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Unknown')";
+    }
+
+    static class MySqlDecimalColumnTypes
+    {
+        public const string CurrencyValue = "decimal(30,18)";
     }
 
     public enum AccountUsage
@@ -281,7 +286,7 @@ namespace MyBook
     [SugarTable("Records")]
     public class Record : Currency // 收支记录
     {
-        [SugarColumn(ColumnName = "_Currency_v", DefaultValue = "0", ColumnDataType = "decimal(24,12)")]
+        [SugarColumn(ColumnName = "_Currency_v", DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public new decimal v
         {
             get => base.v;
@@ -366,7 +371,7 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public int _account_Id { get; set; } = 0;
 
-        [SugarColumn(IsNullable = true, ColumnDataType = "decimal(24,12)")]
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public decimal? _descCurrency_v { get; set; }
 
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -442,7 +447,7 @@ namespace MyBook
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType? currencyType { get; set; }
 
-        [SugarColumn(IsNullable = true, ColumnDataType = "decimal(24,12)")]
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public decimal? amount { get; set; }
 
         [SugarColumn(ColumnDataType = "longtext")]
@@ -502,7 +507,7 @@ namespace MyBook
     // 单个币种
     public class Currency : IEquatable<Currency>
     {
-        [SugarColumn(ColumnName = "amount", DefaultValue = "0", ColumnDataType = "decimal(24,12)")]
+        [SugarColumn(ColumnName = "amount", DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public decimal v { get; set; } = 0; // 金额，decimal应当可以避免精度问题
 
         [SugarColumn(ColumnName = "currency_type", DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]

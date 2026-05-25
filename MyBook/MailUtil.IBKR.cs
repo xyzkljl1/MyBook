@@ -17,7 +17,6 @@ namespace MyBook
         private const string IBKRReportSender = "donotreply@interactivebrokers.com";
         private const string IBKRDailyReportType = "DailyMyBook";
         private const int IBKRMissingReportLimitDays = 14;
-        private const decimal IBKRPrecisionResidualLimit = 0.0000001m;
         private const string IBKRStockYieldEnhancementLoanSection = "股票收益提升计划股证券出借活动";
         private const string IBKRInterestSection = "利息";
         private const string IBKRBondInterestReceivedSection = "收到的债券利息";
@@ -307,11 +306,10 @@ namespace MyBook
             var (accountId, baseCurrency) = ParseIBKRAccountInfo(report);
             var account = GetIBKRAccount(accountId);
             var contractInfos = BuildIBKRContractInfos(report);
-            var holdings = ParseIBKRHoldings(report, account, baseCurrency, contractInfos, sourceName);
-            var startingNav = ParseIBKRStartingNav(report);
-            var endingNav = ParseIBKREndingNav(report);
-            var navChange = ParseIBKRNavChange(report);
-            var records = ParseIBKRRecords(report, account, baseCurrency, contractInfos, reportDate.Date, sourceName, navChange);
+            _ = ParseIBKRNavChange(report);
+            var preciseNav = ParseIBKRPreciseNavValues(report, baseCurrency);
+            var holdings = ParseIBKRHoldings(report, account, baseCurrency, contractInfos, sourceName, preciseNav.EndingCash);
+            var records = ParseIBKRRecords(report, account, baseCurrency, contractInfos, reportDate.Date, sourceName, preciseNav.End - preciseNav.Start);
             var internalCardNos = new List<AccountInternalId>
             {
                 new()
@@ -332,8 +330,8 @@ namespace MyBook
                 account,
                 records,
                 holdings,
-                [new AccountBalance(account, new Currency(endingNav, baseCurrency))],
-                [new AccountBalance(account, new Currency(startingNav, baseCurrency))],
+                [new AccountBalance(account, new Currency(preciseNav.End, baseCurrency))],
+                [new AccountBalance(account, new Currency(preciseNav.Start, baseCurrency))],
                 internalCardNos);
         }
 
@@ -537,7 +535,7 @@ namespace MyBook
                     AssertIBKRMoneyDisplayEquals(commissionTotals.Total, ParseIBKRNavChangeComponent(report, "佣金"), "IBKR NAV change commission display");
                 }
                 else
-                    AssertIBKRMoneyEquals(mtmTotals.Commission, cashTotals.Commission, "IBKR cash commission", IBKRPrecisionResidualLimit);
+                    AssertIBKRMoneyEquals(mtmTotals.Commission, cashTotals.Commission, "IBKR cash commission");
 
                 AssertIBKRMoneyEquals(mtmTotals.Other, ParseIBKRNavChangeComponent(report, "利息"), "IBKR MTM other");
             }
@@ -565,30 +563,8 @@ namespace MyBook
                 AssertIBKRMoneyEquals(positionTransfer, transferTotal.Total, "IBKR position transfer");
 
             AddIBKROtherFxTranslationRecord(report, builder, baseCurrency);
-            AddIBKRPrecisionResidualRecord(builder, baseCurrency, expectedNavChange);
             AssertIBKRMoneyEquals(expectedNavChange, builder.NetAssetChangeTotal, "IBKR NAV change records");
             return builder.Records;
-        }
-
-        private static void AddIBKRPrecisionResidualRecord(
-            IBKRRecordBuilder builder,
-            CurrencyType baseCurrency,
-            decimal expectedNavChange)
-        {
-            var residual = expectedNavChange - builder.NetAssetChangeTotal;
-            if (residual == 0)
-                return;
-            if (Math.Abs(residual) > IBKRPrecisionResidualLimit)
-            {
-                throw new MailParseException(
-                    $"Parse IBKR Report Fail, IBKR NAV change records mismatch: expected {expectedNavChange}, got {builder.NetAssetChangeTotal}");
-            }
-
-            builder.Add(
-                new Currency(residual, baseCurrency),
-                "报表精度残差",
-                $"PrecisionResidual/{expectedNavChange}/{builder.NetAssetChangeTotal}",
-                destAccount: baseCurrency.ToString());
         }
 
         private IBKRMtmTotals ParseIBKRMtmRecords(
@@ -699,27 +675,9 @@ namespace MyBook
                 if (transaction != 0 || commission != 0 || other != 0)
                     throw new MailParseException($"Parse IBKR Report Fail, Unsupported FX MTM Non-holding Component: {FormatIBKRCsvRow(row)}");
 
-                // IBKR 有三种看起来都像“现金外汇换算收益/损失”的数值，必须区分清楚。
-                //
-                // 以 2026-05-14 的 HKD/SGD 极小现金余额为例：
-                // 1. 0.00000004370210：
-                //    这是外汇收益的精确计算值，由每种非基础货币现金余额的“数量 × 汇率变动”相加：
-                //    HKD: -0.0000137 × 0.12767 - (-0.0000137 × 0.12771)
-                //       = 0.000000000548
-                //    SGD: -0.000021795 × 0.7837 - (-0.000021795 × 0.78568)
-                //       = 0.00000004315410
-                //    HKD + SGD = 0.00000004370210。它是最精确的来源值，但不会直接入库。
-                //
-                // 2. 0.000000044：
-                //    这是 IBKR 报表逐日滚动使用的真实外汇收益值，由 0.00000004370210 舍入得到。
-                //    外汇变动 record 使用该值。
-                //
-                // 3. 0.00000004：
-                //    这是报表里直接显示出来的不精确值。
-                //    “按市值计算的表现总结”、“现金报告”、“持仓与以市值计的盈亏”中因截断显示该值，但参与实际计算的还是0.000000044
-                //      程序读取该值作校验
-                //
-                //
+                // IBKR 在汇总表中会显示舍入后的现金外汇换算值；程序入库时不读这个显示值，
+                // 而是用每个非基础货币现金行的“数量 * 汇率”重建精确值。报表显示值仍会在下面
+                // 按其显示精度舍入后校验，用来发现报表口径变化或新格式。
                 var previousQuantity = ParseIBKRDecimalAt(row, 5, "FX previous quantity");
                 var currentQuantity = ParseIBKRDecimalAt(row, 6, "FX current quantity");
                 var previousRate = ParseIBKRDecimalAt(row, 7, "FX previous rate");
@@ -741,9 +699,8 @@ namespace MyBook
                 preciseValue += rowPreciseValue;
             }
 
-            var ledgerValue = RoundIBKRCashFxTranslationForLedger(preciseValue);
-            ValidateIBKRCashFxTranslationDisplay(report, ledgerValue);
-            return ledgerValue;
+            ValidateIBKRCashFxTranslationDisplay(report, preciseValue);
+            return preciseValue;
         }
 
         private static void ValidateIBKRCashFxTranslationDisplay(IBKRCsvReport report, decimal preciseValue)
@@ -866,7 +823,7 @@ namespace MyBook
                 if (row.Fields[0].StartsWith("总数", StringComparison.Ordinal))
                 {
                     reportedTotal = ParseIBKRDecimalAt(row, 5, "commission total");
-                    AssertIBKRCommissionComponents(row);
+                    ValidateIBKRCommissionComponentFields(row);
                     continue;
                 }
 
@@ -887,7 +844,7 @@ namespace MyBook
                 // 汇总表的数值只用于 Round(佣金明细合计, 8) == 汇总显示值 的校验，不能作为
                 // record 金额入库，否则会把报表显示精度差异写进真实流水。
                 var commission = ParseIBKRDecimalAt(row, 5, "commission");
-                AssertIBKRCommissionComponents(row);
+                ValidateIBKRCommissionComponentFields(row);
                 commissionTotal += commission;
                 builder.Add(
                     new Currency(commission, currency),
@@ -904,17 +861,14 @@ namespace MyBook
             return new IBKRCommissionTotals(true, commissionTotal);
         }
 
-        private static void AssertIBKRCommissionComponents(IBKRCsvRow row)
+        private static void ValidateIBKRCommissionComponentFields(IBKRCsvRow row)
         {
-            var commission = ParseIBKRDecimalAt(row, 5, "commission");
-            var components =
-                ParseIBKRDecimalAt(row, 6, "broker execution fee")
-                + ParseIBKRDecimalAt(row, 7, "broker clearing fee")
-                + ParseIBKRDecimalAt(row, 8, "third-party execution fee")
-                + ParseIBKRDecimalAt(row, 9, "third-party clearing fee")
-                + ParseIBKRDecimalAt(row, 10, "third-party transaction fee")
-                + ParseIBKRDecimalAt(row, 11, "other commission fee");
-            AssertIBKRMoneyEquals(commission, components, $"IBKR commission components {FormatIBKRCsvRow(row)}", IBKRPrecisionResidualLimit);
+            _ = ParseIBKRDecimalAt(row, 6, "broker execution fee");
+            _ = ParseIBKRDecimalAt(row, 7, "broker clearing fee");
+            _ = ParseIBKRDecimalAt(row, 8, "third-party execution fee");
+            _ = ParseIBKRDecimalAt(row, 9, "third-party clearing fee");
+            _ = ParseIBKRDecimalAt(row, 10, "third-party transaction fee");
+            _ = ParseIBKRDecimalAt(row, 11, "other commission fee");
         }
 
         private IBKRInterestTotals ParseIBKRInterestAccrualRecords(
@@ -1263,20 +1217,20 @@ namespace MyBook
             Account account,
             CurrencyType baseCurrency,
             Dictionary<string, IBKRContractInfo> contractInfos,
-            string sourceName)
+            string sourceName,
+            decimal endingCash)
         {
             var holdings = new List<Holding>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var holding in ParseIBKRPositionAndMtmHoldings(report, account, baseCurrency, contractInfos))
                 AddIBKRHolding(holdings, seen, holding);
 
-            var cash = ParseIBKREndingCash(report);
             AddIBKRHolding(holdings, seen, new Holding(baseCurrency.ToString(), HoldingType.Cash)
             {
                 Account = account,
                 desc = $"IBKR cash {baseCurrency}",
                 displayText = baseCurrency.ToString(),
-                currentPrice = new Currency(cash, baseCurrency)
+                currentPrice = new Currency(endingCash, baseCurrency)
             });
 
             foreach (var holding in ParseIBKRNavAdjustmentHoldings(report, account, baseCurrency))
@@ -1362,7 +1316,7 @@ namespace MyBook
                 var currentPrice = ParseIBKRDecimalAt(row, 8, "holding price");
                 var currentValue = ParseIBKRDecimalAt(row, 10, "holding value");
                 var contract = ResolveIBKRContract(row.Fields[3], group, contractInfos);
-                holdings.Add(CreateIBKRHolding(account, contract, quantity, currentPrice, currentValue, currency, row.Fields[4]));
+                holdings.Add(CreateIBKRHolding(account, contract, quantity, currentPrice, currentValue, row.Fields[10], currency, row.Fields[4]));
             }
 
             return holdings;
@@ -1390,6 +1344,7 @@ namespace MyBook
             int rawQuantity,
             decimal statementPrice,
             decimal currentValue,
+            string currentValueText,
             CurrencyType currency,
             string rowDescription)
         {
@@ -1398,7 +1353,7 @@ namespace MyBook
             if (quantity != 0 && currentPrice * quantity != currentValue)
                 currentPrice = currentValue / quantity;
             if (quantity != 0)
-                AssertIBKRMoneyEquals(currentValue, currentPrice * quantity, $"IBKR holding value {contract.Code}", IBKRPrecisionResidualLimit);
+                AssertIBKRMoneyFieldEquals(currentPrice * quantity, currentValue, currentValueText, $"IBKR holding value {contract.Code}");
 
             var description = String.IsNullOrWhiteSpace(rowDescription) ? contract.Description : rowDescription;
             return new Holding(contract.Code, contract.HoldingType)
@@ -1496,6 +1451,113 @@ namespace MyBook
             return ParseIBKRDecimalAt(row, 2, "ending cash");
         }
 
+        private static decimal ParseIBKRStartingCash(IBKRCsvReport report)
+        {
+            return ParseIBKRCashReportAmount(report, IBKRStartingCashLabel, "starting cash");
+        }
+
+        private static decimal ParseIBKRCashReportAmount(IBKRCsvReport report, string label, string context)
+        {
+            var row = FindIBKRCashReportRow(report, label);
+            return ParseIBKRDecimalAt(row, 2, context);
+        }
+
+        private const string IBKRStartingCashLabel = "期初现金";
+        private const string IBKREndingCashLabel = "期末现金";
+        private const string IBKRNavCashComponent = "现金";
+        private const string IBKRNavTotalLabel = "总数";
+
+        private static IBKRCsvRow FindIBKRCashReportRow(IBKRCsvReport report, string label)
+        {
+            return report.Sections.Values.SelectMany(section => section.DataRows).FirstOrDefault(row => row.Fields.Count > 2 && row.Fields[0] == label)
+                ?? throw new MailParseException($"Parse IBKR Report Fail, Missing Cash Row: {label}");
+        }
+
+        private static IBKRPreciseNavValues ParseIBKRPreciseNavValues(IBKRCsvReport report, CurrencyType baseCurrency)
+        {
+            // IBKR 净资产总值表本身是汇总视图，底层实际计算依赖各资产明细的精确值。
+            // 本程序也按同样口径重建净资产：现金用外汇持仓行中的数量和汇率精确计算，
+            // 股票、债券、应计项目等使用报表明细给出的当前值。净资产总值表里的总数
+            // 只用于校验重建结果按报表显示精度舍入后是否一致，不能作为余额或 record 的来源。
+            var preciseCash = ParseIBKRPreciseCashValues(report, baseCurrency);
+            var navSectionName = FindIBKRNavRow(report, IBKRNavTotalLabel).Section;
+            decimal previousTotal = 0;
+            decimal currentTotal = 0;
+            foreach (var row in report.RequireDataRows(navSectionName))
+            {
+                if (row.Fields.Count == 1)
+                    continue;
+                AssertIBKRFieldCount(row, 6);
+                var component = row.Fields[0];
+                if (component.StartsWith(IBKRNavTotalLabel, StringComparison.Ordinal))
+                    continue;
+                if (IsIBKRNavDetailComponent(component))
+                    continue;
+
+                _ = ParseIBKRKnownNavComponent(component);
+                var previous = ParseIBKRDecimalAt(row, 1, "precise NAV previous component");
+                var current = ParseIBKRDecimalAt(row, 4, "precise NAV current component");
+                if (component == IBKRNavCashComponent)
+                {
+                    AssertIBKRMoneyFieldEquals(preciseCash.Start, previous, row.Fields[1], "IBKR precise NAV cash previous display");
+                    AssertIBKRMoneyFieldEquals(preciseCash.End, current, row.Fields[4], "IBKR precise NAV cash current display");
+                    previous = preciseCash.Start;
+                    current = preciseCash.End;
+                }
+
+                previousTotal += previous;
+                currentTotal += current;
+            }
+
+            var totalRow = FindIBKRNavRow(report, IBKRNavTotalLabel);
+            AssertIBKRMoneyFieldEquals(previousTotal, ParseIBKRDecimalAt(totalRow, 1, "precise NAV previous total"), totalRow.Fields[1], "IBKR precise NAV previous total display");
+            AssertIBKRMoneyFieldEquals(currentTotal, ParseIBKRDecimalAt(totalRow, 4, "precise NAV current total"), totalRow.Fields[4], "IBKR precise NAV current total display");
+            AssertIBKRMoneyFieldEquals(currentTotal - previousTotal, ParseIBKRDecimalAt(totalRow, 5, "precise NAV total change"), totalRow.Fields[5], "IBKR precise NAV total change display");
+            return new IBKRPreciseNavValues(previousTotal, currentTotal, preciseCash.Start, preciseCash.End);
+        }
+
+        private static IBKRPreciseCashValues ParseIBKRPreciseCashValues(IBKRCsvReport report, CurrencyType baseCurrency)
+        {
+            decimal previousTotal = 0;
+            decimal currentTotal = 0;
+            var hasPositionCashRows = false;
+            foreach (var row in report.Sections.Values.SelectMany(section => section.DataRows))
+            {
+                if (!IsIBKRPositionSummaryRow(row))
+                    continue;
+                if (!TryParseIBKRCurrencyType(row.Fields[3], out _))
+                    continue;
+
+                var valueCurrency = ParseIBKRCurrencyType(row.Fields[2]);
+                if (valueCurrency != baseCurrency)
+                    throw new MailParseException($"Parse IBKR Report Fail, Non-base FX Position Value Currency: {FormatIBKRCsvRow(row)}");
+
+                var previousQuantity = ParseIBKRDecimalAt(row, 5, "FX previous quantity");
+                var currentQuantity = ParseIBKRDecimalAt(row, 6, "FX current quantity");
+                var previousRate = ParseIBKRDecimalAt(row, 7, "FX previous rate");
+                var currentRate = ParseIBKRDecimalAt(row, 8, "FX current rate");
+                var calculatedPreviousMarketValue = previousQuantity * previousRate;
+                var calculatedCurrentMarketValue = currentQuantity * currentRate;
+                var reportedPreviousMarketValue = ParseIBKRDecimalAt(row, 9, "FX previous market value");
+                var reportedCurrentMarketValue = ParseIBKRDecimalAt(row, 10, "FX current market value");
+                AssertIBKRMoneyFieldEquals(calculatedPreviousMarketValue, reportedPreviousMarketValue, row.Fields[9], $"IBKR precise FX previous market value display {FormatIBKRCsvRow(row)}");
+                AssertIBKRMoneyFieldEquals(calculatedCurrentMarketValue, reportedCurrentMarketValue, row.Fields[10], $"IBKR precise FX current market value display {FormatIBKRCsvRow(row)}");
+
+                previousTotal += calculatedPreviousMarketValue;
+                currentTotal += calculatedCurrentMarketValue;
+                hasPositionCashRows = true;
+            }
+
+            if (!hasPositionCashRows)
+                return new IBKRPreciseCashValues(ParseIBKRStartingCash(report), ParseIBKREndingCash(report));
+
+            var startingCashRow = FindIBKRCashReportRow(report, IBKRStartingCashLabel);
+            var endingCashRow = FindIBKRCashReportRow(report, IBKREndingCashLabel);
+            AssertIBKRMoneyFieldEquals(previousTotal, ParseIBKRDecimalAt(startingCashRow, 2, "starting cash"), startingCashRow.Fields[2], "IBKR precise starting cash display");
+            AssertIBKRMoneyFieldEquals(currentTotal, ParseIBKRDecimalAt(endingCashRow, 2, "ending cash"), endingCashRow.Fields[2], "IBKR precise ending cash display");
+            return new IBKRPreciseCashValues(previousTotal, currentTotal);
+        }
+
         private static decimal ParseIBKREndingNav(IBKRCsvReport report)
         {
             var row = FindIBKRNavRow(report, "总数");
@@ -1544,7 +1606,6 @@ namespace MyBook
                 throw new MailParseException($"Parse IBKR Report Fail, Unknown NAV Change Component: {label}/{amount}");
             }
 
-            AssertIBKRMoneyEquals(end - start, componentTotal, "IBKR NAV change components", IBKRPrecisionResidualLimit);
             return (start, end);
         }
 
@@ -1573,8 +1634,6 @@ namespace MyBook
             var totalRow = FindIBKRNavRow(report, "总数");
             AssertIBKRMoneyEquals(start, ParseIBKRDecimalAt(totalRow, 1, "NAV previous total"), "IBKR NAV previous total");
             AssertIBKRMoneyEquals(end, ParseIBKRDecimalAt(totalRow, 4, "NAV current total"), "IBKR NAV current total");
-            AssertIBKRMoneyEquals(end - start, ParseIBKRDecimalAt(totalRow, 5, "NAV change"), "IBKR NAV total change", IBKRPrecisionResidualLimit);
-
             decimal previousTotal = 0;
             decimal currentLongTotal = 0;
             decimal currentShortTotal = 0;
@@ -1743,7 +1802,7 @@ namespace MyBook
             var interestTotal = ValidateIBKRMoneyDetailSection(report, IBKRInterestSection, 4);
             var bondInterestTotal = ValidateIBKRMoneyDetailSection(report, IBKRBondInterestReceivedSection, 5, 3);
             if (interestTotal.HasValue && bondInterestTotal.HasValue)
-                AssertIBKRMoneyEquals(interestTotal.Value, bondInterestTotal.Value, "IBKR interest detail sections", IBKRPrecisionResidualLimit);
+                AssertIBKRMoneyEquals(interestTotal.Value, bondInterestTotal.Value, "IBKR interest detail sections");
         }
 
         private static void ValidateIBKRStockYieldEnhancementLoanSection(IBKRCsvReport report)
@@ -1806,6 +1865,7 @@ namespace MyBook
             var totalIndex = totalAmountIndex ?? fieldCount - 1;
             decimal total = 0;
             decimal? reportedTotal = null;
+            string? reportedTotalText = null;
             foreach (var row in rows)
             {
                 AssertIBKRFieldCount(row, fieldCount);
@@ -1822,6 +1882,7 @@ namespace MyBook
                     }
 
                     reportedTotal = ParseIBKRDecimalAt(row, totalIndex, $"{sectionName} total");
+                    reportedTotalText = row.Fields[totalIndex];
                     continue;
                 }
 
@@ -1834,7 +1895,7 @@ namespace MyBook
 
             if (!reportedTotal.HasValue)
                 throw new MailParseException($"Parse IBKR Report Fail, Missing {sectionName} Total: {report.SourceName}");
-            AssertIBKRMoneyEquals(reportedTotal.Value, total, $"IBKR {sectionName} total", IBKRPrecisionResidualLimit);
+            AssertIBKRMoneyFieldEquals(total, reportedTotal.Value, reportedTotalText!, $"IBKR {sectionName} total");
             return total;
         }
 
@@ -2025,12 +2086,6 @@ namespace MyBook
                 throw new MailParseException($"Parse IBKR Report Fail, {context} mismatch: expected {expected}, got {actual}");
         }
 
-        private static void AssertIBKRMoneyEquals(decimal expected, decimal actual, string context, decimal tolerance)
-        {
-            if (Math.Abs(expected - actual) > tolerance)
-                throw new MailParseException($"Parse IBKR Report Fail, {context} mismatch: expected {expected}, got {actual}");
-        }
-
         private static void AssertIBKRMoneyDisplayEquals(decimal preciseValue, decimal displayedValue, string context)
         {
             var roundedPreciseValue = RoundIBKRMoneyForReportDisplay(preciseValue);
@@ -2041,14 +2096,19 @@ namespace MyBook
             }
         }
 
+        private static void AssertIBKRMoneyFieldEquals(decimal preciseValue, decimal displayedValue, string reportText, string context)
+        {
+            var roundedPreciseValue = RoundIBKRMoneyForReportField(preciseValue, reportText);
+            if (roundedPreciseValue != displayedValue)
+            {
+                throw new MailParseException(
+                    $"Parse IBKR Report Fail, {context} mismatch: expected display {roundedPreciseValue} from precise {preciseValue}, got {displayedValue}");
+            }
+        }
+
         private static decimal RoundIBKRMoneyForReportDisplay(decimal value)
         {
             return Math.Round(value, 8, MidpointRounding.AwayFromZero);
-        }
-
-        private static decimal RoundIBKRCashFxTranslationForLedger(decimal value)
-        {
-            return Math.Round(value, 9, MidpointRounding.AwayFromZero);
         }
 
         private static decimal RoundIBKRMoneyForReportField(decimal value, string reportText)
@@ -2173,6 +2233,10 @@ namespace MyBook
             List<AccountInternalId> InternalCardNos);
 
         private sealed record IBKRContractInfo(string Code, string Description, HoldingType HoldingType, string DisplayText);
+
+        private sealed record IBKRPreciseNavValues(decimal Start, decimal End, decimal StartingCash, decimal EndingCash);
+
+        private sealed record IBKRPreciseCashValues(decimal Start, decimal End);
 
         private sealed record IBKRMtmTotals(bool HasData, decimal Holding, decimal Transaction, decimal Commission, decimal Other);
 
