@@ -22,7 +22,7 @@ namespace MyBook
         private readonly string apppasswd;
         private readonly DatabaseUtil database;
         private readonly IConfigurationRoot config;
-        private const int MailClientTimeoutMilliseconds = 30000;
+        private const int MailClientTimeoutMilliseconds = 300000;
         private static readonly TimeSpan MailClientTimeout = TimeSpan.FromMilliseconds(MailClientTimeoutMilliseconds);
         private sealed record ImapMailbox(string Label, string Host, int Port, bool UseSsl, string Username, string Password, bool UseAllMail);
 

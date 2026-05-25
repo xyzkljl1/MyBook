@@ -83,6 +83,113 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--debug-download-icbc-history-details", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    var dateText = GetArgumentValue(e.Args, "--icbc-history-date");
+                    if (String.IsNullOrWhiteSpace(dateText))
+                        throw new ArgumentException("Missing --icbc-history-date value.");
+
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    var database = new DatabaseUtil(config);
+                    var mail = new MailUtil(config, database);
+                    Task.Run(() => mail.DebugDownloadICBCHistoryDetails(
+                            ParseDateArgument(dateText),
+                            GetArgumentValue(e.Args, "--icbc-history-dir")))
+                        .WaitAsync(TimeSpan.FromMinutes(5))
+                        .GetAwaiter()
+                        .GetResult();
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"DebugDownloadICBCHistoryDetails failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
+            if (e.Args.Any(arg => arg.Equals("--debug-download-latest-icbc-history-detail", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    var database = new DatabaseUtil(config);
+                    var mail = new MailUtil(config, database);
+                    Task.Run(() => mail.DebugDownloadLatestICBCHistoryDetail(GetArgumentValue(e.Args, "--icbc-history-dir")))
+                        .WaitAsync(TimeSpan.FromMinutes(5))
+                        .GetAwaiter()
+                        .GetResult();
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"DebugDownloadLatestICBCHistoryDetail failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
+            if (e.Args.Any(arg => arg.Equals("--debug-fetch-local-icbc-history-details", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    var database = new DatabaseUtil(config);
+                    var mail = new MailUtil(config, database);
+                    mail.DebugFetchLocalICBCHistoryDetails(GetArgumentValue(e.Args, "--icbc-history-dir"));
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"DebugFetchLocalICBCHistoryDetails failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
+            if (RunMailFetchCommand(
+                    e.Args,
+                    "--fetch-icbc-bills",
+                    "FetchICBCBills",
+                    "--icbc-month",
+                    TimeSpan.FromMinutes(20),
+                    async (mail, month) =>
+                    {
+                        if (String.IsNullOrWhiteSpace(month))
+                        {
+                            await mail.FetchICBCBills();
+                            return;
+                        }
+
+                        var targetMonth = ParseMonthArgument(month);
+                        if (!await mail.FetchICBCBill(targetMonth))
+                            throw new InvalidOperationException($"Missing ICBC bill for {targetMonth:yyyy-MM}");
+                    }))
+                return;
+
+            if (RunMailFetchCommand(
+                    e.Args,
+                    "--fetch-icbc-history-details",
+                    "FetchICBCHistoryDetails",
+                    "--icbc-history-since",
+                    TimeSpan.FromMinutes(20),
+                    (mail, since) => mail.FetchICBCHistoryDetails(
+                        String.IsNullOrWhiteSpace(since)
+                            ? DateTime.Today.AddMonths(-5)
+                            : ParseDateArgument(since))))
+                return;
+
             if (RunMailFetchCommand(
                     e.Args,
                     "--fetch-ibkr-reports",
@@ -278,15 +385,20 @@ namespace MyBook
 
         private static DateTime ParseMonthArgument(string value)
         {
+            return ParseDateArgument(value);
+        }
+
+        private static DateTime ParseDateArgument(string value)
+        {
             if (DateTime.TryParseExact(
                     value,
                     ["yyyy-MM", "yyyy/MM", "yyyy-MM-dd", "yyyy/MM/dd"],
                     CultureInfo.InvariantCulture,
                     DateTimeStyles.None,
-                    out var month))
-                return month;
+                    out var date))
+                return date;
 
-            throw new ArgumentException($"Invalid month argument: {value}");
+            throw new ArgumentException($"Invalid date argument: {value}");
         }
     }
 }

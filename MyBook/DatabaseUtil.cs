@@ -198,6 +198,46 @@ namespace MyBook
             }
         }
 
+        public bool SaveOutOfOrderStatementRecordsOnce(
+            StatementImportProvider provider,
+            DateTime time,
+            IEnumerable<Record> records,
+            IEnumerable<AccountBalance>? accountBalances = null,
+            string statementKey = "",
+            IEnumerable<AccountInternalId>? internalCardNos = null,
+            Action<int>? afterSaveInTransaction = null)
+        {
+            var recordList = records.ToList();
+            var accountBalanceList = accountBalances?.ToList() ?? [];
+            var internalCardNoList = internalCardNos?.ToList() ?? [];
+            try
+            {
+                return ExecuteLockedTransaction(() =>
+                {
+                    if (IsStatementImported(provider, time, statementKey))
+                        return false;
+
+                    var statementImportId = InsertStatementImport(provider, time, statementKey);
+                    if (accountBalanceList.Count > 0)
+                        SaveAccountBalancesCore(accountBalanceList);
+                    SaveRecordsCore(recordList, statementImportId);
+                    if (internalCardNoList.Count > 0)
+                        EnsureAccountInternalCardNos(internalCardNoList);
+
+                    afterSaveInTransaction?.Invoke(statementImportId);
+                    MatchKnownInternalTransfersForStatements([statementImportId]);
+                    MatchInternalTransfersAroundStatement(statementImportId);
+                    return true;
+                });
+            }
+            catch (Exception e)
+            {
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
+                    return false;
+                throw;
+            }
+        }
+
         public List<bool> SaveStatementRecordsAndHoldingsOnce(IEnumerable<StatementRecordHoldingImport> imports)
         {
             var importList = imports.ToList();
@@ -787,6 +827,33 @@ namespace MyBook
             return value?.Trim() ?? "";
         }
 
+        private static string LimitRecordText(string text)
+        {
+            const int maxLength = 1024;
+            var normalized = CleanRecordText(text);
+            return normalized.Length <= maxLength ? normalized : normalized[..maxLength];
+        }
+
+        private static string AppendLimitedRecordText(string current, string append)
+        {
+            const int maxLength = 1024;
+            var normalizedAppend = CleanRecordText(append);
+            if (String.IsNullOrWhiteSpace(normalizedAppend))
+                return LimitRecordText(current);
+            if (normalizedAppend.Length >= maxLength)
+                return normalizedAppend[..maxLength];
+
+            var normalizedCurrent = CleanRecordText(current);
+            var separator = String.IsNullOrWhiteSpace(normalizedCurrent) ? "" : "; ";
+            var availableCurrentLength = maxLength - normalizedAppend.Length - separator.Length;
+            if (availableCurrentLength <= 0)
+                return normalizedAppend;
+            if (normalizedCurrent.Length > availableCurrentLength)
+                normalizedCurrent = normalizedCurrent[..availableCurrentLength];
+
+            return $"{normalizedCurrent}{separator}{normalizedAppend}";
+        }
+
         private static string SerializeRecordBackup(Record record, StatementImport statementImport)
         {
             return JsonSerializer.Serialize(
@@ -797,6 +864,7 @@ namespace MyBook
                     record.v,
                     record.t,
                     record.date,
+                    record.postingDate,
                     record.updateTime,
                     record.DestAccount,
                     record.isInternal,
@@ -2523,6 +2591,93 @@ namespace MyBook
                 .ToList();
         }
 
+        public List<Record> GetStatementRecords(StatementImportProvider provider, Account account, DateTime start, DateTime end)
+        {
+            var postingAccount = GetPostingAccount(account);
+            return GetStatementRecords(provider, start, end)
+                .Where(record => record._account_Id == postingAccount.Id)
+                .ToList();
+        }
+
+        public List<StatementImport> GetStatementImports(StatementImportProvider provider)
+        {
+            return db.Queryable<StatementImport>()
+                .Where(statementImport => statementImport.provider == provider)
+                .ToList();
+        }
+
+        public List<string> GetStatementImportKeys(StatementImportProvider provider)
+        {
+            return db.Queryable<StatementImport>()
+                .Where(statementImport => statementImport.provider == provider && statementImport.statementKey != "")
+                .Select(statementImport => statementImport.statementKey)
+                .ToList();
+        }
+
+        public HashSet<string> GetRecordSourceCodes(string prefix)
+        {
+            return db.Queryable<Record>()
+                .Where(record => record.Source.Contains($"code={prefix}"))
+                .Select(record => record.Source)
+                .ToList()
+                .Select(ExtractRecordSourceCode)
+                .Where(code => code.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+
+        public bool SaveRecordSourceSupplementsOnce(
+            StatementImportProvider provider,
+            DateTime time,
+            string statementKey,
+            IEnumerable<RecordSourceSupplement> supplements,
+            IEnumerable<AccountInternalId>? internalCardNos = null)
+        {
+            var supplementList = supplements.ToList();
+            var internalCardNoList = internalCardNos?.ToList() ?? [];
+            if (supplementList.Count == 0)
+                return false;
+
+            try
+            {
+                return ExecuteLockedTransaction(() =>
+                {
+                    if (IsStatementImported(provider, time, statementKey))
+                        return false;
+
+                    InsertStatementImport(provider, time, statementKey);
+                    var now = DateTime.Now;
+                    foreach (var supplement in supplementList)
+                    {
+                        var record = db.Queryable<Record>()
+                            .Where(it => it.Id == supplement.RecordId)
+                            .First();
+                        if (record is null)
+                            throw new InvalidOperationException($"Supplement target record not found: {supplement.RecordId}");
+
+                        if (record.Source.Contains($"code={supplement.SourceCode}", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        record.Source = AppendLimitedRecordText(record.Source, supplement.SourceAppend);
+                        record.updateTime = now;
+                        db.Updateable(record)
+                            .UpdateColumns(it => new { it.Source, it.updateTime })
+                            .ExecuteCommand();
+                    }
+
+                    if (internalCardNoList.Count > 0)
+                        EnsureAccountInternalCardNos(internalCardNoList);
+
+                    return true;
+                });
+            }
+            catch (Exception e)
+            {
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
+                    return false;
+                throw;
+            }
+        }
+
         public void MarkRecordsAsRefundMatched(IEnumerable<Record> records)
         {
             var updates = records.ToList();
@@ -2783,6 +2938,7 @@ namespace MyBook
             decimal Amount,
             CurrencyType Currency,
             DateTime Date,
+            DateTime? PostingDate,
             DateTime UpdateTime,
             string DestAccount,
             bool IsInternal,
@@ -2845,6 +3001,11 @@ namespace MyBook
         Currency TotalPrice,
         string DisplayText,
         string Description);
+
+    record RecordSourceSupplement(
+        int RecordId,
+        string SourceCode,
+        string SourceAppend);
 
     class DatabaseCleanupResult
     {

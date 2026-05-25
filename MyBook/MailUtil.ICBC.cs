@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using MimeKit;
 
 namespace MyBook
 {
@@ -31,7 +32,7 @@ namespace MyBook
         public async Task<bool> FetchICBCBill(DateTime date)
         {
             var reportMonth = FirstDayOfMonth(date);
-            var message = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", reportMonth, null);
+            var message = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", reportMonth, IsICBCInlineBillMessage);
             if (message is null)
                 return false;
 
@@ -48,11 +49,7 @@ namespace MyBook
                     return true;
 
                 var tables = FormUtil.ReadFromHTML(billText);
-                if (tables.Count < 4
-                    || tables[0].Title != "需 还 款 明 细"
-                    || tables[1].Title != "本 期 交 易 汇 总"
-                    || tables[2].Title != "人民币(本位币) 交 易 明 细"
-                    || tables[3].Title != "外 币 交 易 明 细")
+                if (!IsICBCInlineBillTables(tables))
                     throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
                 var beginningAccountBalances = ParseICBCAccountBalances(tables[1], 1);
                 var accountBalances = ParseICBCAccountBalances(tables[1], 4);
@@ -84,12 +81,47 @@ namespace MyBook
 
         private static DateTime ParseICBCStatementEndDate(string billText)
         {
+            if (TryParseICBCStatementEndDate(billText, out var statementEndDate))
+                return statementEndDate;
+
+            throw new MailParseException("Parse ICBC Bill Fail, Missing Statement Period");
+        }
+
+        private static bool TryParseICBCStatementEndDate(string billText, out DateTime statementEndDate)
+        {
+            statementEndDate = default;
             var text = NormalizeMailText(Regex.Replace(System.Net.WebUtility.HtmlDecode(billText), "<[^>]+>", " "));
             var match = Regex.Match(text, @"账单周期\s*\d{4}年\d{1,2}月\d{1,2}日\s*[—\-－~至到]\s*(?<end>\d{4}年\d{1,2}月\d{1,2}日)");
             if (!match.Success)
-                throw new MailParseException("Parse ICBC Bill Fail, Missing Statement Period");
+                return false;
 
-            return DateTime.ParseExact(match.Groups["end"].Value, "yyyy年M月d日", CultureInfo.InvariantCulture);
+            statementEndDate = DateTime.ParseExact(match.Groups["end"].Value, "yyyy年M月d日", CultureInfo.InvariantCulture);
+            return true;
+        }
+
+        private static bool IsICBCInlineBillMessage(MimeMessage message)
+        {
+            var billText = message.HtmlBody ?? message.TextBody ?? "";
+            if (String.IsNullOrWhiteSpace(billText) || !TryParseICBCStatementEndDate(billText, out _))
+                return false;
+
+            try
+            {
+                return IsICBCInlineBillTables(FormUtil.ReadFromHTML(billText));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsICBCInlineBillTables(List<FormUtil.FormTable> tables)
+        {
+            return tables.Count >= 4
+                && tables[0].Title == "需 还 款 明 细"
+                && tables[1].Title == "本 期 交 易 汇 总"
+                && tables[2].Title == "人民币(本位币) 交 易 明 细"
+                && tables[3].Title == "外 币 交 易 明 细";
         }
 
         private List<AccountBalance> ParseICBCAccountBalances(FormUtil.FormTable table, int balanceColumn)
@@ -153,13 +185,14 @@ namespace MyBook
                 record.updateTime = DateTime.Now;
                 record.Account = database.GetPostingAccount(cardAccount);
                 record.date = DateTime.ParseExact(line[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                record.postingDate = DateTime.ParseExact(line[2], "yyyy-MM-dd", CultureInfo.InvariantCulture);
                 record.Source = $"ICBC对账单邮件{table.Title}/{DateTime.Now}/{string.Join(",", line)}";
                 record.DestAccount = line[4];
-                record.DescCurrency = Currency.Parse(line[5]);
                 record.CopyFrom(postingCurrency);
+                record.DescCurrency = ApplyICBCOriginalCurrencySign(Currency.Parse(line[5]), record);
                 var internalCounterparty = database.FindAccountByInternalCardNoText(
                     null,
-                    $"ICBC import table={table.Title}; date={line[1]}; card={line[0]}; type={line[3]}; row={String.Join(" | ", line)}",
+                    $"ICBC import table={table.Title}; transactionDate={line[1]}; postingDate={line[2]}; card={line[0]}; type={line[3]}; row={String.Join(" | ", line)}",
                     record.DestAccount);
                 if (internalCounterparty is not null && !IsSameAccount(database.GetPostingAccount(internalCounterparty), record.Account))
                 {
@@ -176,31 +209,8 @@ namespace MyBook
                 {
                     if (record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
-                    // 副卡消费产生的退款仍会显示在副卡卡号下；在同一个月内向前搜索对应的消费，尝试消除。
-                    // 比较 DescCurrency 因为退款是按交易金额退的，IsSameAccount 则保证不会跨入账户匹配。
-                    Record? destRecord = records.FindLast(destRecord =>
-                        destRecord.DestAccount == record.DestAccount && destRecord.v < 0
-                        && IsSameAccount(destRecord.Account, record.Account) && destRecord.DescCurrency == record.DescCurrency);
-                    if (destRecord is not null)
-                    {
-                        records.Remove(destRecord);
-                        if (destRecord.t != record.t)
-                            throw new MailParseException("Parse ICBC Bill Fail, Refund Currency Mismatch");
-
-                        record.v += destRecord.v;
-                        if (record.DescCurrency is not null)
-                            record.DescCurrency = new Currency(0, record.DescCurrency.t);
-                        if (record.v != 0)
-                        {
-                            record.Reason = "退款汇率差异";
-                            records.Add(record);
-                        }
-                    }
-                    else
-                    {
-                        record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。
-                        records.Add(record);
-                    }
+                    record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。
+                    records.Add(record);
                 }
                 else if (line[3] == "人民币自动转账还款" || line[3] == "自动购汇还款" || line[3] == "转账")
                 {
@@ -239,7 +249,6 @@ namespace MyBook
             var maxDate = refunds.Max(record => record.date);
             var expenses = database.GetStatementRecords(ICBCProvider, minDate, maxDate)
                 .Where(record => !record.isRefundMatched
-                    && record._statementImport_Id != targetStatementImportId
                     && record.v < 0)
                 .Where(IsICBCExpenseRecord)
                 .OrderBy(record => record.date)
@@ -257,7 +266,8 @@ namespace MyBook
                 var expense = expenses
                     .Where(record => !matchedRecordIds.Contains(record.Id)
                         && record.date >= matchStart
-                        && record.date < refund.date
+                        && (record.date < refund.date
+                            || (record.date == refund.date && record.Id < refund.Id))
                         && IsICBCRefundExpenseMatch(refund, record))
                     .OrderByDescending(record => record.date)
                     .ThenByDescending(record => record.Id)
@@ -299,7 +309,23 @@ namespace MyBook
             return refund._account_Id == expense._account_Id
                 && refund.DestAccount == expense.DestAccount
                 && refund.DescCurrency is not null
-                && refund.DescCurrency == expense.DescCurrency;
+                && IsOppositeICBCOriginalCurrency(refund.DescCurrency, expense.DescCurrency);
+        }
+
+        private static Currency ApplyICBCOriginalCurrencySign(Currency originalCurrency, Currency postingCurrency)
+        {
+            if (postingCurrency.v == 0 || originalCurrency.v == 0)
+                return originalCurrency;
+
+            return new Currency(Math.Abs(originalCurrency.v) * Math.Sign(postingCurrency.v), originalCurrency.t);
+        }
+
+        private static bool IsOppositeICBCOriginalCurrency(Currency? left, Currency? right)
+        {
+            return left is not null
+                && right is not null
+                && left.t == right.t
+                && left.v + right.v == 0;
         }
     }
 }
