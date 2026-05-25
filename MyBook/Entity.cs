@@ -86,7 +86,14 @@ namespace MyBook
         [SugarColumn(IsIgnore = true)]
         public Currency totalPrice
         {
-            get { return new Currency(quantity * currentPrice.v, currentPrice.t); }
+            get
+            {
+                var amount = quantity * currentPrice.v;
+                // IBKR 美债报价按 100 面值给出，报表参与净资产计算的市值按分四舍五入。
+                if (holdingType == HoldingType.UST)
+                    amount = Decimal.Round(amount, 2, MidpointRounding.AwayFromZero);
+                return new Currency(amount, currentPrice.t);
+            }
         }
 
         public Holding()
