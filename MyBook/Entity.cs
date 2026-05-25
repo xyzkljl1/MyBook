@@ -183,7 +183,7 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','PayPalMail','Manual')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','PayPalMail','Manual')";
         public const string SnapshotSource = "enum('AutoDaily','Manual')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Unknown')";
@@ -253,6 +253,9 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "1")]
         public bool relativeBalance { get; set; } = true; // 无法直接获取真实余额，只能根据变动值推算。
+
+        [SugarColumn(DefaultValue = "0")]
+        public bool isCredit { get; set; } = false; // 是否是信用卡账户。
 
         // 仅用于 UI 统计分组，不影响余额、流水和导入逻辑。
         [SugarColumn(DefaultValue = "Life", ColumnDataType = MySqlEnumColumnTypes.AccountUsage, SqlParameterDbType = typeof(EnumToStringConvert))]
@@ -337,10 +340,14 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public int HoldingQuantity { get; set; } = 0; // 交易涉及的持仓数量，非持仓交易为 0。
 
-        public DateTime date { get; set; } // 发生时间
+        public DateTime date { get; set; } // 交易日，表示交易实际发生的日期。
+
+        [SugarColumn(IsNullable = true, ColumnDataType = "datetime(6)")]
+        public DateTime? postingDate { get; set; } = null; // 记账日，表示交易实际体现在账单上的日期。
+
         public DateTime updateTime { get; set; }
-        // 表面交易金额，区别于记账金额，极少使用
-        // 例如在Steam国区用visa外币卡购买100RMB的游戏，实际会换算成外币支出，而退款时也是把100RMB换算成外币退款，汇率变动可能导致消费和退款的外币金额不一致
+        // 原始交易币种和数量，带有正负号，区别于最终入账币种和数量。
+        // 例如在 Steam 国区用 visa 外币卡购买 100 RMB 的游戏，实际会换算成外币支出；这里保存 -100 RMB。
         [SugarColumn(IsIgnore = true)]
         public Currency? DescCurrency
         {
@@ -472,6 +479,7 @@ namespace MyBook
     {
         IBKRReportMail,
         ICBCBillMail,
+        ICBCHistoryDetailMail,
         WiseMail,
         OCBCMail,
         OCBCStatementMail,
