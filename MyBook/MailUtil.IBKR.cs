@@ -532,7 +532,10 @@ namespace MyBook
             if (mtmTotals.HasData)
             {
                 if (commissionTotals.HasData)
-                    AssertIBKRMoneyEquals(mtmTotals.Commission, commissionTotals.Total, "IBKR commission", IBKRPrecisionResidualLimit);
+                {
+                    AssertIBKRMoneyDisplayEquals(commissionTotals.Total, mtmTotals.Commission, "IBKR MTM commission display");
+                    AssertIBKRMoneyDisplayEquals(commissionTotals.Total, ParseIBKRNavChangeComponent(report, "佣金"), "IBKR NAV change commission display");
+                }
                 else
                     AssertIBKRMoneyEquals(mtmTotals.Commission, cashTotals.Commission, "IBKR cash commission", IBKRPrecisionResidualLimit);
 
@@ -875,6 +878,14 @@ namespace MyBook
                 var contract = ResolveIBKRContract(row.Fields[2], assetClass, contractInfos);
                 var rawQuantity = ParseIBKRIntegerQuantityAt(row, 4, "commission quantity");
                 var quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity);
+                // 佣金 record 的金额只取“佣金细节”表里的“佣金”列。这个列是 IBKR 对该次成交
+                // 实际收取佣金的最精确来源，例如 2026-05-14 的两条 NVDL 佣金分别是
+                // -0.025505784 和 -1.025505784，合计 -1.051011568。
+                //
+                // 不要用“现金报告”“净资产值变更”或“按市值计算的表现总结”里的佣金汇总值替代它们；
+                // 那些表通常只显示 8 位小数，例如 -1.051011568 会显示为 -1.05101157。
+                // 汇总表的数值只用于 Round(佣金明细合计, 8) == 汇总显示值 的校验，不能作为
+                // record 金额入库，否则会把报表显示精度差异写进真实流水。
                 var commission = ParseIBKRDecimalAt(row, 5, "commission");
                 AssertIBKRCommissionComponents(row);
                 commissionTotal += commission;
@@ -1195,8 +1206,12 @@ namespace MyBook
                         break;
                     case "佣金":
                         commission += amount;
-                        if (!commissionTotals.HasData)
-                            builder.Add(new Currency(amount, baseCurrency), "佣金", $"CashReport/{FormatIBKRCsvRow(row)}", destAccount: baseCurrency.ToString());
+                        if (!commissionTotals.HasData && amount != 0)
+                        {
+                            throw new MailParseException(
+                                $"Parse IBKR Report Fail, Cash commission without commission details: {FormatIBKRCsvRow(row)}");
+                        }
+
                         break;
                     case "交易（买入）":
                         tradeBuy += amount;
@@ -1238,7 +1253,7 @@ namespace MyBook
             }
 
             if (commissionTotals.HasData)
-                AssertIBKRMoneyEquals(commission, commissionTotals.Total, "IBKR cash commission", IBKRPrecisionResidualLimit);
+                AssertIBKRMoneyDisplayEquals(commissionTotals.Total, commission, "IBKR cash commission display");
 
             return new IBKRCashTotals(commission, tradeBuy, tradeSell);
         }
@@ -2014,6 +2029,16 @@ namespace MyBook
         {
             if (Math.Abs(expected - actual) > tolerance)
                 throw new MailParseException($"Parse IBKR Report Fail, {context} mismatch: expected {expected}, got {actual}");
+        }
+
+        private static void AssertIBKRMoneyDisplayEquals(decimal preciseValue, decimal displayedValue, string context)
+        {
+            var roundedPreciseValue = RoundIBKRMoneyForReportDisplay(preciseValue);
+            if (roundedPreciseValue != displayedValue)
+            {
+                throw new MailParseException(
+                    $"Parse IBKR Report Fail, {context} mismatch: expected display {roundedPreciseValue} from precise {preciseValue}, got {displayedValue}");
+            }
         }
 
         private static decimal RoundIBKRMoneyForReportDisplay(decimal value)
