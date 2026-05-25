@@ -598,6 +598,7 @@ namespace MyBook
             if (rows.Count == 0)
                 return new IBKRMtmTotals(false, 0, 0, 0, 0);
 
+            var cashFxTranslation = ParseIBKRCashFxTranslation(report, baseCurrency);
             decimal holdingTotal = 0;
             decimal transactionTotal = 0;
             decimal commissionTotal = 0;
@@ -641,11 +642,15 @@ namespace MyBook
                 transactionTotal += transaction;
                 commissionTotal += commission;
                 otherTotal += other;
-                builder.Add(
-                    new Currency(holding, baseCurrency),
-                    "持仓价格变动",
-                    $"MTM/{FormatIBKRCsvRow(row)}",
-                    destAccount: contract.Code);
+                if (assetClass != "外汇")
+                {
+                    builder.Add(
+                        new Currency(holding, baseCurrency),
+                        "持仓价格变动",
+                        $"MTM/{FormatIBKRCsvRow(row)}",
+                        destAccount: contract.Code);
+                }
+
                 builder.Add(
                     new Currency(transaction, baseCurrency),
                     "交易价格影响",
@@ -661,7 +666,123 @@ namespace MyBook
                 AssertIBKRMoneyEquals(grandOtherTotal!.Value, otherTotal, "IBKR MTM grand other");
             }
 
+            builder.Add(
+                new Currency(cashFxTranslation, baseCurrency),
+                "现金外汇换算收益/损失",
+                $"CashFxTranslation/{cashFxTranslation}",
+                destAccount: baseCurrency.ToString());
             return new IBKRMtmTotals(true, holdingTotal, transactionTotal, commissionTotal, otherTotal);
+        }
+
+        private static decimal ParseIBKRCashFxTranslation(IBKRCsvReport report, CurrencyType baseCurrency)
+        {
+            var preciseValue = 0m;
+            foreach (var row in report.OptionalDataRows("持仓与以市值计的盈亏"))
+            {
+                if (!IsIBKRPositionSummaryRow(row) || row.Fields[1] != "外汇")
+                    continue;
+
+                var valueCurrency = ParseIBKRCurrencyType(row.Fields[2]);
+                if (valueCurrency != baseCurrency)
+                    throw new MailParseException($"Parse IBKR Report Fail, Non-base FX MTM Value Currency: {FormatIBKRCsvRow(row)}");
+
+                var cashCurrency = ParseIBKRCurrencyType(row.Fields[3]);
+                if (cashCurrency == baseCurrency)
+                    continue;
+
+                var transaction = ParseIBKRDecimalAt(row, 12, "FX MTM transaction");
+                var commission = ParseIBKRDecimalAt(row, 13, "FX MTM commission");
+                var other = ParseIBKRDecimalAt(row, 14, "FX MTM other");
+                if (transaction != 0 || commission != 0 || other != 0)
+                    throw new MailParseException($"Parse IBKR Report Fail, Unsupported FX MTM Non-holding Component: {FormatIBKRCsvRow(row)}");
+
+                // IBKR 有三种看起来都像“现金外汇换算收益/损失”的数值，必须区分清楚。
+                //
+                // 以 2026-05-14 的 HKD/SGD 极小现金余额为例：
+                // 1. 0.00000004370210：
+                //    这是外汇收益的精确计算值，由每种非基础货币现金余额的“数量 × 汇率变动”相加：
+                //    HKD: -0.0000137 × 0.12767 - (-0.0000137 × 0.12771)
+                //       = 0.000000000548
+                //    SGD: -0.000021795 × 0.7837 - (-0.000021795 × 0.78568)
+                //       = 0.00000004315410
+                //    HKD + SGD = 0.00000004370210。它是最精确的来源值，但不会直接入库。
+                //
+                // 2. 0.000000044：
+                //    这是 IBKR 报表逐日滚动使用的真实外汇收益值，由 0.00000004370210 舍入得到。
+                //    外汇变动 record 使用该值。
+                //
+                // 3. 0.00000004：
+                //    这是报表里直接显示出来的不精确值。
+                //    “按市值计算的表现总结”、“现金报告”、“持仓与以市值计的盈亏”中因截断显示该值，但参与实际计算的还是0.000000044
+                //      程序读取该值作校验
+                //
+                //
+                var previousQuantity = ParseIBKRDecimalAt(row, 5, "FX previous quantity");
+                var currentQuantity = ParseIBKRDecimalAt(row, 6, "FX current quantity");
+                var previousRate = ParseIBKRDecimalAt(row, 7, "FX previous rate");
+                var currentRate = ParseIBKRDecimalAt(row, 8, "FX current rate");
+                var calculatedPreviousMarketValue = previousQuantity * previousRate;
+                var calculatedCurrentMarketValue = currentQuantity * currentRate;
+                var reportedPreviousMarketValue = ParseIBKRDecimalAt(row, 9, "FX previous market value");
+                var reportedCurrentMarketValue = ParseIBKRDecimalAt(row, 10, "FX current market value");
+                AssertIBKRMoneyEquals(RoundIBKRMoneyForReportField(calculatedPreviousMarketValue, row.Fields[9]), reportedPreviousMarketValue, $"IBKR FX previous market value display {FormatIBKRCsvRow(row)}");
+                AssertIBKRMoneyEquals(RoundIBKRMoneyForReportField(calculatedCurrentMarketValue, row.Fields[10]), reportedCurrentMarketValue, $"IBKR FX current market value display {FormatIBKRCsvRow(row)}");
+
+                var rowPreciseValue = calculatedCurrentMarketValue - calculatedPreviousMarketValue;
+                var reportedHolding = ParseIBKRDecimalAt(row, 11, "FX MTM holding");
+                var reportedTotal = ParseIBKRDecimalAt(row, 15, "FX MTM total");
+                var roundedRowValueForDisplay = RoundIBKRMoneyForReportDisplay(rowPreciseValue);
+                AssertIBKRMoneyEquals(roundedRowValueForDisplay, reportedHolding, $"IBKR FX MTM holding display {FormatIBKRCsvRow(row)}");
+                AssertIBKRMoneyEquals(roundedRowValueForDisplay, reportedTotal, $"IBKR FX MTM total display {FormatIBKRCsvRow(row)}");
+
+                preciseValue += rowPreciseValue;
+            }
+
+            var ledgerValue = RoundIBKRCashFxTranslationForLedger(preciseValue);
+            ValidateIBKRCashFxTranslationDisplay(report, ledgerValue);
+            return ledgerValue;
+        }
+
+        private static void ValidateIBKRCashFxTranslationDisplay(IBKRCsvReport report, decimal preciseValue)
+        {
+            var roundedPreciseValue = RoundIBKRMoneyForReportDisplay(preciseValue);
+            var cashReportValue = 0m;
+            var hasCashReportValue = false;
+            foreach (var row in report.RequireDataRows("现金报告"))
+            {
+                AssertIBKRCashReportFieldCount(row);
+                if (row.Fields[0] != "现金外汇换算收益/损失")
+                    continue;
+
+                cashReportValue += ParseIBKRDecimalAt(row, 2, "cash FX translation");
+                hasCashReportValue = true;
+            }
+
+            if (hasCashReportValue)
+                AssertIBKRMoneyEquals(roundedPreciseValue, cashReportValue, "IBKR cash FX translation cash report display");
+            else
+                AssertIBKRMoneyEquals(0, roundedPreciseValue, "IBKR missing cash FX translation cash report display");
+
+            // 精确值用于入库，报表显示值用于校验。这里要求“精确值保留 8 位小数”后必须
+            // 与现金报告、MTM 总表上读到的外汇换算显示值完全相等；如果不相等，说明 IBKR
+            // 改了报表口径或出现了我们尚未处理的新格式，必须报错而不是悄悄导入。
+            var mtmReportValue = 0m;
+            foreach (var row in report.OptionalDataRows("按市值计算的表现总结"))
+            {
+                AssertIBKRFieldCount(row, 12);
+                if (row.Fields[0] != "外汇")
+                    continue;
+
+                var transaction = ParseIBKRDecimalAt(row, 7, "MTM FX transaction");
+                var commission = ParseIBKRDecimalAt(row, 8, "MTM FX commission");
+                var other = ParseIBKRDecimalAt(row, 9, "MTM FX other");
+                if (transaction != 0 || commission != 0 || other != 0)
+                    throw new MailParseException($"Parse IBKR Report Fail, Unsupported MTM FX Non-holding Component: {FormatIBKRCsvRow(row)}");
+
+                mtmReportValue += ParseIBKRDecimalAt(row, 6, "MTM FX holding");
+            }
+
+            AssertIBKRMoneyEquals(roundedPreciseValue, mtmReportValue, "IBKR cash FX translation MTM display");
         }
 
         private static void AssertIBKRMtmRowTotal(IBKRCsvRow row)
@@ -1893,6 +2014,27 @@ namespace MyBook
         {
             if (Math.Abs(expected - actual) > tolerance)
                 throw new MailParseException($"Parse IBKR Report Fail, {context} mismatch: expected {expected}, got {actual}");
+        }
+
+        private static decimal RoundIBKRMoneyForReportDisplay(decimal value)
+        {
+            return Math.Round(value, 8, MidpointRounding.AwayFromZero);
+        }
+
+        private static decimal RoundIBKRCashFxTranslationForLedger(decimal value)
+        {
+            return Math.Round(value, 9, MidpointRounding.AwayFromZero);
+        }
+
+        private static decimal RoundIBKRMoneyForReportField(decimal value, string reportText)
+        {
+            var text = reportText.Trim();
+            var decimalPoint = text.IndexOf('.');
+            if (decimalPoint < 0)
+                return Math.Round(value, 0, MidpointRounding.AwayFromZero);
+
+            var decimalPlaces = text.Length - decimalPoint - 1;
+            return Math.Round(value, decimalPlaces, MidpointRounding.AwayFromZero);
         }
 
         private static string LimitIBKRRecordText(string text)
