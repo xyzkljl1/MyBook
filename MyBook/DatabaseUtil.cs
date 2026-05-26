@@ -1677,36 +1677,71 @@ namespace MyBook
             DateTime today)
         {
             var targetRevision = GetCurrentStatementImportRevision();
-            var rollForwardStartDate = GetBalanceRollForwardStartDate();
             return dates
                 .Select(date =>
                 {
-                    if (date == today)
-                    {
-                        return new AssetSummaryBalanceSet(
-                            date,
-                            null,
-                            true,
-                            currentBalances.Select(CloneDashboardBalance).ToList());
-                    }
-
-                    var baseSnapshot = GetLatestBalanceSnapshotAtOrBefore(date, targetRevision);
-                    if (baseSnapshot is null)
-                        return new AssetSummaryBalanceSet(date, null, false, []);
-
+                    var result = BuildAccountBalancesAt(date, targetRevision, today, currentBalances);
                     return new AssetSummaryBalanceSet(
-                        date,
-                        baseSnapshot.Snapshot.time,
-                        true,
-                        BuildRolledForwardBalances(baseSnapshot, date, targetRevision, rollForwardStartDate));
+                        result.Date,
+                        result.SnapshotTime,
+                        result.HasData,
+                        result.Balances);
                 })
                 .ToList();
         }
 
-        private DateTime GetBalanceRollForwardStartDate()
+        public HistoricalAccountBalanceResult GetAccountBalancesAt(DateTime date)
         {
-            var snapshot = GetStartSnapshot();
-            return snapshot?.effectiveDate.Date ?? DateTime.MinValue.Date;
+            return BuildAccountBalancesAt(
+                date,
+                GetCurrentStatementImportRevision(),
+                DateTime.Today,
+                null);
+        }
+
+        private HistoricalAccountBalanceResult BuildAccountBalancesAt(
+            DateTime date,
+            int targetRevision,
+            DateTime today,
+            List<AccountBalance>? currentBalances)
+        {
+            var targetDate = date.Date;
+            if (targetDate == today.Date)
+            {
+                var balances = currentBalances is null
+                    ? db.Queryable<AccountBalance>().ToList().Select(CloneDashboardBalance).ToList()
+                    : currentBalances.Select(CloneDashboardBalance).ToList();
+                return new HistoricalAccountBalanceResult(
+                    targetDate,
+                    targetRevision,
+                    true,
+                    null,
+                    null,
+                    null,
+                    balances);
+            }
+
+            var baseSnapshot = GetLatestBalanceSnapshotAtOrBefore(targetDate, targetRevision);
+            if (baseSnapshot is null)
+            {
+                return new HistoricalAccountBalanceResult(
+                    targetDate,
+                    targetRevision,
+                    false,
+                    null,
+                    null,
+                    null,
+                    []);
+            }
+
+            return new HistoricalAccountBalanceResult(
+                targetDate,
+                targetRevision,
+                true,
+                baseSnapshot.Snapshot.Id,
+                baseSnapshot.Snapshot.time,
+                baseSnapshot.Snapshot.maxStatementImportId,
+                BuildRolledForwardBalances(baseSnapshot, targetDate, targetRevision));
         }
 
         private SnapshotData? GetLatestBalanceSnapshotAtOrBefore(DateTime date, int targetRevision)
@@ -1741,8 +1776,7 @@ namespace MyBook
         private List<AccountBalance> BuildRolledForwardBalances(
             SnapshotData baseSnapshot,
             DateTime targetDate,
-            int targetRevision,
-            DateTime rollForwardStartDate)
+            int targetRevision)
         {
             var balances = baseSnapshot.AccountBalances
                 .GroupBy(balance => (balance.AccountId, balance.CurrencyType))
@@ -1755,7 +1789,6 @@ namespace MyBook
             var records = db.Queryable<Record>()
                 .Where(record => record._statementImport_Id > baseRevision
                     && record._statementImport_Id <= targetRevision
-                    && record.date > rollForwardStartDate
                     && record.date < targetEnd)
                 .ToList();
             foreach (var record in records)
@@ -3152,6 +3185,15 @@ namespace MyBook
         Currency TotalPrice,
         string DisplayText,
         string Description);
+
+    public sealed record HistoricalAccountBalanceResult(
+        DateTime Date,
+        int TargetRevision,
+        bool HasData,
+        int? SnapshotId,
+        DateTime? SnapshotTime,
+        int? SnapshotRevision,
+        List<AccountBalance> Balances);
 
     record RecordSourceSupplement(
         int RecordId,
