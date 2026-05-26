@@ -170,12 +170,14 @@ namespace MyBook
             IEnumerable<AccountBalance>? accountBalances = null,
             string statementKey = "",
             IEnumerable<AccountBalance>? beginningAccountBalances = null,
+            IEnumerable<AccountInternalId>? internalCardNos = null,
             Action<int>? afterSaveInTransaction = null,
             bool forceValidateBeginningBalances = false)
         {
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
             var beginningAccountBalanceList = beginningAccountBalances?.ToList() ?? [];
+            var internalCardNoList = internalCardNos?.ToList();
             try
             {
                 return ExecuteLockedTransaction(() =>
@@ -188,6 +190,7 @@ namespace MyBook
                         accountBalanceList,
                         beginningAccountBalanceList,
                         forceValidateBeginningBalances || ShouldValidateBeginningAccountBalances(provider),
+                        internalCardNos: internalCardNoList,
                         afterSaveInTransaction: afterSaveInTransaction);
                     if (!statementImportId.HasValue)
                         return false;

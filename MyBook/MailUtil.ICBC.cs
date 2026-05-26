@@ -65,9 +65,9 @@ namespace MyBook
                     accountBalances,
                     statementKey,
                     beginningAccountBalances,
+                    internalCardNos: internalCardNos,
                     afterSaveInTransaction: statementImportId =>
                     {
-                        database.EnsureAccountInternalCardNos(internalCardNos);
                         OffsetMatchedICBCRefundRecords(statementImportId);
                     });
                 return true;
