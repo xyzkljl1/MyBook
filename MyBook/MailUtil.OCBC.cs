@@ -1015,15 +1015,6 @@ namespace MyBook
             return statementMonth.AddMonths(1).AddDays(-1);
         }
 
-        private static CurrencyType ParseOCBCCurrencyType(string currencyText)
-        {
-            if (String.Equals(currencyText, "CNY", StringComparison.OrdinalIgnoreCase))
-                return CurrencyType.RMB;
-            if (Enum.TryParse<CurrencyType>(currencyText.Trim(), true, out var currencyType))
-                return currencyType;
-            throw new MailParseException($"Unsupported OCBC currency: {currencyText}");
-        }
-
         private static string NormalizeOCBCPdfText(string text)
         {
             var normalized = text

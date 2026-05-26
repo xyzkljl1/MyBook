@@ -208,48 +208,6 @@ namespace MyBook
             }
         }
 
-        public bool SaveOutOfOrderStatementRecordsOnce(
-            StatementImportProvider provider,
-            DateTime time,
-            IEnumerable<Record> records,
-            IEnumerable<AccountBalance>? accountBalances = null,
-            string statementKey = "",
-            IEnumerable<AccountInternalId>? internalCardNos = null,
-            Action<int>? afterSaveInTransaction = null)
-        {
-            var recordList = records.ToList();
-            var accountBalanceList = accountBalances?.ToList() ?? [];
-            var internalCardNoList = internalCardNos?.ToList() ?? [];
-            try
-            {
-                return ExecuteLockedTransaction(() =>
-                {
-                    if (IsStatementImported(provider, time, statementKey))
-                        return false;
-
-                    var statementImportId = InsertStatementImport(provider, time, statementKey);
-                    if (accountBalanceList.Count > 0)
-                        SaveCashHoldingsFromAccountBalances(accountBalanceList, null);
-                    SaveRecordsCore(recordList, statementImportId);
-                    if (accountBalanceList.Count == 0)
-                        ApplyRecordDeltasToHoldings(recordList);
-                    if (internalCardNoList.Count > 0)
-                        EnsureAccountInternalCardNos(internalCardNoList);
-
-                    afterSaveInTransaction?.Invoke(statementImportId);
-                    MatchKnownInternalTransfersForStatements([statementImportId]);
-                    MatchInternalTransfersAroundStatement(statementImportId);
-                    return true;
-                });
-            }
-            catch (Exception e)
-            {
-                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
-                    return false;
-                throw;
-            }
-        }
-
         public bool MarkStatementProcessedOnce(
             StatementImportProvider provider,
             DateTime time,
@@ -1652,18 +1610,6 @@ namespace MyBook
             });
         }
 
-        public List<Holding> GetHoldings()
-        {
-            return db.Queryable<Holding>()
-                .Includes(it => it.Account)
-                .ToList();
-        }
-
-        public List<Finance> GetFinances()
-        {
-            return db.Queryable<Finance>().ToList();
-        }
-
         public Snapshot CreateDailySnapshot()
         {
             return CreateDailySnapshot(DateTime.Today);
@@ -2177,22 +2123,6 @@ namespace MyBook
                     .OrderBy(it => it.Id)
                     .First();
             return ReadSnapshotData(snapshot);
-        }
-
-        private static AssetSummaryBalanceSet BuildAssetSummaryBalanceSetFromSnapshot(
-            DateTime date,
-            SnapshotData snapshot)
-        {
-            var balances = snapshot.AccountBalances
-                .Where(balance => balance.Amount != 0)
-                .Select(balance => new AccountBalance
-                {
-                    _account_Id = balance.AccountId,
-                    t = balance.CurrencyType,
-                    v = balance.Amount
-                })
-                .ToList();
-            return new AssetSummaryBalanceSet(date, snapshot.Snapshot.time, true, balances);
         }
 
         private List<AccountBalance> BuildRolledForwardBalances(
@@ -3395,14 +3325,6 @@ namespace MyBook
         {
             return db.Queryable<StatementImport>()
                 .Where(statementImport => statementImport.provider == provider)
-                .ToList();
-        }
-
-        public List<string> GetStatementImportKeys(StatementImportProvider provider)
-        {
-            return db.Queryable<StatementImport>()
-                .Where(statementImport => statementImport.provider == provider && statementImport.statementKey != "")
-                .Select(statementImport => statementImport.statementKey)
                 .ToList();
         }
 

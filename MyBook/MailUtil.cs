@@ -2,11 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using HtmlAgilityPack;
 using MailKit;
 using MailKit.Net.Imap;
 using MailKit.Search;
@@ -109,19 +107,6 @@ namespace MyBook
         private static DateTime GetMailDate(MimeMessage message)
         {
             return GetMailDateTime(message).Date;
-        }
-
-        private static string GetMessageText(MimeMessage message)
-        {
-            if (!String.IsNullOrWhiteSpace(message.TextBody))
-                return WebUtility.HtmlDecode(message.TextBody);
-
-            if (String.IsNullOrWhiteSpace(message.HtmlBody))
-                return "";
-
-            var doc = new HtmlDocument();
-            doc.LoadHtml(message.HtmlBody);
-            return WebUtility.HtmlDecode(doc.DocumentNode.InnerText);
         }
 
         private static string NormalizeMailText(string text)
