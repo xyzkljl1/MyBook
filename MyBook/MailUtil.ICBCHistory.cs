@@ -516,6 +516,7 @@ namespace MyBook
             }
 
             var existingRecords = database.GetStatementRecords(ICBCHistoryDetailProvider, account)
+                .Where(record => !DatabaseUtil.IsInitializationRecord(record))
                 .OrderBy(GetICBCHistoryDetailRecordPostingDate)
                 .ThenBy(record => record.Id)
                 .ToList();
@@ -810,7 +811,9 @@ namespace MyBook
                 ICBCProvider,
                 account,
                 parsed.StartDate.Date.AddMonths(-1),
-                parsed.EndDate.Date.AddDays(1));
+                parsed.EndDate.Date.AddDays(1))
+                .Where(record => !DatabaseUtil.IsInitializationRecord(record))
+                .ToList();
             if (monthlyRecords.Count == 0)
             {
                 stats.Ignore("no monthly bill", candidates.Count);

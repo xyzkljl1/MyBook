@@ -14,6 +14,9 @@ namespace MyBook
         private const int DatabaseWriteLockTimeoutSeconds = 300;
         private const int CurrentSnapshotSchemaVersion = 1;
         private const int InternalTransferMatchWindowDays = 14;
+        private const string InitializationRecordSourcePrefix = "InitialRecord/";
+        private const string InitialHoldingReason = "Initial holding";
+        private const string InitialCashBalanceReason = "Initial cash balance";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
         private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
@@ -348,6 +351,14 @@ namespace MyBook
                 ValidateRelativeBalanceRecords(provider, records);
             }
 
+            var initializationRecords = BuildInitializationRecords(
+                provider,
+                time,
+                statementKey,
+                records,
+                beginningAccountBalances,
+                holdingAccount,
+                beginningHoldings);
             var statementImportId = InsertStatementImport(provider, time, statementKey);
 
             if (holdingAccount is not null && holdings is not null)
@@ -360,15 +371,179 @@ namespace MyBook
             if (hasExternalBalances)
                 SaveCashHoldingsFromAccountBalances(accountBalances, holdingAccount);
 
-            SaveRecordsCore(records, statementImportId);
+            var recordsToSave = initializationRecords.Count == 0
+                ? records
+                : initializationRecords.Concat(records).ToList();
+            SaveRecordsCore(recordsToSave, statementImportId);
             if (!hasExternalBalances)
-                ApplyRecordDeltasToHoldings(records);
+                ApplyRecordDeltasToHoldings(recordsToSave);
 
             if (internalCardNos is not null)
                 EnsureAccountInternalCardNos(internalCardNos);
 
             afterSaveInTransaction?.Invoke(statementImportId);
             return statementImportId;
+        }
+
+        public static bool IsInitializationRecord(Record record)
+        {
+            return record.Source.StartsWith(InitializationRecordSourcePrefix, StringComparison.Ordinal);
+        }
+
+        private List<Record> BuildInitializationRecords(
+            StatementImportProvider provider,
+            DateTime importTime,
+            string statementKey,
+            List<Record> records,
+            List<AccountBalance> beginningAccountBalances,
+            Account? holdingAccount,
+            List<Holding>? beginningHoldings)
+        {
+            var result = new List<Record>();
+            var (recordDate, postingDate) = GetInitializationRecordDates(records, importTime);
+            var initializedAccountIds = new HashSet<int>();
+
+            if (holdingAccount is not null && beginningHoldings is not null)
+            {
+                var account = GetPostingAccount(holdingAccount);
+                if (!AccountHasHistory(account))
+                {
+                    foreach (var holding in beginningHoldings)
+                    {
+                        NormalizeHolding(holding);
+                        var amount = holding.totalPrice;
+                        var hasQuantity = !Holding.IsSingleValueAsset(holding.holdingType) && holding.quantity != 0;
+                        if (amount.v == 0 && !hasQuantity)
+                            continue;
+
+                        result.Add(CreateInitialHoldingRecord(
+                            provider,
+                            statementKey,
+                            account,
+                            holding,
+                            amount,
+                            recordDate,
+                            postingDate));
+                    }
+
+                    initializedAccountIds.Add(account.Id);
+                }
+            }
+
+            foreach (var group in beginningAccountBalances
+                .Where(balance =>
+                {
+                    if (balance.Account is null)
+                        throw new InvalidOperationException("Beginning account balance account is required.");
+                    return true;
+                })
+                .GroupBy(balance => GetPostingAccount(balance.Account!).Id))
+            {
+                if (initializedAccountIds.Contains(group.Key))
+                    continue;
+
+                var account = db.Queryable<Account>()
+                    .Where(it => it.Id == group.Key)
+                    .First()
+                    ?? throw new InvalidOperationException($"Account not found: {group.Key}");
+                if (AccountHasHistory(account))
+                    continue;
+
+                foreach (var balance in group)
+                {
+                    if (balance.v == 0)
+                        continue;
+
+                    result.Add(CreateInitialCashBalanceRecord(
+                        provider,
+                        statementKey,
+                        account,
+                        balance,
+                        recordDate,
+                        postingDate));
+                }
+            }
+
+            return result;
+        }
+
+        private static (DateTime Date, DateTime PostingDate) GetInitializationRecordDates(
+            List<Record> records,
+            DateTime importTime)
+        {
+            if (records.Count == 0)
+                return (importTime.Date, importTime.Date);
+
+            return (
+                records.Min(record => record.date).Date,
+                records.Min(record => record.postingDate ?? record.date).Date);
+        }
+
+        private bool AccountHasHistory(Account account)
+        {
+            account = GetPostingAccount(account);
+            return db.Queryable<Record>()
+                    .Where(record => record._account_Id == account.Id)
+                    .Any()
+                || db.Queryable<Holding>()
+                    .Where(holding => holding._account_Id == account.Id)
+                    .Any();
+        }
+
+        private static Record CreateInitialHoldingRecord(
+            StatementImportProvider provider,
+            string statementKey,
+            Account account,
+            Holding holding,
+            Currency amount,
+            DateTime recordDate,
+            DateTime postingDate)
+        {
+            var record = new Record
+            {
+                Account = account,
+                Holding = new Holding(holding.code, holding.holdingType)
+                {
+                    Account = account,
+                    desc = holding.desc,
+                    displayText = holding.displayText
+                },
+                date = recordDate,
+                postingDate = postingDate,
+                updateTime = DateTime.Now,
+                isInternal = true,
+                HoldingQuantity = Holding.IsSingleValueAsset(holding.holdingType) ? 0 : holding.quantity,
+                DestAccount = holding.displayText,
+                Source = LimitRecordText(
+                    $"{InitializationRecordSourcePrefix}{provider}; statementKey={statementKey}; account={account.name}; holding={holding.code}/{holding.holdingType}; quantity={holding.quantity}"),
+                Reason = InitialHoldingReason
+            };
+            record.CopyFrom(amount);
+            return record;
+        }
+
+        private static Record CreateInitialCashBalanceRecord(
+            StatementImportProvider provider,
+            string statementKey,
+            Account account,
+            AccountBalance balance,
+            DateTime recordDate,
+            DateTime postingDate)
+        {
+            var record = new Record
+            {
+                Account = account,
+                date = recordDate,
+                postingDate = postingDate,
+                updateTime = DateTime.Now,
+                isInternal = true,
+                DestAccount = balance.t.ToString(),
+                Source = LimitRecordText(
+                    $"{InitializationRecordSourcePrefix}{provider}; statementKey={statementKey}; account={account.name}; currency={balance.t}"),
+                Reason = InitialCashBalanceReason
+            };
+            record.CopyFrom(balance);
+            return record;
         }
 
         public List<RecordDetailData> GetRecordDetails(DateTime start, DateTime end, string? accountName)
@@ -1982,15 +2157,23 @@ namespace MyBook
 
         private SnapshotData? GetLatestBalanceSnapshotAtOrBefore(DateTime date, int targetRevision)
         {
-            var snapshot = db.Queryable<Snapshot>()
+            var snapshots = db.Queryable<Snapshot>()
                 .Where(it => it.maxStatementImportId >= 0
-                    && it.maxStatementImportId <= targetRevision
-                    && it.effectiveDate <= date.Date)
+                    && it.maxStatementImportId <= targetRevision)
+                .ToList();
+            if (snapshots.Count == 0)
+                return null;
+
+            var snapshot = snapshots
+                .Where(it => it.effectiveDate <= date.Date)
                 .OrderByDescending(it => it.effectiveDate)
-                .OrderByDescending(it => it.maxStatementImportId)
-                .OrderByDescending(it => it.time)
-                .First();
-            return snapshot is null ? null : ReadSnapshotData(snapshot);
+                .ThenByDescending(it => it.maxStatementImportId)
+                .ThenByDescending(it => it.time)
+                .FirstOrDefault()
+                ?? snapshots
+                    .OrderBy(it => it.Id)
+                    .First();
+            return ReadSnapshotData(snapshot);
         }
 
         private static AssetSummaryBalanceSet BuildAssetSummaryBalanceSetFromSnapshot(
