@@ -361,6 +361,7 @@ namespace MyBook
                 throw new MailParseException($"Parse ICBC history detail PDF fail, no transaction rows: {fileName}");
 
             var records = new Records();
+            var candidates = new List<ICBCHistoryDetailCandidate>();
             var rowCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var row in rows)
             {
@@ -368,7 +369,19 @@ namespace MyBook
                 if (!rowCodes.Add(rowCode))
                     continue;
 
-                records.Add(BuildICBCHistoryDetailRecord(row, account, postingAccount, statementKey, rowCode));
+                if (isCredit)
+                {
+                    candidates.Add(BuildICBCHistoryDetailCandidate(
+                        candidates.Count,
+                        row,
+                        postingAccount,
+                        statementKey,
+                        rowCode));
+                }
+                else
+                {
+                    records.Add(BuildICBCHistoryDetailRecord(row, account, postingAccount, statementKey, rowCode));
+                }
             }
 
             var balances = BuildICBCHistoryDetailBalances(postingAccount, rows);
@@ -381,6 +394,7 @@ namespace MyBook
                 endDate,
                 importTime,
                 records,
+                candidates,
                 balances,
                 [
                     new AccountInternalId
@@ -403,9 +417,10 @@ namespace MyBook
             var record = new Record
             {
                 Account = postingAccount,
-                date = row.Date,
+                date = row.PostingDate,
+                postingDate = row.PostingDate,
                 updateTime = DateTime.Now,
-                Source = $"code={rowCode}; ICBC历史明细; statementKey={statementKey}; row={row.RawText}",
+                Source = $"code={rowCode}; ICBCHistoryDetail; statementKey={statementKey}; row={row.RawText}",
                 DestAccount = BuildICBCHistoryDetailDestAccount(row),
                 Reason = row.Summary
             };
@@ -414,7 +429,7 @@ namespace MyBook
 
             var internalCounterparty = database.FindAccountByInternalCardNoText(
                 ICBCAccountType,
-                $"ICBC history detail statement={statementKey}; date={row.Date:yyyy-MM-dd HH:mm:ss}; row={row.RawText}",
+                $"ICBC history detail statement={statementKey}; postingDate={row.PostingDate:yyyy-MM-dd HH:mm:ss}; row={row.RawText}",
                 row.CounterpartyName,
                 row.CounterpartyAccount,
                 record.DestAccount);
@@ -428,6 +443,33 @@ namespace MyBook
                 record.isInternal = true;
 
             return record;
+        }
+
+        private ICBCHistoryDetailCandidate BuildICBCHistoryDetailCandidate(
+            int index,
+            ICBCHistoryDetailRow row,
+            Account postingAccount,
+            string statementKey,
+            string rowCode)
+        {
+            var destAccount = BuildICBCHistoryDetailDestAccount(row);
+            var internalCounterparty = database.FindAccountByInternalCardNoText(
+                ICBCAccountType,
+                $"ICBC history detail statement={statementKey}; postingDate={row.PostingDate:yyyy-MM-dd HH:mm:ss}; row={row.RawText}",
+                row.CounterpartyName,
+                row.CounterpartyAccount,
+                destAccount);
+            if (internalCounterparty is not null && !IsSameAccount(database.GetPostingAccount(internalCounterparty), postingAccount))
+                destAccount = database.GetPostingAccount(internalCounterparty).name;
+
+            return new ICBCHistoryDetailCandidate(
+                index,
+                row.PostingDate,
+                row.Amount,
+                row.DescCurrency,
+                destAccount,
+                $"code={rowCode}; ICBC鍘嗗彶鏄庣粏; statementKey={statementKey}; row={row.RawText}",
+                rowCode);
         }
 
         private bool ImportICBCHistoryDetail(ICBCHistoryDetailParsedStatement parsed)
@@ -480,8 +522,7 @@ namespace MyBook
         {
             var stats = new ICBCHistoryDetailImportStats();
             var existingCodes = database.GetRecordSourceCodes(ICBCHistoryDetailRowCodePrefix);
-            var candidates = parsed.Records
-                .Select((record, index) => new ICBCHistoryDetailCandidate(index, record, ExtractICBCHistoryDetailRowCode(record.Source)))
+            var candidates = parsed.Candidates
                 .Where(candidate =>
                 {
                     if (!existingCodes.Contains(candidate.RowCode))
@@ -538,9 +579,9 @@ namespace MyBook
                     .ToList();
                 var periodCandidates = candidates
                     .Where(candidate => !usedCandidateIndexes.Contains(candidate.Index)
-                        && candidate.Record.date.Date >= overlapStart
-                        && candidate.Record.date.Date <= overlapEnd)
-                    .OrderBy(candidate => candidate.Record.date)
+                        && candidate.PostingDate.Date >= overlapStart
+                        && candidate.PostingDate.Date <= overlapEnd)
+                    .OrderBy(candidate => candidate.PostingDate)
                     .ThenBy(candidate => candidate.Index)
                     .ToList();
                 if (periodCandidates.Count == 0)
@@ -631,7 +672,7 @@ namespace MyBook
             var pending = new List<RecordSourceSupplement>();
             var dates = monthlyRecords
                 .Select(GetICBCMonthlyHistoryMatchDate)
-                .Union(candidates.Select(candidate => candidate.Record.date.Date))
+                .Union(candidates.Select(candidate => candidate.PostingDate.Date))
                 .OrderBy(date => date)
                 .ToList();
             foreach (var date in dates)
@@ -643,8 +684,8 @@ namespace MyBook
                     .ThenBy(record => record.Id)
                     .ToList();
                 var dayCandidates = candidates
-                    .Where(candidate => candidate.Record.date.Date == date)
-                    .OrderBy(candidate => candidate.Record.date)
+                    .Where(candidate => candidate.PostingDate.Date == date)
+                    .OrderBy(candidate => candidate.PostingDate)
                     .ThenBy(candidate => candidate.Index)
                     .ToList();
                 var isLastDetailDay = date == parsed.EndDate.Date;
@@ -668,7 +709,7 @@ namespace MyBook
                 foreach (var dayCandidate in dayCandidates)
                 {
                     var monthlyIndex = unmatchedMonthlyRecords.FindIndex(monthlyRecord =>
-                        IsICBCHistoryMonthlyRecordMatch(dayCandidate.Record, monthlyRecord));
+                        IsICBCHistoryMonthlyRecordMatch(dayCandidate, monthlyRecord));
                     if (monthlyIndex < 0)
                     {
                         mismatchReason = "monthly segment mismatch";
@@ -688,11 +729,11 @@ namespace MyBook
             return true;
         }
 
-        private static bool IsICBCHistoryMonthlyRecordMatch(Record historyRecord, Record monthlyRecord)
+        private static bool IsICBCHistoryMonthlyRecordMatch(ICBCHistoryDetailCandidate historyRecord, Record monthlyRecord)
         {
-            if (historyRecord.date.Date != GetICBCMonthlyHistoryMatchDate(monthlyRecord)
-                || historyRecord.v != monthlyRecord.v
-                || historyRecord.t != monthlyRecord.t
+            if (historyRecord.PostingDate.Date != GetICBCMonthlyHistoryMatchDate(monthlyRecord)
+                || historyRecord.Amount.v != monthlyRecord.v
+                || historyRecord.Amount.t != monthlyRecord.t
                 || historyRecord.DescCurrency != monthlyRecord.DescCurrency)
                 return false;
 
@@ -713,7 +754,7 @@ namespace MyBook
             ICBCHistoryDetailCandidate candidate)
         {
             return LimitICBCHistoryDetailRecordText(
-                $"code={candidate.RowCode}; supplementedBy=ICBCHistoryDetail; statementKey={parsed.StatementKey}; row={ExtractICBCHistoryDetailRawRow(candidate.Record.Source)}");
+                $"code={candidate.RowCode}; supplementedBy=ICBCHistoryDetail; statementKey={parsed.StatementKey}; row={ExtractICBCHistoryDetailRawRow(candidate.Source)}");
         }
 
         private static string ExtractICBCHistoryDetailRawRow(string source)
@@ -1340,7 +1381,7 @@ namespace MyBook
             var canonical = String.Join(
                 "|",
                 accountName,
-                row.Date.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                row.PostingDate.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                 row.Amount.t,
                 row.Amount.v.ToString(CultureInfo.InvariantCulture),
                 row.DescCurrency?.t.ToString() ?? "",
@@ -1442,7 +1483,7 @@ namespace MyBook
             int SkippedUnreadableCount);
         private sealed record ICBCHistoryDetailTail(string CounterpartyName, string CounterpartyAccount, string Channel);
         private sealed record ICBCHistoryDetailRow(
-            DateTime Date,
+            DateTime PostingDate,
             string AccountNo,
             Currency Amount,
             Currency? DescCurrency,
@@ -1459,7 +1500,11 @@ namespace MyBook
             bool IsContinuous);
         private sealed record ICBCHistoryDetailCandidate(
             int Index,
-            Record Record,
+            DateTime PostingDate,
+            Currency Amount,
+            Currency? DescCurrency,
+            string DestAccount,
+            string Source,
             string RowCode);
         private sealed record ICBCMonthlyStatementPeriod(
             StatementImport StatementImport,
@@ -1474,6 +1519,7 @@ namespace MyBook
             DateTime EndDate,
             DateTime ImportTime,
             Records Records,
+            List<ICBCHistoryDetailCandidate> Candidates,
             List<ICBCHistoryDetailBalance> Balances,
             List<AccountInternalId> InternalCardNos);
 
