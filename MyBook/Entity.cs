@@ -229,7 +229,7 @@ namespace MyBook
         public int _account_Id { get; set; } = 0;
     }
 
-    // 账户。一个账户可以同时拥有多个币种余额，具体余额保存在 AccountBalances 中。
+    // 账户。一个账户可以同时拥有多个币种余额，具体余额由 AccountBalances 视图按 Holdings 汇总。
     // 主副卡关系按账户存储；副卡账户指向对应主卡账户。
     [SugarIndex("unique_Accounts_name", nameof(Account.name), OrderByType.Asc, true)]
     [SugarTable("Accounts")]
@@ -265,12 +265,11 @@ namespace MyBook
         public int? _primaryAccount_Id { get; set; }
     }
 
-    // 单个账户在一种币种下的余额。
-    [SugarIndex("unique_AccountBalances_account_currency", nameof(AccountBalance._account_Id), OrderByType.Asc, nameof(AccountBalance.t), OrderByType.Asc, true)]
+    // 单个账户在一种币种下的余额，只读视图，由 Holdings 汇总生成。
     [SugarTable("AccountBalances")]
     public class AccountBalance : Currency
     {
-        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        [SugarColumn(IsPrimaryKey = true)]
         public int Id { get; set; }
 
         [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(MyBook.Account.Id))]
@@ -390,8 +389,7 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public int _account_Id { get; set; } = 0;
 
-        [SugarColumn(IsNullable = true)]
-        public int? _holding_Id { get; set; } = null;
+        public int _holding_Id { get; set; } = 0;
 
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public decimal? _descCurrency_v { get; set; }

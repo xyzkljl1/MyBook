@@ -17,11 +17,11 @@ namespace MyBook
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
         private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
             new("fk_Accounts_primaryAccount", "Accounts", "_primaryAccount_Id", "Accounts", "Id"),
             new("fk_AccountInternalIds_account", "AccountInternalIds", "_account_Id", "Accounts", "Id"),
-            new("fk_AccountBalances_account", "AccountBalances", "_account_Id", "Accounts", "Id"),
             new("fk_Holdings_account", "Holdings", "_account_Id", "Accounts", "Id"),
             new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
             new("fk_Records_holding", "Records", "_holding_Id", "Holdings", "Id"),
@@ -221,8 +221,10 @@ namespace MyBook
 
                     var statementImportId = InsertStatementImport(provider, time, statementKey);
                     if (accountBalanceList.Count > 0)
-                        SaveAccountBalancesCore(accountBalanceList);
+                        SaveCashHoldingsFromAccountBalances(accountBalanceList, null);
                     SaveRecordsCore(recordList, statementImportId);
+                    if (accountBalanceList.Count == 0)
+                        ApplyRecordDeltasToHoldings(recordList);
                     if (internalCardNoList.Count > 0)
                         EnsureAccountInternalCardNos(internalCardNoList);
 
@@ -345,19 +347,20 @@ namespace MyBook
             }
 
             var statementImportId = InsertStatementImport(provider, time, statementKey);
-            if (hasExternalBalances)
-                SaveAccountBalancesCore(accountBalances);
 
             if (holdingAccount is not null && holdings is not null)
             {
                 ValidateBeginningAccountHoldingQuantities(provider, statementKey, holdingAccount, beginningHoldings ?? []);
-                SaveAccountHoldingsCore(holdingAccount, holdings);
+                SaveAccountHoldingsCore(holdingAccount, holdings, GetAccountBalancesForAccount(accountBalances, holdingAccount));
                 ValidateSavedAccountHoldingQuantities(provider, statementKey, holdingAccount, holdings);
             }
 
+            if (hasExternalBalances)
+                SaveCashHoldingsFromAccountBalances(accountBalances, holdingAccount);
+
             SaveRecordsCore(records, statementImportId);
             if (!hasExternalBalances)
-                AddAccountBalanceDeltas(records);
+                ApplyRecordDeltasToHoldings(records);
 
             if (internalCardNos is not null)
                 EnsureAccountInternalCardNos(internalCardNos);
@@ -512,8 +515,8 @@ namespace MyBook
                 _statementImport_Id = statementImportId,
                 backup = null
             };
-            db.Insertable(record).ExecuteCommand();
-            AddAccountBalanceDelta(account.Id, record.t, record.v);
+            SaveRecordsCore([record], statementImportId);
+            ApplyRecordDeltasToHoldings([record]);
         }
 
         private void UpdateRecordDetail(
@@ -564,7 +567,7 @@ namespace MyBook
             if (statementImport.provider != StatementImportProvider.Manual && String.IsNullOrWhiteSpace(existing.backup))
                 existing.backup = SerializeRecordBackup(existing, statementImport);
 
-            AddAccountBalanceDelta(existing._account_Id, existing.t, -existing.v);
+            ApplyRecordDeltaToHolding(existing, -1);
             existing._account_Id = account.Id;
             existing._statementImport_Id = manualStatementImportId;
             existing.v = edit.Amount;
@@ -577,54 +580,11 @@ namespace MyBook
             existing.HoldingQuantity = edit.HoldingQuantity;
             existing.Source = normalizedSource;
             existing.Reason = normalizedReason;
+            if (statementImport.provider == StatementImportProvider.Manual)
+                existing._holding_Id = EnsureCashHolding(account, existing.t).Id;
+            ValidateRecordHolding(existing, account);
             db.Updateable(existing).ExecuteCommand();
-            AddAccountBalanceDelta(account.Id, existing.t, existing.v);
-        }
-
-        private void AddAccountBalanceDelta(int accountId, CurrencyType currency, decimal delta)
-        {
-            if (delta == 0)
-                return;
-
-            var existing = db.Queryable<AccountBalance>()
-                .Where(balance => balance._account_Id == accountId && balance.t == currency)
-                .First();
-            if (existing is null)
-            {
-                db.Insertable(new AccountBalance
-                {
-                    _account_Id = accountId,
-                    t = currency,
-                    v = delta
-                }).ExecuteCommand();
-                return;
-            }
-
-            existing.v += delta;
-            if (existing.v == 0)
-            {
-                db.Deleteable<AccountBalance>()
-                    .Where(balance => balance.Id == existing.Id)
-                    .ExecuteCommand();
-                return;
-            }
-
-            db.Updateable(existing).ExecuteCommand();
-        }
-
-        private void AddAccountBalanceDeltas(IEnumerable<Record> records)
-        {
-            foreach (var group in records
-                         .GroupBy(record => (record._account_Id, record.t))
-                         .Select(group => new
-                         {
-                             AccountId = group.Key._account_Id,
-                             Currency = group.Key.t,
-                             Amount = group.Sum(record => record.v)
-                         }))
-            {
-                AddAccountBalanceDelta(group.AccountId, group.Currency, group.Amount);
-            }
+            ApplyRecordDeltaToHolding(existing, 1);
         }
 
         private void MatchInternalTransfersAroundStatement(int statementImportId)
@@ -1127,6 +1087,8 @@ namespace MyBook
                 record.Account = account;
                 record._account_Id = account.Id;
                 ResolveRecordHolding(record, account);
+                if (record._holding_Id <= 0)
+                    throw new InvalidOperationException("Record holding is required.");
                 record._statementImport_Id = statementImportId;
             }
 
@@ -1137,7 +1099,10 @@ namespace MyBook
         private void ResolveRecordHolding(Record record, Account account)
         {
             if (record.Holding is null)
+            {
+                record._holding_Id = EnsureCashHolding(account, record.t).Id;
                 return;
+            }
 
             var holding = record.Holding;
             NormalizeHolding(holding);
@@ -1153,7 +1118,45 @@ namespace MyBook
                     && it.code == holding.code
                     && it.holdingType == holding.holdingType)
                 .First();
-            record._holding_Id = existing?.Id;
+            if (existing is null)
+            {
+                holding.Account = account;
+                holding._account_Id = account.Id;
+                holding.quantity = Holding.IsSingleValueAsset(holding.holdingType) ? 1 : 0;
+                holding.currentPrice = new Currency(0, record.t);
+                holding.Id = db.Insertable(holding).ExecuteReturnIdentity();
+                existing = holding;
+                ValidateAccountBalancesFromHoldings(account);
+            }
+
+            ValidateRecordHolding(record, account, existing);
+            record._holding_Id = existing.Id;
+        }
+
+        private void ValidateRecordHolding(Record record, Account account)
+        {
+            var holding = db.Queryable<Holding>()
+                .Where(it => it.Id == record._holding_Id)
+                .First();
+            if (holding is null)
+                throw new InvalidOperationException($"Record holding not found: {record._holding_Id}");
+
+            ValidateRecordHolding(record, account, holding);
+        }
+
+        private static void ValidateRecordHolding(Record record, Account account, Holding holding)
+        {
+            if (holding._account_Id != account.Id)
+            {
+                throw new InvalidOperationException(
+                    $"Record holding account mismatch: recordAccount={account.name}, holding={holding.code}/{holding.holdingType}");
+            }
+
+            if (record.t != holding.currentPrice.t)
+            {
+                throw new InvalidOperationException(
+                    $"Record holding currency mismatch: account={account.name}, holding={holding.code}/{holding.holdingType}/{holding.currentPrice.t}, record={record.t}");
+            }
         }
 
         private void ValidateRelativeBalanceRecords(StatementImportProvider provider, List<Record> recordList)
@@ -1289,28 +1292,162 @@ namespace MyBook
             return balances;
         }
 
-        private void SaveAccountBalancesCore(List<AccountBalance> accountBalances)
+        private List<AccountBalance> GetAccountBalancesForAccount(List<AccountBalance> accountBalances, Account account)
         {
-            foreach (var accountBalance in accountBalances)
-            {
-                if (accountBalance.Account is null)
-                    throw new InvalidOperationException("Account balance account is required.");
-
-                var account = GetPostingAccount(accountBalance.Account);
-                accountBalance.Account = account;
-                accountBalance._account_Id = account.Id;
-
-                var existing = db.Queryable<AccountBalance>()
-                    .Where(it => it._account_Id == account.Id && it.t == accountBalance.t)
-                    .First();
-                if (existing is null)
+            var postingAccount = GetPostingAccount(account);
+            return accountBalances
+                .Where(accountBalance =>
                 {
-                    db.Insertable(accountBalance).ExecuteCommand();
-                    continue;
-                }
+                    if (accountBalance.Account is null)
+                        throw new InvalidOperationException("Account balance account is required.");
 
-                existing.v = accountBalance.v;
-                db.Updateable(existing).ExecuteCommand();
+                    return GetPostingAccount(accountBalance.Account).Id == postingAccount.Id;
+                })
+                .ToList();
+        }
+
+        private void SaveCashHoldingsFromAccountBalances(List<AccountBalance> accountBalances, Account? explicitHoldingAccount)
+        {
+            if (accountBalances.Count == 0)
+                return;
+
+            var explicitHoldingAccountId = explicitHoldingAccount is null ? (int?)null : GetPostingAccount(explicitHoldingAccount).Id;
+            var normalizedBalances = accountBalances
+                .Select(accountBalance =>
+                {
+                    if (accountBalance.Account is null)
+                        throw new InvalidOperationException("Account balance account is required.");
+
+                    var account = GetPostingAccount(accountBalance.Account);
+                    return new { Account = account, Balance = accountBalance };
+                })
+                .Where(item => item.Account.Id != explicitHoldingAccountId)
+                .ToList();
+            foreach (var group in normalizedBalances.GroupBy(item => item.Account.Id))
+            {
+                var account = group.First().Account;
+                var balances = group.Select(item => item.Balance).ToList();
+                var cashHoldings = group
+                    .Select(item => CreateCashHoldingFromAccountBalance(item.Balance))
+                    .ToList();
+                SaveAccountHoldingsCore(account, cashHoldings, balances);
+            }
+        }
+
+        private Holding CreateCashHoldingFromAccountBalance(AccountBalance accountBalance)
+        {
+            if (accountBalance.Account is null)
+                throw new InvalidOperationException("Account balance account is required.");
+
+            var account = GetPostingAccount(accountBalance.Account);
+            return new Holding(accountBalance.t.ToString(), HoldingType.Cash)
+            {
+                Account = account,
+                desc = $"{accountBalance.t} cash balance",
+                displayText = accountBalance.t.ToString(),
+                currentPrice = new Currency(accountBalance.v, accountBalance.t)
+            };
+        }
+
+        private Holding EnsureCashHolding(Account account, CurrencyType currency)
+        {
+            account = GetPostingAccount(account);
+            var code = currency.ToString();
+            var existing = db.Queryable<Holding>()
+                .Where(holding => holding._account_Id == account.Id
+                    && holding.code == code
+                    && holding.holdingType == HoldingType.Cash)
+                .First();
+            if (existing is not null)
+                return existing;
+
+            var holding = new Holding(code, HoldingType.Cash)
+            {
+                Account = account,
+                _account_Id = account.Id,
+                desc = $"{currency} cash balance",
+                displayText = code,
+                currentPrice = new Currency(0, currency)
+            };
+            holding.Id = db.Insertable(holding).ExecuteReturnIdentity();
+            ValidateAccountBalancesFromHoldings(account);
+            return holding;
+        }
+
+        private void ApplyRecordDeltasToHoldings(IEnumerable<Record> records)
+        {
+            var affectedAccountIds = new HashSet<int>();
+            foreach (var record in records)
+            {
+                ApplyRecordDeltaToHolding(record, 1);
+                affectedAccountIds.Add(record._account_Id);
+            }
+
+            foreach (var accountId in affectedAccountIds)
+                ValidateAccountBalancesFromHoldings(accountId);
+        }
+
+        private void ApplyRecordDeltaToHolding(Record record, int direction)
+        {
+            if (record._holding_Id <= 0)
+                throw new InvalidOperationException("Record holding is required.");
+
+            var holding = db.Queryable<Holding>()
+                .Where(it => it.Id == record._holding_Id)
+                .First();
+            if (holding is null)
+                throw new InvalidOperationException($"Record holding not found: {record._holding_Id}");
+            if (holding._account_Id != record._account_Id)
+                throw new InvalidOperationException($"Record holding account mismatch: record={record.Id}, holding={holding.Id}");
+            if (holding.currentPrice.t != record.t)
+                throw new InvalidOperationException($"Record holding currency mismatch: record={record.Id}, holding={holding.code}/{holding.holdingType}");
+
+            var oldQuantity = holding.quantity;
+            var oldTotal = holding.totalPrice.v;
+            var newQuantity = oldQuantity + direction * record.HoldingQuantity;
+            var newTotal = oldTotal + direction * record.v;
+            if (Holding.IsSingleValueAsset(holding.holdingType))
+            {
+                holding.quantity = 1;
+                holding.currentPrice = new Currency(newTotal, record.t);
+            }
+            else
+            {
+                holding.quantity = newQuantity;
+                holding.currentPrice = new Currency(newQuantity == 0 ? 0 : newTotal / newQuantity, record.t);
+            }
+
+            db.Updateable(holding).ExecuteCommand();
+            ValidateAccountBalancesFromHoldings(holding._account_Id);
+        }
+
+        private void ValidateAccountBalancesFromHoldings(Account account)
+        {
+            ValidateAccountBalancesFromHoldings(GetPostingAccount(account).Id);
+        }
+
+        private void ValidateAccountBalancesFromHoldings(int accountId)
+        {
+            var holdingSums = db.Queryable<Holding>()
+                .Where(holding => holding._account_Id == accountId)
+                .ToList()
+                .GroupBy(holding => holding.currentPrice.t)
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(holding => holding.totalPrice.v)));
+            var balanceSums = db.Queryable<AccountBalance>()
+                .Where(balance => balance._account_Id == accountId)
+                .ToList()
+                .GroupBy(balance => balance.t)
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(balance => balance.v)));
+
+            foreach (var currency in holdingSums.Keys.Union(balanceSums.Keys))
+            {
+                var holdingTotal = holdingSums.TryGetValue(currency, out var holdingValue) ? holdingValue : 0;
+                var balanceTotal = balanceSums.TryGetValue(currency, out var balanceValue) ? balanceValue : 0;
+                if (holdingTotal != balanceTotal)
+                {
+                    throw new InvalidOperationException(
+                        $"Account balance view mismatch: accountId={accountId}, currency={currency}, holdings={holdingTotal}, balances={balanceTotal}");
+                }
             }
         }
 
@@ -1425,6 +1562,7 @@ namespace MyBook
 
                     var totalPrice = holding.totalPrice;
                     var payload = new SnapshotHoldingPayloadV1(
+                        holding.Id,
                         account.Id,
                         account.name,
                         holding.code,
@@ -1531,6 +1669,7 @@ namespace MyBook
         {
             var payload = DeserializeSnapshotPayload<SnapshotHoldingPayloadV1>(item);
             return new SnapshotHoldingData(
+                payload.HoldingId,
                 payload.AccountId,
                 payload.AccountName,
                 payload.Code,
@@ -2615,7 +2754,6 @@ namespace MyBook
             if (startSnapshot is null)
             {
                 db.Deleteable<Holding>().ExecuteCommand();
-                db.Deleteable<AccountBalance>().ExecuteCommand();
                 return;
             }
 
@@ -2705,32 +2843,19 @@ namespace MyBook
 
         private void RestoreCurrentStateFromSnapshot(SnapshotData snapshot)
         {
-            db.Deleteable<Holding>().ExecuteCommand();
-            db.Deleteable<AccountBalance>().ExecuteCommand();
-
-            var accountBalances = snapshot.AccountBalances
-                .Select(balance => new AccountBalance
-                {
-                    _account_Id = balance.AccountId,
-                    t = balance.CurrencyType,
-                    v = balance.Amount
-                })
-                .ToList();
-            if (accountBalances.Count > 0)
-                db.Insertable(accountBalances).ExecuteCommand();
-
             var holdings = snapshot.Holdings
                 .Select(CreateHoldingFromSnapshot)
                 .ToList();
             ValidateRestoredHoldings(snapshot, holdings);
-            if (holdings.Count > 0)
-                db.Insertable(holdings).ExecuteCommand();
+            RestoreHoldingsFromSnapshot(snapshot, holdings);
+            ValidateCurrentBalancesMatchSnapshot(snapshot);
         }
 
         private static Holding CreateHoldingFromSnapshot(SnapshotHoldingData snapshotHolding)
         {
             var holding = new Holding
             {
+                Id = snapshotHolding.HoldingId,
                 _account_Id = snapshotHolding.AccountId,
                 code = snapshotHolding.Code,
                 holdingType = snapshotHolding.HoldingType,
@@ -2749,6 +2874,93 @@ namespace MyBook
             return holding;
         }
 
+        private void RestoreHoldingsFromSnapshot(SnapshotData snapshot, List<Holding> snapshotHoldings)
+        {
+            var existingHoldings = db.Queryable<Holding>().ToList();
+            var affectedAccountIds = existingHoldings
+                .Select(holding => holding._account_Id)
+                .Concat(snapshot.AccountBalances.Select(balance => balance.AccountId))
+                .Concat(snapshotHoldings.Select(holding => holding._account_Id))
+                .ToHashSet();
+            var usedHoldingIds = new HashSet<int>();
+
+            foreach (var snapshotHolding in snapshotHoldings)
+            {
+                var existing = snapshotHolding.Id > 0
+                    ? existingHoldings.FirstOrDefault(holding => holding.Id == snapshotHolding.Id)
+                    : null;
+                existing ??= existingHoldings.FirstOrDefault(holding =>
+                    holding._account_Id == snapshotHolding._account_Id
+                    && holding.code == snapshotHolding.code
+                    && holding.holdingType == snapshotHolding.holdingType);
+
+                if (existing is null)
+                {
+                    InsertSnapshotHolding(snapshotHolding);
+                    usedHoldingIds.Add(snapshotHolding.Id);
+                    continue;
+                }
+
+                existing._account_Id = snapshotHolding._account_Id;
+                existing.code = snapshotHolding.code;
+                existing.holdingType = snapshotHolding.holdingType;
+                existing.quantity = snapshotHolding.quantity;
+                existing._currentPrice_v = snapshotHolding._currentPrice_v;
+                existing._currentPrice_t = snapshotHolding._currentPrice_t;
+                existing.displayText = snapshotHolding.displayText;
+                existing.desc = snapshotHolding.desc;
+                db.Updateable(existing).ExecuteCommand();
+                usedHoldingIds.Add(existing.Id);
+            }
+
+            var referencedHoldingIds = db.Queryable<Record>()
+                .Select(record => record._holding_Id)
+                .ToList()
+                .ToHashSet();
+            foreach (var staleHolding in existingHoldings.Where(holding => !usedHoldingIds.Contains(holding.Id)))
+            {
+                if (referencedHoldingIds.Contains(staleHolding.Id))
+                {
+                    staleHolding.quantity = Holding.IsSingleValueAsset(staleHolding.holdingType) ? 1 : 0;
+                    staleHolding.currentPrice = new Currency(0, staleHolding.currentPrice.t);
+                    db.Updateable(staleHolding).ExecuteCommand();
+                    continue;
+                }
+
+                db.Deleteable<Holding>()
+                    .Where(holding => holding.Id == staleHolding.Id)
+                    .ExecuteCommand();
+            }
+
+            foreach (var accountId in affectedAccountIds)
+                ValidateAccountBalancesFromHoldings(accountId);
+        }
+
+        private void InsertSnapshotHolding(Holding holding)
+        {
+            if (holding.Id <= 0)
+            {
+                holding.Id = db.Insertable(holding).ExecuteReturnIdentity();
+                return;
+            }
+
+            db.Ado.ExecuteCommand("""
+                insert into `Holdings`
+                    (`Id`, `code`, `holdingType`, `quantity`, `desc`, `displayText`, `_currentPrice_v`, `_currentPrice_t`, `_account_Id`)
+                values
+                    (@id, @code, @holdingType, @quantity, @desc, @displayText, @currentPriceValue, @currentPriceCurrency, @accountId)
+                """,
+                new SugarParameter("@id", holding.Id),
+                new SugarParameter("@code", holding.code),
+                new SugarParameter("@holdingType", holding.holdingType.ToString()),
+                new SugarParameter("@quantity", holding.quantity),
+                new SugarParameter("@desc", holding.desc),
+                new SugarParameter("@displayText", holding.displayText),
+                new SugarParameter("@currentPriceValue", holding.currentPrice.v),
+                new SugarParameter("@currentPriceCurrency", holding.currentPrice.t.ToString()),
+                new SugarParameter("@accountId", holding._account_Id));
+        }
+
         private static void ValidateRestoredHoldings(SnapshotData snapshot, List<Holding> holdings)
         {
             var balanceSums = snapshot.AccountBalances
@@ -2757,13 +2969,35 @@ namespace MyBook
             var holdingSums = holdings
                 .GroupBy(holding => (holding._account_Id, holding.currentPrice.t))
                 .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(holding => holding.totalPrice.v)));
-            foreach (var holdingGroup in holdingSums)
+            foreach (var key in balanceSums.Keys.Union(holdingSums.Keys))
             {
-                var balance = balanceSums.TryGetValue(holdingGroup.Key, out var value) ? value : 0;
-                if (balance != holdingGroup.Value)
+                var balance = balanceSums.TryGetValue(key, out var balanceValue) ? balanceValue : 0;
+                var holding = holdingSums.TryGetValue(key, out var holdingValue) ? holdingValue : 0;
+                if (balance != holding)
                 {
                     throw new InvalidOperationException(
-                        $"Snapshot holding balance mismatch: accountId={holdingGroup.Key.Item1}, currency={holdingGroup.Key.Item2}, snapshotBalance={balance}, holdings={holdingGroup.Value}");
+                        $"Snapshot holding balance mismatch: accountId={key.Item1}, currency={key.Item2}, snapshotBalance={balance}, holdings={holding}");
+                }
+            }
+        }
+
+        private void ValidateCurrentBalancesMatchSnapshot(SnapshotData snapshot)
+        {
+            var expected = snapshot.AccountBalances
+                .GroupBy(balance => (balance.AccountId, balance.CurrencyType))
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(balance => balance.Amount)));
+            var actual = db.Queryable<AccountBalance>()
+                .ToList()
+                .GroupBy(balance => (balance._account_Id, balance.t))
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(balance => balance.v)));
+            foreach (var key in expected.Keys.Union(actual.Keys))
+            {
+                var expectedValue = expected.TryGetValue(key, out var expectedBalance) ? expectedBalance : 0;
+                var actualValue = actual.TryGetValue(key, out var actualBalance) ? actualBalance : 0;
+                if (expectedValue != actualValue)
+                {
+                    throw new InvalidOperationException(
+                        $"Restored account balance mismatch: accountId={key.Item1}, currency={key.Item2}, snapshot={expectedValue}, current={actualValue}");
                 }
             }
         }
@@ -2774,6 +3008,18 @@ namespace MyBook
             {
                 var wiseAccount = GetAccountByName("WISE");
                 ClearRecordMatchesForStatementProvider(StatementImportProvider.WiseMail);
+                var wiseImportIds = db.Queryable<StatementImport>()
+                    .Where(import => import.provider == StatementImportProvider.WiseMail)
+                    .Select(import => import.Id)
+                    .ToList();
+                var wiseRecords = wiseImportIds.Count == 0
+                    ? []
+                    : db.Queryable<Record>()
+                        .Where(record => wiseImportIds.Contains(record._statementImport_Id))
+                        .ToList();
+                foreach (var record in wiseRecords)
+                    ApplyRecordDeltaToHolding(record, -1);
+
                 db.Ado.ExecuteCommand("""
                     delete record
                     from `Records` record
@@ -2782,9 +3028,8 @@ namespace MyBook
                     where statementImport.`provider` = @provider
                     """,
                     new SugarParameter("@provider", StatementImportProvider.WiseMail.ToString()));
-                db.Deleteable<AccountBalance>()
-                    .Where(balance => balance._account_Id == wiseAccount.Id)
-                    .ExecuteCommand();
+                DeleteUnreferencedAccountHoldings(wiseAccount.Id);
+                ValidateAccountBalancesFromHoldings(wiseAccount.Id);
                 db.Deleteable<AccountInternalId>()
                     .Where(internalId => internalId._account_Id == wiseAccount.Id
                         && (internalId.desc == "XML statement balance id" || internalId.desc == "XML file balance id"))
@@ -2813,6 +3058,23 @@ namespace MyBook
                         .ExecuteCommand();
                 }
             });
+        }
+
+        private void DeleteUnreferencedAccountHoldings(int accountId)
+        {
+            var referencedHoldingIds = db.Queryable<Record>()
+                .Where(record => record._account_Id == accountId)
+                .Select(record => record._holding_Id)
+                .ToList()
+                .ToHashSet();
+            var deleteIds = db.Queryable<Holding>()
+                .Where(holding => holding._account_Id == accountId)
+                .ToList()
+                .Where(holding => !referencedHoldingIds.Contains(holding.Id))
+                .Select(holding => holding.Id)
+                .ToList();
+            if (deleteIds.Count > 0)
+                db.Deleteable<Holding>().In(deleteIds).ExecuteCommand();
         }
 
         private void ClearAllRecordMatches()
@@ -3047,12 +3309,20 @@ namespace MyBook
             foreach (var type in SchemaTypes)
             {
                 var tableName = GetTableName(type);
-                if (!db.DbMaintenance.IsAnyTable(tableName, false))
+                var objectType = GetDatabaseObjectType(tableName);
+                if (objectType is null)
                     throw new InvalidOperationException($"Database schema mismatch: missing table {tableName}");
 
-                var dbColumns = db.DbMaintenance.GetColumnInfosByTableName(tableName, false)
-                    .Select(column => column.DbColumnName)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var expectedObjectType = SchemaViewNames.Contains(tableName)
+                    ? "VIEW"
+                    : "BASE TABLE";
+                if (!objectType.Equals(expectedObjectType, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"Database schema mismatch: {tableName} must be {expectedObjectType}, actual {objectType}");
+                }
+
+                var dbColumns = GetDatabaseColumnNames(tableName);
                 var codeColumns = GetColumnNames(type);
 
                 var missingColumns = codeColumns.Except(dbColumns, StringComparer.OrdinalIgnoreCase).ToList();
@@ -3065,6 +3335,38 @@ namespace MyBook
                         $"Database schema mismatch: table {tableName}, missing columns [{missingText}], extra columns [{extraText}]");
                 }
             }
+        }
+
+        private string? GetDatabaseObjectType(string tableName)
+        {
+            var result = db.Ado.GetDataTable("""
+                select `TABLE_TYPE`
+                from `information_schema`.`TABLES`
+                where `TABLE_SCHEMA` = database()
+                    and `TABLE_NAME` = @tableName
+                """,
+                new SugarParameter("@tableName", tableName));
+            return result.Rows.Count == 0 ? null : result.Rows[0]["TABLE_TYPE"]?.ToString();
+        }
+
+        private HashSet<string> GetDatabaseColumnNames(string tableName)
+        {
+            var result = db.Ado.GetDataTable("""
+                select `COLUMN_NAME`
+                from `information_schema`.`COLUMNS`
+                where `TABLE_SCHEMA` = database()
+                    and `TABLE_NAME` = @tableName
+                """,
+                new SugarParameter("@tableName", tableName));
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (System.Data.DataRow row in result.Rows)
+            {
+                var name = row["COLUMN_NAME"]?.ToString();
+                if (!String.IsNullOrWhiteSpace(name))
+                    columns.Add(name);
+            }
+
+            return columns;
         }
 
         private void ValidateForeignKeys()
@@ -3256,7 +3558,7 @@ namespace MyBook
             }
         }
 
-        private void SaveAccountHoldingsCore(Account account, List<Holding> holdingList)
+        private void SaveAccountHoldingsCore(Account account, List<Holding> holdingList, List<AccountBalance>? expectedBalances = null)
         {
             account = GetAccountByName(account.name);
 
@@ -3267,19 +3569,20 @@ namespace MyBook
                 holding._account_Id = account.Id;
             }
 
-            ValidateAccountHoldingsBalance(account, holdingList);
+            if (expectedBalances is not null)
+                ValidateAccountHoldingsBalance(account, holdingList, expectedBalances);
 
             var existingHoldings = db.Queryable<Holding>()
                 .Where(it => it._account_Id == account.Id)
                 .ToList();
             var currentKeys = holdingList.Select(GetHoldingKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var deletedIds = existingHoldings
-                .Where(holding => !currentKeys.Contains(GetHoldingKey(holding)))
-                .Select(holding => holding.Id)
-                .ToList();
-            if (deletedIds.Count > 0)
-                db.Deleteable<Holding>().In(deletedIds).ExecuteCommand();
+            foreach (var staleHolding in existingHoldings.Where(holding => !currentKeys.Contains(GetHoldingKey(holding))))
+            {
+                staleHolding.quantity = Holding.IsSingleValueAsset(staleHolding.holdingType) ? 1 : 0;
+                staleHolding.currentPrice = new Currency(0, staleHolding.currentPrice.t);
+                db.Updateable(staleHolding).ExecuteCommand();
+            }
 
             foreach (var holding in holdingList)
             {
@@ -3299,6 +3602,8 @@ namespace MyBook
                 existing._account_Id = account.Id;
                 db.Updateable(existing).ExecuteCommand();
             }
+
+            ValidateAccountBalancesFromHoldings(account);
         }
 
         private static void NormalizeHolding(Holding holding)
@@ -3307,13 +3612,10 @@ namespace MyBook
                 holding.quantity = 1;
         }
 
-        private void ValidateAccountHoldingsBalance(Account account, List<Holding> holdings)
+        private void ValidateAccountHoldingsBalance(Account account, List<Holding> holdings, List<AccountBalance> accountBalances)
         {
-            var accountBalances = db.Queryable<AccountBalance>()
-                .Where(it => it._account_Id == account.Id)
-                .ToList();
             if (accountBalances.Count == 0)
-                throw new InvalidOperationException($"Missing account balance for holdings: {account.name}");
+                return;
 
             var balanceSums = accountBalances
                 .GroupBy(balance => balance.t)
@@ -3344,6 +3646,7 @@ namespace MyBook
             decimal Amount);
 
         private sealed record SnapshotHoldingPayloadV1(
+            int HoldingId,
             int AccountId,
             string AccountName,
             string Code,
@@ -3360,7 +3663,7 @@ namespace MyBook
             int SchemaVersion,
             int Id,
             int AccountId,
-            int? HoldingId,
+            int HoldingId,
             decimal Amount,
             CurrencyType Currency,
             DateTime Date,
@@ -3429,6 +3732,7 @@ namespace MyBook
         decimal Amount);
 
     record SnapshotHoldingData(
+        int HoldingId,
         int AccountId,
         string AccountName,
         string Code,
