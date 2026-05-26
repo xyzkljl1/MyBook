@@ -541,7 +541,7 @@ namespace MyBook
                 endingBalances,
                 parsed.StatementKey,
                 beginningBalances,
-                afterSaveInTransaction: _ => database.EnsureAccountInternalCardNos(parsed.InternalCardNos),
+                internalCardNos: parsed.InternalCardNos,
                 forceValidateBeginningBalances: existingRecords.Count > 0);
             stats.Imported = saved ? records.Count : 0;
             Console.WriteLine(saved

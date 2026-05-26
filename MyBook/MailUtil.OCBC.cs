@@ -64,7 +64,7 @@ namespace MyBook
                 parsed.EndingBalances,
                 parsed.StatementKey,
                 parsed.BeginningBalances,
-                afterSaveInTransaction: _ => database.EnsureAccountInternalCardNos(parsed.InternalCardNos));
+                internalCardNos: parsed.InternalCardNos);
 
             Console.WriteLine(saved
                 ? $"Import OCBC statement {parsed.StatementKey}, records={parsed.Records.Count}"

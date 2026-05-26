@@ -673,7 +673,7 @@ namespace MyBook
                 parsed.EndingBalances,
                 parsed.StatementKey,
                 parsed.BeginningBalances,
-                afterSaveInTransaction: _ => database.EnsureAccountInternalCardNos(parsed.InternalCardNos));
+                internalCardNos: parsed.InternalCardNos);
         }
 
         private static void PrintWiseParsedStatementSummary(string label, WiseParsedStatement parsed, bool saved)
