@@ -47,10 +47,10 @@ namespace MyBook
                 InitKeyType = InitKeyType.Attribute,
                 IsAutoCloseConnection = true
             });
-            ValidateSchema();
-            ValidateForeignKeys();
+            DbValidateSchema();
+            DbValidateForeignKeys();
             ValidateAccountPrimaryRelations();
-            ValidateAccountBalancesViewDefinition();
+            DbValidateAccountBalancesViewDefinition();
             ValidateAllAccountBalancesFromHoldings();
         }
 
@@ -3426,7 +3426,7 @@ namespace MyBook
             return false;
         }
 
-        private void ValidateSchema()
+        private void DbValidateSchema()
         {
             foreach (var type in SchemaTypes)
             {
@@ -3491,7 +3491,7 @@ namespace MyBook
             return columns;
         }
 
-        private void ValidateAccountBalancesViewDefinition()
+        private void DbValidateAccountBalancesViewDefinition()
         {
             var createView = GetViewCreateSql("AccountBalances");
             var normalized = NormalizeSqlForComparison(createView);
@@ -3543,7 +3543,7 @@ namespace MyBook
                 .ToLowerInvariant();
         }
 
-        private void ValidateForeignKeys()
+        private void DbValidateForeignKeys()
         {
             foreach (var foreignKey in ForeignKeys)
             {
