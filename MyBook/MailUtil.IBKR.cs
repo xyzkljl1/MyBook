@@ -520,8 +520,9 @@ namespace MyBook
             decimal expectedNavChange)
         {
             var builder = new IBKRRecordBuilder(account, reportDate, sourceName, baseCurrency);
-            var mtmTotals = ParseIBKRMtmRecords(report, builder, baseCurrency, contractInfos);
-            var tradeTotals = ParseIBKRTradeSummary(report);
+            var tradeTotals = ParseIBKRTradeSummary(report, contractInfos);
+            var quantityChangeTotals = ParseIBKRPositionQuantityChangeRecords(report, builder, baseCurrency, contractInfos, tradeTotals);
+            var mtmTotals = ParseIBKRMtmRecords(report, builder, baseCurrency, contractInfos, quantityChangeTotals.CoveredTransactionHoldingKeys);
             var commissionTotals = ParseIBKRCommissionRecords(report, builder, baseCurrency, contractInfos);
             var interestAccrualTotals = ParseIBKRInterestAccrualRecords(report, builder, baseCurrency);
             var debitInterestTotals = ParseIBKRDebitInterestDetails(report);
@@ -570,11 +571,111 @@ namespace MyBook
             return builder.Records;
         }
 
+        private IBKRPositionQuantityChangeTotals ParseIBKRPositionQuantityChangeRecords(
+            IBKRCsvReport report,
+            IBKRRecordBuilder builder,
+            CurrencyType baseCurrency,
+            Dictionary<string, IBKRContractInfo> contractInfos,
+            IBKRTransactionTotals tradeTotals)
+        {
+            var coveredTransactionHoldingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            decimal holdingValueChangeTotal = 0;
+            decimal cashChangeTotal = 0;
+            decimal coveredTransactionTotal = 0;
+            foreach (var row in report.OptionalDataRows("持仓与以市值计的盈亏"))
+            {
+                if (!IsIBKRPositionSummaryRow(row))
+                    continue;
+
+                var group = row.Fields[1];
+                if (group is not ("股票" or "债券"))
+                    continue;
+
+                var currency = ParseIBKRCurrencyType(row.Fields[2]);
+                if (currency != baseCurrency)
+                    throw new MailParseException($"Parse IBKR Report Fail, Non-base Position Quantity Change: {FormatIBKRCsvRow(row)}");
+
+                var contract = ResolveIBKRContract(row.Fields[3], group, contractInfos);
+                var holdingKey = GetIBKRHoldingKey(contract);
+                var beginningQuantity = NormalizeIBKRHoldingQuantity(
+                    contract,
+                    ParseIBKRIntegerQuantityAt(row, 5, "beginning holding quantity"));
+                var endingQuantity = NormalizeIBKRHoldingQuantity(
+                    contract,
+                    ParseIBKRIntegerQuantityAt(row, 6, "ending holding quantity"));
+                var quantityChange = endingQuantity - beginningQuantity;
+                if (quantityChange == 0)
+                    continue;
+
+                if (!tradeTotals.Holdings.TryGetValue(holdingKey, out var trade))
+                    continue;
+                if (trade.Quantity == 0 && trade.Proceeds == 0)
+                    continue;
+                if (trade.Currency != baseCurrency)
+                    throw new MailParseException($"Parse IBKR Report Fail, Non-base Trade Summary: {FormatIBKRCsvRow(row)}");
+                if (trade.Quantity != quantityChange)
+                {
+                    throw new MailParseException(
+                        $"Parse IBKR Report Fail, Trade Quantity Change Mismatch: code={contract.Code}, position={quantityChange}, trade={trade.Quantity}, row={FormatIBKRCsvRow(row)}, tradeRow={trade.Source}");
+                }
+
+                var previousMarketValue = ParseIBKRDecimalAt(row, 9, "position previous market value");
+                var currentMarketValue = ParseIBKRDecimalAt(row, 10, "position current market value");
+                var holdingPriceChange = ParseIBKRDecimalAt(row, 11, "position holding price change");
+                var transactionPriceImpact = ParseIBKRDecimalAt(row, 12, "position transaction price impact");
+                var holdingValueChange = currentMarketValue - previousMarketValue - holdingPriceChange;
+                var cashChange = trade.Proceeds;
+                AssertIBKRMoneyEquals(
+                    transactionPriceImpact,
+                    holdingValueChange + cashChange,
+                    $"IBKR position quantity change transaction {contract.Code}");
+
+                if (holdingValueChange != 0)
+                {
+                    builder.Add(
+                        new Currency(holdingValueChange, baseCurrency),
+                        "持仓数量价值变化",
+                        $"PositionQuantityChange/{FormatIBKRCsvRow(row)}",
+                        isInternal: true,
+                        destAccount: contract.Code,
+                        holdingQuantity: quantityChange,
+                        holding: contract);
+                }
+
+                if (cashChange != 0)
+                {
+                    builder.Add(
+                        new Currency(cashChange, baseCurrency),
+                        "持仓交易现金变化",
+                        $"PositionQuantityCash/{trade.Source}",
+                        isInternal: true,
+                        destAccount: contract.Code,
+                        holding: contract);
+                }
+
+                coveredTransactionHoldingKeys.Add(holdingKey);
+                holdingValueChangeTotal += holdingValueChange;
+                cashChangeTotal += cashChange;
+                coveredTransactionTotal += transactionPriceImpact;
+            }
+
+            AssertIBKRMoneyEquals(
+                coveredTransactionTotal,
+                holdingValueChangeTotal + cashChangeTotal,
+                "IBKR covered position transaction records");
+            return new IBKRPositionQuantityChangeTotals(
+                coveredTransactionHoldingKeys,
+                holdingValueChangeTotal,
+                cashChangeTotal,
+                coveredTransactionTotal);
+        }
+
         private IBKRMtmTotals ParseIBKRMtmRecords(
             IBKRCsvReport report,
             IBKRRecordBuilder builder,
             CurrencyType baseCurrency,
-            Dictionary<string, IBKRContractInfo> contractInfos)
+            Dictionary<string, IBKRContractInfo> contractInfos,
+            HashSet<string> coveredTransactionHoldingKeys)
         {
             var rows = report.OptionalDataRows("按市值计算的表现总结").ToList();
             if (rows.Count == 0)
@@ -630,14 +731,19 @@ namespace MyBook
                         new Currency(holding, baseCurrency),
                         "持仓价格变动",
                         $"MTM/{FormatIBKRCsvRow(row)}",
-                        destAccount: contract.Code);
+                        destAccount: contract.Code,
+                        holding: contract);
                 }
 
-                builder.Add(
-                    new Currency(transaction, baseCurrency),
-                    "交易价格影响",
-                    $"MTM/{FormatIBKRCsvRow(row)}",
-                    destAccount: contract.Code);
+                if (!coveredTransactionHoldingKeys.Contains(GetIBKRHoldingKey(contract)))
+                {
+                    builder.Add(
+                        new Currency(transaction, baseCurrency),
+                        "交易价格影响",
+                        $"MTM/{FormatIBKRCsvRow(row)}",
+                        destAccount: contract.Code,
+                        holding: contract);
+                }
             }
 
             if (grandHoldingTotal.HasValue)
@@ -759,12 +865,14 @@ namespace MyBook
             AssertIBKRMoneyEquals(total, components, $"IBKR MTM row total {FormatIBKRCsvRow(row)}");
         }
 
-        private static IBKRTransactionTotals ParseIBKRTradeSummary(IBKRCsvReport report)
+        private static IBKRTransactionTotals ParseIBKRTradeSummary(
+            IBKRCsvReport report,
+            Dictionary<string, IBKRContractInfo> contractInfos)
         {
             var rows = report.OptionalDataRows("按代码显示的交易总结").ToList();
             var assetRows = report.OptionalDataRows("按资产类型显示的交易总结").ToList();
             if (rows.Count == 0 && assetRows.Count == 0)
-                return new IBKRTransactionTotals(false, 0, 0, 0, 0, 0);
+                return new IBKRTransactionTotals(false, 0, 0, 0, 0, 0, []);
 
             decimal buyTotal = 0;
             decimal sellTotal = 0;
@@ -772,6 +880,7 @@ namespace MyBook
             int sellQuantity = 0;
             decimal? reportedBuyTotal = null;
             decimal? reportedSellTotal = null;
+            var trades = new Dictionary<string, IBKRTradeSummaryData>(StringComparer.OrdinalIgnoreCase);
             foreach (var row in rows)
             {
                 AssertIBKRFieldCount(row, 9);
@@ -786,10 +895,43 @@ namespace MyBook
                 if (!IBKRAssetGroups.Contains(assetClass))
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Trade Summary Asset Class: {FormatIBKRCsvRow(row)}");
 
-                buyQuantity += ParseIBKRIntegerQuantityOrZero(row.Fields[3], "trade buy quantity", row);
-                sellQuantity += ParseIBKRIntegerQuantityOrZero(row.Fields[6], "trade sell quantity", row);
-                buyTotal += ParseIBKRDecimalOrZero(row.Fields[5]);
-                sellTotal += ParseIBKRDecimalOrZero(row.Fields[8]);
+                var rawBuyQuantity = ParseIBKRIntegerQuantityOrZero(row.Fields[3], "trade buy quantity", row);
+                var rawSellQuantity = ParseIBKRIntegerQuantityOrZero(row.Fields[6], "trade sell quantity", row);
+                var rowBuyTotal = ParseIBKRDecimalOrZero(row.Fields[5]);
+                var rowSellTotal = ParseIBKRDecimalOrZero(row.Fields[8]);
+                buyQuantity += rawBuyQuantity;
+                sellQuantity += rawSellQuantity;
+                buyTotal += rowBuyTotal;
+                sellTotal += rowSellTotal;
+                if (assetClass is "股票" or "债券")
+                {
+                    var currency = ParseIBKRCurrencyType(row.Fields[1]);
+                    var contract = ResolveIBKRContract(row.Fields[2], assetClass, contractInfos);
+                    var holdingKey = GetIBKRHoldingKey(contract);
+                    var buyHoldingQuantity = NormalizeIBKRHoldingQuantity(contract, rawBuyQuantity);
+                    var sellHoldingQuantity = NormalizeIBKRHoldingQuantity(contract, rawSellQuantity);
+                    if (trades.TryGetValue(holdingKey, out var existing))
+                    {
+                        trades[holdingKey] = existing.Add(
+                            currency,
+                            buyHoldingQuantity,
+                            sellHoldingQuantity,
+                            rowBuyTotal,
+                            rowSellTotal,
+                            FormatIBKRCsvRow(row));
+                    }
+                    else
+                    {
+                        trades[holdingKey] = new IBKRTradeSummaryData(
+                            contract,
+                            currency,
+                            buyHoldingQuantity,
+                            sellHoldingQuantity,
+                            rowBuyTotal,
+                            rowSellTotal,
+                            FormatIBKRCsvRow(row));
+                    }
+                }
             }
 
             if (reportedBuyTotal.HasValue)
@@ -805,7 +947,7 @@ namespace MyBook
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Trade Asset Summary Class: {FormatIBKRCsvRow(row)}");
             }
 
-            return new IBKRTransactionTotals(true, buyTotal + sellTotal, buyTotal, sellTotal, 0, buyQuantity + sellQuantity);
+            return new IBKRTransactionTotals(true, buyTotal + sellTotal, buyTotal, sellTotal, 0, buyQuantity + sellQuantity, trades);
         }
 
         private IBKRCommissionTotals ParseIBKRCommissionRecords(
@@ -855,7 +997,8 @@ namespace MyBook
                     $"Commission/{FormatIBKRCsvRow(row)}",
                     date: ParseIBKRDateTime(row.Fields[3]),
                     destAccount: contract.Code,
-                    holdingQuantity: quantity);
+                    holdingQuantity: quantity,
+                    holding: contract);
             }
 
             if (reportedTotal.HasValue)
@@ -1035,7 +1178,8 @@ namespace MyBook
                     $"DividendAccrualChange/{FormatIBKRCsvRow(row)}",
                     date: date,
                     destAccount: contract.Code,
-                    holdingQuantity: quantity);
+                    holdingQuantity: quantity,
+                    holding: contract);
             }
 
             if (reportedTotal.HasValue)
@@ -1106,7 +1250,8 @@ namespace MyBook
                     isInternal: true,
                     date: ParseIBKRDate(row.Fields[3]),
                     destAccount: BuildIBKRTransferDestAccount(account, row.Fields[7], direction),
-                    holdingQuantity: quantity);
+                    holdingQuantity: quantity,
+                    holding: contract);
             }
 
             var reportedTotal = (reportedMarketValue ?? 0) + (reportedCashAmount ?? 0);
@@ -1231,8 +1376,8 @@ namespace MyBook
             AddIBKRHolding(holdings, seen, new Holding(baseCurrency.ToString(), HoldingType.Cash)
             {
                 Account = account,
-                desc = $"IBKR cash {baseCurrency}",
-                displayText = baseCurrency.ToString(),
+                desc = $"All currency cash balances converted to {baseCurrency}",
+                displayText = baseCurrency == CurrencyType.USD ? "All currency($)" : $"All currency({baseCurrency})",
                 currentPrice = new Currency(endingCash, baseCurrency)
             });
 
@@ -1421,6 +1566,11 @@ namespace MyBook
         private static string GetIBKRHoldingKey(Holding holding)
         {
             return $"{holding.code}\t{holding.holdingType}";
+        }
+
+        private static string GetIBKRHoldingKey(IBKRContractInfo contract)
+        {
+            return $"{contract.Code}\t{contract.HoldingType}";
         }
 
         private static IBKRContractInfo ResolveIBKRContract(
@@ -2251,13 +2401,54 @@ namespace MyBook
 
         private sealed record IBKRMtmTotals(bool HasData, decimal Holding, decimal Transaction, decimal Commission, decimal Other);
 
+        private sealed record IBKRPositionQuantityChangeTotals(
+            HashSet<string> CoveredTransactionHoldingKeys,
+            decimal HoldingValueChange,
+            decimal CashChange,
+            decimal TransactionPriceImpact);
+
         private sealed record IBKRTransactionTotals(
             bool HasData,
             decimal Proceeds,
             decimal BuyProceeds,
             decimal SellProceeds,
             decimal Commission,
-            int Quantity);
+            int Quantity,
+            Dictionary<string, IBKRTradeSummaryData> Holdings);
+
+        private sealed record IBKRTradeSummaryData(
+            IBKRContractInfo Contract,
+            CurrencyType Currency,
+            int BuyQuantity,
+            int SellQuantity,
+            decimal BuyProceeds,
+            decimal SellProceeds,
+            string Source)
+        {
+            public int Quantity => BuyQuantity + SellQuantity;
+            public decimal Proceeds => BuyProceeds + SellProceeds;
+
+            public IBKRTradeSummaryData Add(
+                CurrencyType currency,
+                int buyQuantity,
+                int sellQuantity,
+                decimal buyProceeds,
+                decimal sellProceeds,
+                string source)
+            {
+                if (Currency != currency)
+                    throw new MailParseException($"Parse IBKR Report Fail, Trade Summary Currency Mismatch: {Contract.Code}");
+
+                return this with
+                {
+                    BuyQuantity = BuyQuantity + buyQuantity,
+                    SellQuantity = SellQuantity + sellQuantity,
+                    BuyProceeds = BuyProceeds + buyProceeds,
+                    SellProceeds = SellProceeds + sellProceeds,
+                    Source = $"{Source}; {source}"
+                };
+            }
+        }
 
         private sealed record IBKRCommissionTotals(bool HasData, decimal Total);
 
@@ -2359,7 +2550,8 @@ namespace MyBook
                 bool affectsNetAsset = true,
                 DateTime? date = null,
                 string destAccount = "",
-                int holdingQuantity = 0)
+                int holdingQuantity = 0,
+                IBKRContractInfo? holding = null)
             {
                 if (amount.v == 0)
                     return;
@@ -2374,6 +2566,14 @@ namespace MyBook
                     DestAccount = destAccount,
                     isInternal = isInternal,
                     HoldingQuantity = holdingQuantity,
+                    Holding = holding is null
+                        ? null
+                        : new Holding(holding.Code, holding.HoldingType)
+                        {
+                            Account = account,
+                            desc = holding.Description,
+                            displayText = holding.DisplayText
+                        },
                     Source = LimitIBKRRecordText($"IBKR CSV {sourceName}/{source}"),
                     Reason = LimitIBKRRecordText(reason)
                 };
