@@ -426,7 +426,7 @@ namespace MyBook
                 date = row.PostingDate,
                 postingDate = row.PostingDate,
                 updateTime = DateTime.Now,
-                Source = $"code={rowCode}; ICBCHistoryDetail; statementKey={statementKey}; row={row.RawText}",
+                Source = BuildICBCHistoryDetailSource(row, rowCode, statementKey),
                 DestAccount = BuildICBCHistoryDetailDestAccount(row),
                 Reason = row.Summary
             };
@@ -563,7 +563,7 @@ namespace MyBook
             var existingEnd = GetICBCHistoryDetailRecordPostingDate(existingRecords[^1]);
             var candidatesStart = firstCandidate.Row.PostingDate;
             var candidatesEnd = candidates[^1].Row.PostingDate;
-            var bestOverlapLength = 0;
+            var overlapCandidates = new List<int>();
             for (var existingIndex = 0; existingIndex < existingRecords.Count; existingIndex++)
             {
                 if (!IsICBCHistoryDetailRecordMatch(firstCandidate, existingRecords[existingIndex]))
@@ -585,11 +585,10 @@ namespace MyBook
                 if (!matches)
                     continue;
 
-                bestOverlapLength = overlapLength;
-                break;
+                overlapCandidates.Add(overlapLength);
             }
 
-            if (bestOverlapLength == 0)
+            if (overlapCandidates.Count == 0)
             {
                 if (candidatesEnd < existingStart || candidatesStart > existingEnd)
                 {
@@ -601,6 +600,13 @@ namespace MyBook
                     $"ICBC history detail overlaps existing records but the starting transaction does not match: {parsed.StatementKey}");
             }
 
+            if (overlapCandidates.Count > 1)
+            {
+                throw new InvalidOperationException(
+                    $"ICBC history detail overlaps existing records ambiguously: {parsed.StatementKey}");
+            }
+
+            var bestOverlapLength = overlapCandidates[0];
             stats.Overlap = bestOverlapLength;
             if (bestOverlapLength == candidates.Count)
             {
@@ -695,12 +701,80 @@ namespace MyBook
             ICBCHistoryDetailDebitCandidate candidate,
             Record record)
         {
-            return GetICBCHistoryDetailRecordPostingDate(record) == candidate.Row.PostingDate
-                && record.v == candidate.Row.Amount.v
-                && record.t == candidate.Row.Amount.t
-                && record.DescCurrency == candidate.Row.DescCurrency
-                && String.Equals(record.Reason, candidate.Record.Reason, StringComparison.Ordinal)
-                && String.Equals(record.DestAccount, candidate.Record.DestAccount, StringComparison.Ordinal);
+            if (GetICBCHistoryDetailRecordPostingDate(record) != candidate.Row.PostingDate
+                || record.v != candidate.Row.Amount.v
+                || record.t != candidate.Row.Amount.t
+                || record.DescCurrency != candidate.Row.DescCurrency
+                || !String.Equals(record.Reason, candidate.Record.Reason, StringComparison.Ordinal)
+                || !String.Equals(record.DestAccount, candidate.Record.DestAccount, StringComparison.Ordinal))
+                return false;
+
+            if (!TryGetICBCHistoryDetailRecordBalance(record, out var existingBalance))
+                return true;
+
+            return candidate.Row.Balance.HasValue
+                && existingBalance.t == candidate.Row.Amount.t
+                && existingBalance.v == candidate.Row.Balance.Value;
+        }
+
+        private static bool TryGetICBCHistoryDetailRecordBalance(Record record, out Currency balance)
+        {
+            if (TryParseICBCHistoryDetailSourceBalance(record.Source, out balance))
+                return true;
+
+            try
+            {
+                var rawRow = ExtractICBCHistoryDetailRawRow(record.Source);
+                if (String.Equals(rawRow, record.Source, StringComparison.Ordinal))
+                    return false;
+
+                var row = ParseICBCHistoryDetailRow(rawRow);
+                if (!row.Balance.HasValue)
+                    return false;
+
+                balance = new Currency(row.Balance.Value, row.Amount.t);
+                return true;
+            }
+            catch
+            {
+                balance = null!;
+                return false;
+            }
+        }
+
+        private static bool TryParseICBCHistoryDetailSourceBalance(string source, out Currency balance)
+        {
+            var match = Regex.Match(
+                source ?? "",
+                @"(?:^|;\s*)historyBalance=(?<currency>[A-Za-z0-9_]+):(?<amount>[+-]?\d[\d,]*(?:\.\d+)?)",
+                RegexOptions.CultureInvariant);
+            if (!match.Success
+                || !Enum.TryParse<CurrencyType>(match.Groups["currency"].Value, out var currencyType))
+            {
+                balance = null!;
+                return false;
+            }
+
+            balance = new Currency(ParseInvariantDecimal(match.Groups["amount"].Value), currencyType);
+            return true;
+        }
+
+        private static string BuildICBCHistoryDetailSource(
+            ICBCHistoryDetailRow row,
+            string rowCode,
+            string statementKey)
+        {
+            var parts = new List<string>
+            {
+                $"code={rowCode}",
+                "ICBCHistoryDetail",
+                $"statementKey={statementKey}"
+            };
+            if (row.Balance.HasValue)
+                parts.Add($"historyBalance={row.Amount.t}:{row.Balance.Value.ToString(CultureInfo.InvariantCulture)}");
+
+            parts.Add($"row={row.RawText}");
+            return LimitICBCHistoryDetailRecordText(String.Join("; ", parts));
         }
 
         private static DateTime GetICBCHistoryDetailRecordPostingDate(Record record)

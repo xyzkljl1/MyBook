@@ -292,6 +292,7 @@ namespace MyBook
                         shouldValidateBeginningBalances[import.Provider],
                         import.HoldingAccount,
                         import.Holdings,
+                        import.BeginningHoldings,
                         import.InternalCardNos);
                     if (!statementImportId.HasValue)
                     {
@@ -321,6 +322,7 @@ namespace MyBook
             bool shouldValidateBeginningBalances,
             Account? holdingAccount = null,
             List<Holding>? holdings = null,
+            List<Holding>? beginningHoldings = null,
             List<AccountInternalId>? internalCardNos = null,
             Action<int>? afterSaveInTransaction = null)
         {
@@ -346,7 +348,11 @@ namespace MyBook
                 SaveAccountBalancesCore(accountBalances);
 
             if (holdingAccount is not null && holdings is not null)
+            {
+                ValidateBeginningAccountHoldingQuantities(provider, statementKey, holdingAccount, beginningHoldings ?? []);
                 SaveAccountHoldingsCore(holdingAccount, holdings);
+                ValidateSavedAccountHoldingQuantities(provider, statementKey, holdingAccount, holdings);
+            }
 
             SaveRecordsCore(records, statementImportId);
             if (!hasExternalBalances)
@@ -1710,7 +1716,12 @@ namespace MyBook
             return dates
                 .Select(date =>
                 {
-                    var result = BuildAccountBalancesAt(date, targetRevision, today, currentBalances);
+                    var result = BuildAccountBalancesAt(
+                        date,
+                        targetRevision,
+                        today,
+                        currentBalances,
+                        HistoricalBalanceDateBasis.PostingDate);
                     return new AssetSummaryBalanceSet(
                         result.Date,
                         result.SnapshotTime,
@@ -1722,18 +1733,35 @@ namespace MyBook
 
         public HistoricalAccountBalanceResult GetAccountBalancesAt(DateTime date)
         {
+            return GetAccountBalancesAtByPostingDate(date);
+        }
+
+        public HistoricalAccountBalanceResult GetAccountBalancesAtByTransactionDate(DateTime date)
+        {
             return BuildAccountBalancesAt(
                 date,
                 GetCurrentStatementImportRevision(),
                 DateTime.Today,
-                null);
+                null,
+                HistoricalBalanceDateBasis.TransactionDate);
+        }
+
+        public HistoricalAccountBalanceResult GetAccountBalancesAtByPostingDate(DateTime date)
+        {
+            return BuildAccountBalancesAt(
+                date,
+                GetCurrentStatementImportRevision(),
+                DateTime.Today,
+                null,
+                HistoricalBalanceDateBasis.PostingDate);
         }
 
         private HistoricalAccountBalanceResult BuildAccountBalancesAt(
             DateTime date,
             int targetRevision,
             DateTime today,
-            List<AccountBalance>? currentBalances)
+            List<AccountBalance>? currentBalances,
+            HistoricalBalanceDateBasis dateBasis)
         {
             var targetDate = date.Date;
             if (targetDate == today.Date)
@@ -1771,7 +1799,7 @@ namespace MyBook
                 baseSnapshot.Snapshot.Id,
                 baseSnapshot.Snapshot.time,
                 baseSnapshot.Snapshot.maxStatementImportId,
-                BuildRolledForwardBalances(baseSnapshot, targetDate, targetRevision));
+                BuildRolledForwardBalances(baseSnapshot, targetDate, targetRevision, dateBasis));
         }
 
         private SnapshotData? GetLatestBalanceSnapshotAtOrBefore(DateTime date, int targetRevision)
@@ -1806,7 +1834,8 @@ namespace MyBook
         private List<AccountBalance> BuildRolledForwardBalances(
             SnapshotData baseSnapshot,
             DateTime targetDate,
-            int targetRevision)
+            int targetRevision,
+            HistoricalBalanceDateBasis dateBasis)
         {
             var balances = baseSnapshot.AccountBalances
                 .GroupBy(balance => (balance.AccountId, balance.CurrencyType))
@@ -1816,10 +1845,15 @@ namespace MyBook
             // 快照表示某个StatementImport导入进度下的最新状态，而不是某个自然日的余额。
             // 因此只能向前滚动：从快照revision之后新增的导入里，取所有发生在目标日结束前的record。
             // 如果这些新导入的record发生在快照effectiveDate之前，也仍然要计入，因为快照创建时尚未包含它们。
-            var records = db.Queryable<Record>()
+            var recordQuery = db.Queryable<Record>()
                 .Where(record => record._statementImport_Id > baseRevision
-                    && record._statementImport_Id <= targetRevision
-                    && record.date < targetEnd)
+                    && record._statementImport_Id <= targetRevision);
+            if (dateBasis == HistoricalBalanceDateBasis.TransactionDate)
+                recordQuery = recordQuery.Where(record => record.date < targetEnd);
+
+            var records = recordQuery
+                .ToList()
+                .Where(record => GetHistoricalBalanceRecordDate(record, dateBasis) < targetEnd)
                 .ToList();
             foreach (var record in records)
             {
@@ -1838,6 +1872,15 @@ namespace MyBook
                     v = item.Value
                 })
                 .ToList();
+        }
+
+        private static DateTime GetHistoricalBalanceRecordDate(
+            Record record,
+            HistoricalBalanceDateBasis dateBasis)
+        {
+            return dateBasis == HistoricalBalanceDateBasis.PostingDate
+                ? record.postingDate ?? record.date
+                : record.date;
         }
 
         private static AccountBalance CloneDashboardBalance(AccountBalance balance)
@@ -2652,20 +2695,52 @@ namespace MyBook
                 db.Insertable(accountBalances).ExecuteCommand();
 
             var holdings = snapshot.Holdings
-                .Select(holding => new Holding
-                {
-                    _account_Id = holding.AccountId,
-                    code = holding.Code,
-                    holdingType = holding.HoldingType,
-                    quantity = holding.Quantity,
-                    _currentPrice_v = holding.CurrentPrice.v,
-                    _currentPrice_t = holding.CurrentPrice.t,
-                    displayText = holding.DisplayText,
-                    desc = holding.Description
-                })
+                .Select(CreateHoldingFromSnapshot)
                 .ToList();
+            ValidateRestoredHoldings(snapshot, holdings);
             if (holdings.Count > 0)
                 db.Insertable(holdings).ExecuteCommand();
+        }
+
+        private static Holding CreateHoldingFromSnapshot(SnapshotHoldingData snapshotHolding)
+        {
+            var holding = new Holding
+            {
+                _account_Id = snapshotHolding.AccountId,
+                code = snapshotHolding.Code,
+                holdingType = snapshotHolding.HoldingType,
+                quantity = snapshotHolding.Quantity,
+                _currentPrice_v = snapshotHolding.CurrentPrice.v,
+                _currentPrice_t = snapshotHolding.CurrentPrice.t,
+                displayText = snapshotHolding.DisplayText,
+                desc = snapshotHolding.Description
+            };
+            if (holding.totalPrice != snapshotHolding.TotalPrice)
+            {
+                throw new InvalidOperationException(
+                    $"Snapshot holding total mismatch: account={snapshotHolding.AccountName}, code={snapshotHolding.Code}, type={snapshotHolding.HoldingType}, snapshot={snapshotHolding.TotalPrice.v}/{snapshotHolding.TotalPrice.t}, restored={holding.totalPrice.v}/{holding.totalPrice.t}");
+            }
+
+            return holding;
+        }
+
+        private static void ValidateRestoredHoldings(SnapshotData snapshot, List<Holding> holdings)
+        {
+            var balanceSums = snapshot.AccountBalances
+                .GroupBy(balance => (balance.AccountId, balance.CurrencyType))
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(balance => balance.Amount)));
+            var holdingSums = holdings
+                .GroupBy(holding => (holding._account_Id, holding.currentPrice.t))
+                .ToDictionary(group => group.Key, group => Currency.RoundMoney(group.Sum(holding => holding.totalPrice.v)));
+            foreach (var holdingGroup in holdingSums)
+            {
+                var balance = balanceSums.TryGetValue(holdingGroup.Key, out var value) ? value : 0;
+                if (balance != holdingGroup.Value)
+                {
+                    throw new InvalidOperationException(
+                        $"Snapshot holding balance mismatch: accountId={holdingGroup.Key.Item1}, currency={holdingGroup.Key.Item2}, snapshotBalance={balance}, holdings={holdingGroup.Value}");
+                }
+            }
         }
 
         public void CleanWiseImportedData()
@@ -3061,6 +3136,101 @@ namespace MyBook
             return $"{holding.code}\t{holding.holdingType}";
         }
 
+        private void ValidateBeginningAccountHoldingQuantities(
+            StatementImportProvider provider,
+            string statementKey,
+            Account account,
+            List<Holding> beginningHoldings)
+        {
+            account = GetAccountByName(account.name);
+            var existingHoldings = db.Queryable<Holding>()
+                .Where(it => it._account_Id == account.Id)
+                .ToList();
+            if (existingHoldings.Count == 0)
+                return;
+
+            var currentQuantities = BuildHoldingQuantityMap(existingHoldings, "current holdings");
+            var beginningQuantities = BuildHoldingQuantityMap(beginningHoldings, "beginning holdings");
+            ValidateHoldingQuantityMaps(
+                provider,
+                statementKey,
+                account,
+                "Beginning holding quantity mismatch",
+                "current",
+                currentQuantities,
+                "beginning",
+                beginningQuantities);
+        }
+
+        private void ValidateSavedAccountHoldingQuantities(
+            StatementImportProvider provider,
+            string statementKey,
+            Account account,
+            List<Holding> endingHoldings)
+        {
+            account = GetAccountByName(account.name);
+            var savedHoldings = db.Queryable<Holding>()
+                .Where(it => it._account_Id == account.Id)
+                .ToList();
+            var savedQuantities = BuildHoldingQuantityMap(savedHoldings, "saved holdings");
+            var endingQuantities = BuildHoldingQuantityMap(endingHoldings, "ending holdings");
+            ValidateHoldingQuantityMaps(
+                provider,
+                statementKey,
+                account,
+                "Ending holding quantity mismatch",
+                "saved",
+                savedQuantities,
+                "ending",
+                endingQuantities);
+        }
+
+        private static Dictionary<string, HoldingQuantityData> BuildHoldingQuantityMap(
+            IEnumerable<Holding> holdings,
+            string context)
+        {
+            var quantities = new Dictionary<string, HoldingQuantityData>(StringComparer.OrdinalIgnoreCase);
+            foreach (var holding in holdings)
+            {
+                if (Holding.IsSingleValueAsset(holding.holdingType))
+                    continue;
+
+                var key = GetHoldingKey(holding);
+                if (quantities.ContainsKey(key))
+                    throw new InvalidOperationException($"Duplicate {context}: {holding.code}/{holding.holdingType}");
+
+                quantities[key] = new HoldingQuantityData(holding.code, holding.holdingType, holding.quantity);
+            }
+
+            return quantities;
+        }
+
+        private static void ValidateHoldingQuantityMaps(
+            StatementImportProvider provider,
+            string statementKey,
+            Account account,
+            string message,
+            string leftName,
+            Dictionary<string, HoldingQuantityData> left,
+            string rightName,
+            Dictionary<string, HoldingQuantityData> right)
+        {
+            foreach (var key in left.Keys.Union(right.Keys, StringComparer.OrdinalIgnoreCase))
+            {
+                left.TryGetValue(key, out var leftValue);
+                right.TryGetValue(key, out var rightValue);
+                var code = leftValue?.Code ?? rightValue?.Code ?? key;
+                var holdingType = leftValue?.HoldingType ?? rightValue?.HoldingType ?? HoldingType.NASDAQ;
+                var leftQuantity = leftValue?.Quantity ?? 0;
+                var rightQuantity = rightValue?.Quantity ?? 0;
+                if (leftQuantity != rightQuantity)
+                {
+                    throw new InvalidOperationException(
+                        $"{message} for {provider}: statementKey={statementKey}, account={account.name}, code={code}, type={holdingType}, {leftName}={leftQuantity}, {rightName}={rightQuantity}");
+                }
+            }
+        }
+
         private void SaveAccountHoldingsCore(Account account, List<Holding> holdingList)
         {
             account = GetAccountByName(account.name);
@@ -3190,6 +3360,17 @@ namespace MyBook
             bool HasData,
             List<AccountBalance> Balances);
 
+        private sealed record HoldingQuantityData(
+            string Code,
+            HoldingType HoldingType,
+            int Quantity);
+
+        private enum HistoricalBalanceDateBasis
+        {
+            TransactionDate,
+            PostingDate
+        }
+
         private sealed record ForeignKeyDefinition(
             string ConstraintName,
             string TableName,
@@ -3274,6 +3455,7 @@ namespace MyBook
             List<Holding> holdings,
             List<AccountBalance> accountBalances,
             List<AccountBalance> beginningAccountBalances,
+            List<Holding>? beginningHoldings = null,
             List<AccountInternalId>? internalCardNos = null)
         {
             Provider = provider;
@@ -3284,6 +3466,7 @@ namespace MyBook
             Holdings = holdings;
             AccountBalances = accountBalances;
             BeginningAccountBalances = beginningAccountBalances;
+            BeginningHoldings = beginningHoldings ?? [];
             InternalCardNos = internalCardNos ?? [];
         }
 
@@ -3295,6 +3478,7 @@ namespace MyBook
         public List<Holding> Holdings { get; }
         public List<AccountBalance> AccountBalances { get; }
         public List<AccountBalance> BeginningAccountBalances { get; }
+        public List<Holding> BeginningHoldings { get; }
         public List<AccountInternalId> InternalCardNos { get; }
     }
 }

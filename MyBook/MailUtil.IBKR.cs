@@ -282,6 +282,7 @@ namespace MyBook
                     report.Holdings,
                     report.AccountBalances,
                     report.BeginningAccountBalances,
+                    report.BeginningHoldings,
                     report.InternalCardNos)));
 
             for (var i = 0; i < reports.Count; i++)
@@ -308,7 +309,8 @@ namespace MyBook
             var contractInfos = BuildIBKRContractInfos(report);
             _ = ParseIBKRNavChange(report);
             var preciseNav = ParseIBKRPreciseNavValues(report, baseCurrency);
-            var holdings = ParseIBKRHoldings(report, account, baseCurrency, contractInfos, sourceName, preciseNav.EndingCash);
+            var positionHoldings = ParseIBKRPositionAndMtmHoldings(report, account, baseCurrency, contractInfos, out var beginningHoldings);
+            var holdings = ParseIBKRHoldings(report, account, baseCurrency, positionHoldings, sourceName, preciseNav.EndingCash);
             var records = ParseIBKRRecords(report, account, baseCurrency, contractInfos, reportDate.Date, sourceName, preciseNav.End - preciseNav.Start);
             var internalCardNos = new List<AccountInternalId>
             {
@@ -329,6 +331,7 @@ namespace MyBook
                 accountId,
                 account,
                 records,
+                beginningHoldings,
                 holdings,
                 [new AccountBalance(account, new Currency(preciseNav.End, baseCurrency))],
                 [new AccountBalance(account, new Currency(preciseNav.Start, baseCurrency))],
@@ -1216,13 +1219,13 @@ namespace MyBook
             IBKRCsvReport report,
             Account account,
             CurrencyType baseCurrency,
-            Dictionary<string, IBKRContractInfo> contractInfos,
+            List<Holding> positionHoldings,
             string sourceName,
             decimal endingCash)
         {
             var holdings = new List<Holding>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var holding in ParseIBKRPositionAndMtmHoldings(report, account, baseCurrency, contractInfos))
+            foreach (var holding in positionHoldings)
                 AddIBKRHolding(holdings, seen, holding);
 
             AddIBKRHolding(holdings, seen, new Holding(baseCurrency.ToString(), HoldingType.Cash)
@@ -1296,9 +1299,12 @@ namespace MyBook
             IBKRCsvReport report,
             Account account,
             CurrencyType baseCurrency,
-            Dictionary<string, IBKRContractInfo> contractInfos)
+            Dictionary<string, IBKRContractInfo> contractInfos,
+            out List<Holding> beginningHoldings)
         {
             var holdings = new List<Holding>();
+            beginningHoldings = [];
+            var beginningSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var row in report.OptionalDataRows("持仓与以市值计的盈亏"))
             {
                 if (!IsIBKRPositionSummaryRow(row))
@@ -1308,6 +1314,11 @@ namespace MyBook
                 if (group != "股票" && group != "债券")
                     continue;
 
+                var contract = ResolveIBKRContract(row.Fields[3], group, contractInfos);
+                var beginningQuantity = ParseIBKRIntegerQuantityAt(row, 5, "beginning holding quantity");
+                if (beginningQuantity != 0)
+                    AddIBKRHolding(beginningHoldings, beginningSeen, CreateIBKRQuantityHolding(account, contract, beginningQuantity, row.Fields[4]));
+
                 var currency = ParseIBKRCurrencyType(row.Fields[2]);
                 var quantity = ParseIBKRIntegerQuantityAt(row, 6, "holding quantity");
                 if (quantity == 0)
@@ -1315,7 +1326,6 @@ namespace MyBook
 
                 var currentPrice = ParseIBKRDecimalAt(row, 8, "holding price");
                 var currentValue = ParseIBKRDecimalAt(row, 10, "holding value");
-                var contract = ResolveIBKRContract(row.Fields[3], group, contractInfos);
                 holdings.Add(CreateIBKRHolding(account, contract, quantity, currentPrice, currentValue, row.Fields[10], currency, row.Fields[4]));
             }
 
@@ -1336,6 +1346,22 @@ namespace MyBook
             if (row.Section == "持仓与以市值计的盈亏")
                 throw new MailParseException($"Parse IBKR Report Fail, Unknown Position Row: {FormatIBKRCsvRow(row)}");
             return false;
+        }
+
+        private static Holding CreateIBKRQuantityHolding(
+            Account account,
+            IBKRContractInfo contract,
+            int rawQuantity,
+            string rowDescription)
+        {
+            var description = String.IsNullOrWhiteSpace(rowDescription) ? contract.Description : rowDescription;
+            return new Holding(contract.Code, contract.HoldingType)
+            {
+                Account = account,
+                quantity = NormalizeIBKRHoldingQuantity(contract, rawQuantity),
+                desc = description,
+                displayText = contract.DisplayText
+            };
         }
 
         private static Holding CreateIBKRHolding(
@@ -2211,6 +2237,7 @@ namespace MyBook
             string AccountId,
             Account Account,
             Records Records,
+            List<Holding> BeginningHoldings,
             List<Holding> Holdings,
             List<AccountBalance> AccountBalances,
             List<AccountBalance> BeginningAccountBalances,
