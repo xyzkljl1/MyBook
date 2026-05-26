@@ -248,7 +248,8 @@ namespace MyBook
             var minDate = refunds.Min(record => record.date.Date.AddMonths(-2));
             var maxDate = refunds.Max(record => record.date);
             var expenses = database.GetStatementRecords(ICBCProvider, minDate, maxDate)
-                .Where(record => !record.isRefundMatched
+                .Where(record => !DatabaseUtil.IsInitializationRecord(record)
+                    && !record.isRefundMatched
                     && record.v < 0)
                 .Where(IsICBCExpenseRecord)
                 .OrderBy(record => record.date)

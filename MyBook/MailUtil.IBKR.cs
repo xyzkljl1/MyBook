@@ -309,7 +309,15 @@ namespace MyBook
             var contractInfos = BuildIBKRContractInfos(report);
             _ = ParseIBKRNavChange(report);
             var preciseNav = ParseIBKRPreciseNavValues(report, baseCurrency);
-            var positionHoldings = ParseIBKRPositionAndMtmHoldings(report, account, baseCurrency, contractInfos, out var beginningHoldings);
+            var positionHoldings = ParseIBKRPositionAndMtmHoldings(report, account, baseCurrency, contractInfos, out var beginningPositionHoldings);
+            var beginningHoldings = ParseIBKRHoldings(
+                report,
+                account,
+                baseCurrency,
+                beginningPositionHoldings,
+                sourceName,
+                preciseNav.StartingCash,
+                useBeginningValues: true);
             var holdings = ParseIBKRHoldings(report, account, baseCurrency, positionHoldings, sourceName, preciseNav.EndingCash);
             var records = ParseIBKRRecords(report, account, baseCurrency, contractInfos, reportDate.Date, sourceName, preciseNav.End - preciseNav.Start);
             var internalCardNos = new List<AccountInternalId>
@@ -997,7 +1005,6 @@ namespace MyBook
                     $"Commission/{FormatIBKRCsvRow(row)}",
                     date: ParseIBKRDateTime(row.Fields[3]),
                     destAccount: contract.Code,
-                    holdingQuantity: quantity,
                     holding: contract);
             }
 
@@ -1178,7 +1185,6 @@ namespace MyBook
                     $"DividendAccrualChange/{FormatIBKRCsvRow(row)}",
                     date: date,
                     destAccount: contract.Code,
-                    holdingQuantity: quantity,
                     holding: contract);
             }
 
@@ -1366,7 +1372,8 @@ namespace MyBook
             CurrencyType baseCurrency,
             List<Holding> positionHoldings,
             string sourceName,
-            decimal endingCash)
+            decimal cash,
+            bool useBeginningValues = false)
         {
             var holdings = new List<Holding>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1378,13 +1385,14 @@ namespace MyBook
                 Account = account,
                 desc = $"All currency cash balances converted to {baseCurrency}",
                 displayText = baseCurrency == CurrencyType.USD ? "All currency($)" : $"All currency({baseCurrency})",
-                currentPrice = new Currency(endingCash, baseCurrency)
+                currentPrice = new Currency(cash, baseCurrency)
             });
 
-            foreach (var holding in ParseIBKRNavAdjustmentHoldings(report, account, baseCurrency))
+            foreach (var holding in ParseIBKRNavAdjustmentHoldings(report, account, baseCurrency, useBeginningValues))
                 AddIBKRHolding(holdings, seen, holding);
 
-            ValidateIBKRStockPositionSummary(report, holdings);
+            if (!useBeginningValues)
+                ValidateIBKRStockPositionSummary(report, holdings);
             if (holdings.Count == 0)
                 throw new MailParseException($"Parse IBKR Report Fail, Missing Holdings: {sourceName}");
 
@@ -1394,7 +1402,8 @@ namespace MyBook
         private static List<Holding> ParseIBKRNavAdjustmentHoldings(
             IBKRCsvReport report,
             Account account,
-            CurrencyType baseCurrency)
+            CurrencyType baseCurrency,
+            bool useBeginningValues)
         {
             var holdings = new List<Holding>();
             foreach (var row in report.RequireDataRows("净资产值"))
@@ -1411,11 +1420,21 @@ namespace MyBook
                 if (component is "现金" or "股票" or "债券")
                     continue;
 
-                var amount = ParseIBKRDecimalAt(row, 4, "NAV component amount");
+                var amount = ParseIBKRDecimalAt(
+                    row,
+                    useBeginningValues ? 1 : 4,
+                    useBeginningValues ? "beginning NAV component amount" : "NAV component amount");
                 if (component is "抵押品价值" or "借出证券")
                 {
-                    if (amount != 0)
+                    if (amount == 0)
+                        continue;
+                    if (!useBeginningValues)
                         throw new MailParseException($"Parse IBKR Report Fail, Unsupported Nonzero Stock Yield Enhancement NAV Component: {component}/{amount}");
+
+                    var adjustmentCode = component == "抵押品价值"
+                        ? "COLLATERAL_VALUE"
+                        : "BORROWED_SECURITIES";
+                    AddOrMergeIBKRSingleValueHolding(holdings, account, adjustmentCode, HoldingType.Accrued, component, amount, baseCurrency);
                     continue;
                 }
 
@@ -1428,13 +1447,7 @@ namespace MyBook
                 if (amount == 0)
                     continue;
 
-                holdings.Add(new Holding(code, holdingType)
-                {
-                    Account = account,
-                    desc = $"IBKR NAV {component}",
-                    displayText = component,
-                    currentPrice = new Currency(amount, baseCurrency)
-                });
+                AddOrMergeIBKRSingleValueHolding(holdings, account, code, holdingType, component, amount, baseCurrency);
             }
 
             return holdings;
@@ -1460,11 +1473,26 @@ namespace MyBook
                     continue;
 
                 var contract = ResolveIBKRContract(row.Fields[3], group, contractInfos);
+                var currency = ParseIBKRCurrencyType(row.Fields[2]);
                 var beginningQuantity = ParseIBKRIntegerQuantityAt(row, 5, "beginning holding quantity");
                 if (beginningQuantity != 0)
-                    AddIBKRHolding(beginningHoldings, beginningSeen, CreateIBKRQuantityHolding(account, contract, beginningQuantity, row.Fields[4]));
+                {
+                    var beginningPrice = ParseIBKRDecimalAt(row, 7, "beginning holding price");
+                    var beginningValue = ParseIBKRDecimalAt(row, 9, "beginning holding value");
+                    AddIBKRHolding(
+                        beginningHoldings,
+                        beginningSeen,
+                        CreateIBKRHolding(
+                            account,
+                            contract,
+                            beginningQuantity,
+                            beginningPrice,
+                            beginningValue,
+                            row.Fields[9],
+                            currency,
+                            row.Fields[4]));
+                }
 
-                var currency = ParseIBKRCurrencyType(row.Fields[2]);
                 var quantity = ParseIBKRIntegerQuantityAt(row, 6, "holding quantity");
                 if (quantity == 0)
                     continue;
@@ -1561,6 +1589,34 @@ namespace MyBook
             if (!seen.Add(key))
                 throw new MailParseException($"Parse IBKR Report Fail, Duplicate Holding: {holding.code}/{holding.holdingType}");
             holdings.Add(holding);
+        }
+
+        private static void AddOrMergeIBKRSingleValueHolding(
+            List<Holding> holdings,
+            Account account,
+            string code,
+            HoldingType holdingType,
+            string component,
+            decimal amount,
+            CurrencyType currency)
+        {
+            var existing = holdings.FirstOrDefault(holding =>
+                holding.code == code && holding.holdingType == holdingType);
+            if (existing is null)
+            {
+                holdings.Add(new Holding(code, holdingType)
+                {
+                    Account = account,
+                    desc = $"IBKR NAV {component}",
+                    displayText = component,
+                    currentPrice = new Currency(amount, currency)
+                });
+                return;
+            }
+
+            if (existing.currentPrice.t != currency)
+                throw new MailParseException($"Parse IBKR Report Fail, NAV adjustment currency mismatch: {code}/{holdingType}");
+            existing.currentPrice = new Currency(existing.currentPrice.v + amount, currency);
         }
 
         private static string GetIBKRHoldingKey(Holding holding)
