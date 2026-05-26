@@ -1705,11 +1705,7 @@ namespace MyBook
 
         private DateTime GetBalanceRollForwardStartDate()
         {
-            var snapshot = db.Queryable<Snapshot>()
-                .Where(it => it.source == SnapshotSource.Manual && it.maxStatementImportId >= 0)
-                .OrderBy(it => it.effectiveDate)
-                .OrderBy(it => it.time)
-                .First();
+            var snapshot = GetStartSnapshot();
             return snapshot?.effectiveDate.Date ?? DateTime.MinValue.Date;
         }
 
@@ -2498,9 +2494,7 @@ namespace MyBook
         private Snapshot? GetStartSnapshot()
         {
             return db.Queryable<Snapshot>()
-                .Where(snapshot => snapshot.source == SnapshotSource.Manual && snapshot.maxStatementImportId >= 0)
-                .OrderBy(snapshot => snapshot.effectiveDate)
-                .OrderBy(snapshot => snapshot.time)
+                .OrderBy(snapshot => snapshot.Id)
                 .First();
         }
 
