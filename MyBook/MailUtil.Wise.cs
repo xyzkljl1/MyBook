@@ -12,7 +12,7 @@ using MimeKit;
 namespace MyBook
 {
     // Wise monthly XML statement discovery and parsing. XML statements contain exact
-    // opening/closing balances, so imports save Records and AccountBalances together.
+    // opening/closing balances, so imports validate Records against statement balances.
     partial class MailUtil
     {
         private const StatementImportProvider WiseProvider = StatementImportProvider.WiseMail;
