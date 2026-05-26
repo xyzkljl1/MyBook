@@ -164,7 +164,8 @@ namespace MyBook
             IEnumerable<AccountBalance>? accountBalances = null,
             string statementKey = "",
             IEnumerable<AccountBalance>? beginningAccountBalances = null,
-            Action<int>? afterSaveInTransaction = null)
+            Action<int>? afterSaveInTransaction = null,
+            bool forceValidateBeginningBalances = false)
         {
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
@@ -180,7 +181,7 @@ namespace MyBook
                         recordList,
                         accountBalanceList,
                         beginningAccountBalanceList,
-                        ShouldValidateBeginningAccountBalances(provider),
+                        forceValidateBeginningBalances || ShouldValidateBeginningAccountBalances(provider),
                         afterSaveInTransaction: afterSaveInTransaction);
                     if (!statementImportId.HasValue)
                         return false;
@@ -227,6 +228,35 @@ namespace MyBook
                     afterSaveInTransaction?.Invoke(statementImportId);
                     MatchKnownInternalTransfersForStatements([statementImportId]);
                     MatchInternalTransfersAroundStatement(statementImportId);
+                    return true;
+                });
+            }
+            catch (Exception e)
+            {
+                if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
+                    return false;
+                throw;
+            }
+        }
+
+        public bool MarkStatementProcessedOnce(
+            StatementImportProvider provider,
+            DateTime time,
+            string statementKey,
+            IEnumerable<AccountInternalId>? internalCardNos = null)
+        {
+            var internalCardNoList = internalCardNos?.ToList() ?? [];
+            try
+            {
+                return ExecuteLockedTransaction(() =>
+                {
+                    if (IsStatementImported(provider, time, statementKey))
+                        return false;
+
+                    InsertStatementImport(provider, time, statementKey);
+                    if (internalCardNoList.Count > 0)
+                        EnsureAccountInternalCardNos(internalCardNoList);
+
                     return true;
                 });
             }
@@ -2780,6 +2810,22 @@ namespace MyBook
             var postingAccount = GetPostingAccount(account);
             return GetStatementRecords(provider, start, end)
                 .Where(record => record._account_Id == postingAccount.Id)
+                .ToList();
+        }
+
+        public List<Record> GetStatementRecords(StatementImportProvider provider, Account account)
+        {
+            var postingAccount = GetPostingAccount(account);
+            var importIds = db.Queryable<StatementImport>()
+                .Where(statementImport => statementImport.provider == provider)
+                .Select(statementImport => statementImport.Id)
+                .ToList();
+            if (importIds.Count == 0)
+                return [];
+
+            return db.Queryable<Record>()
+                .Where(record => importIds.Contains(record._statementImport_Id)
+                    && record._account_Id == postingAccount.Id)
                 .ToList();
         }
 
