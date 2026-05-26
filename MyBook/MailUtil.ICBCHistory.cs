@@ -1617,12 +1617,6 @@ namespace MyBook
             return ICBCHistoryDetailRowCodePrefix + ComputeSha256(Encoding.UTF8.GetBytes(canonical))[..24];
         }
 
-        private static string ExtractICBCHistoryDetailRowCode(string source)
-        {
-            var match = Regex.Match(source, @"(?:^|;\s*)code=(?<code>[^;]+)", RegexOptions.CultureInvariant);
-            return match.Success ? match.Groups["code"].Value.Trim() : "";
-        }
-
         private static string ParseICBCHistoryDetailApplicationNoFromFileName(string fileName)
         {
             var match = Regex.Match(fileName, @"申请单号[:：]?(?<applicationNo>\d+)", RegexOptions.CultureInvariant);

@@ -1426,12 +1426,6 @@ namespace MyBook
             dc.DrawText(CreateText(text, size, ParseBrush(color)), new Point(x, y));
         }
 
-        private static void DrawCenteredText(DrawingContext dc, string text, double size, string color, double centerX, double y)
-        {
-            var formatted = CreateText(text, size, ParseBrush(color));
-            dc.DrawText(formatted, new Point(centerX - formatted.Width / 2, y));
-        }
-
         private static void DrawRightAlignedText(DrawingContext dc, string text, double size, string color, double rightX, double y)
         {
             var formatted = CreateText(text, size, ParseBrush(color));
