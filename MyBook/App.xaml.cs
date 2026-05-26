@@ -16,8 +16,17 @@ namespace MyBook
             if (e.Args.Any(arg => arg.Equals("--clean-database", StringComparison.OrdinalIgnoreCase)))
             {
                 var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
-                var cleanupResult = new DatabaseUtil(config).CleanVolatileData();
+                var cleanupResult = new DatabaseUtil(config).CleanVolatileData(ReadCleanToSnapshotId(e.Args));
                 WriteCleanupResult(cleanupResult);
+                Shutdown();
+                return;
+            }
+
+            if (e.Args.Any(arg => arg.Equals("--create-start-snapshot", StringComparison.OrdinalIgnoreCase)))
+            {
+                var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                var snapshot = new DatabaseUtil(config).CreateSnapshot(DateTime.Now, SnapshotSource.Manual);
+                Console.WriteLine($"Created start snapshot: {snapshot.Id} {snapshot.source} {snapshot.time:yyyy-MM-dd HH:mm:ss.ffffff} revision={snapshot.maxStatementImportId} effectiveDate={snapshot.effectiveDate:yyyy-MM-dd} key={snapshot.snapshotKey}");
                 Shutdown();
                 return;
             }
@@ -284,6 +293,16 @@ namespace MyBook
             Console.WriteLine("Fixed StatementImports:");
             foreach (var statementImport in result.FixedStatementImports)
                 Console.WriteLine($"{statementImport.Id} {statementImport.provider} {statementImport.time:yyyy-MM-dd HH:mm:ss.ffffff}");
+        }
+
+        private static int? ReadCleanToSnapshotId(string[] args)
+        {
+            var value = GetArgumentValue(args, "--clean-to-snapshot");
+            if (String.IsNullOrWhiteSpace(value))
+                return null;
+            if (!Int32.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var snapshotId) || snapshotId <= 0)
+                throw new ArgumentException($"Invalid --clean-to-snapshot value: {value}");
+            return snapshotId;
         }
 
         private static string FormatCounts(Dictionary<string, int> counts)
