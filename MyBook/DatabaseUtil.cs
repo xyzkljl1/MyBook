@@ -47,6 +47,8 @@ namespace MyBook
             ValidateSchema();
             ValidateForeignKeys();
             ValidateAccountPrimaryRelations();
+            ValidateAccountBalancesViewDefinition();
+            ValidateAllAccountBalancesFromHoldings();
         }
 
         private T ExecuteLockedTransaction<T>(Func<T> action)
@@ -1449,6 +1451,18 @@ namespace MyBook
                         $"Account balance view mismatch: accountId={accountId}, currency={currency}, holdings={holdingTotal}, balances={balanceTotal}");
                 }
             }
+        }
+
+        private void ValidateAllAccountBalancesFromHoldings()
+        {
+            var accountIds = db.Queryable<Holding>()
+                .ToList()
+                .Select(holding => holding._account_Id)
+                .Concat(db.Queryable<AccountBalance>().ToList().Select(balance => balance._account_Id))
+                .Distinct()
+                .ToList();
+            foreach (var accountId in accountIds)
+                ValidateAccountBalancesFromHoldings(accountId);
         }
 
         public void SaveAccountHoldings(Account account, IEnumerable<Holding> holdings)
@@ -3369,6 +3383,58 @@ namespace MyBook
             return columns;
         }
 
+        private void ValidateAccountBalancesViewDefinition()
+        {
+            var createView = GetViewCreateSql("AccountBalances");
+            var normalized = NormalizeSqlForComparison(createView);
+            var requiredFragments = new[]
+            {
+                "view accountbalances as select",
+                "row_number() over",
+                "from holdings",
+                "group by",
+                "_account_id",
+                "_currentprice_t",
+                "holdingtype = 'ust'",
+                "round",
+                "quantity *",
+                "_currentprice_v",
+                "having",
+                "amount <> 0"
+            };
+            foreach (var fragment in requiredFragments)
+            {
+                if (!normalized.Contains(fragment, StringComparison.Ordinal))
+                    throw new InvalidOperationException($"Database schema mismatch: AccountBalances view definition is not the expected holdings rollup.");
+            }
+
+            if (normalized.Contains("case _currentprice_t when", StringComparison.Ordinal)
+                || normalized.Contains("case holdings._currentprice_t when", StringComparison.Ordinal))
+                throw new InvalidOperationException("Database schema mismatch: AccountBalances view still uses hard-coded currency id mapping.");
+        }
+
+        private string GetViewCreateSql(string viewName)
+        {
+            var result = db.Ado.GetDataTable($"show create view `{viewName}`");
+            if (result.Rows.Count == 0)
+                throw new InvalidOperationException($"Database schema mismatch: missing view {viewName}");
+
+            foreach (System.Data.DataColumn column in result.Columns)
+            {
+                if (String.Equals(column.ColumnName, "Create View", StringComparison.OrdinalIgnoreCase))
+                    return result.Rows[0][column]?.ToString() ?? "";
+            }
+
+            throw new InvalidOperationException($"Database schema mismatch: cannot read create SQL for view {viewName}");
+        }
+
+        private static string NormalizeSqlForComparison(string sql)
+        {
+            return Regex.Replace(sql.Replace("`", ""), @"\s+", " ")
+                .Trim()
+                .ToLowerInvariant();
+        }
+
         private void ValidateForeignKeys()
         {
             foreach (var foreignKey in ForeignKeys)
@@ -3615,7 +3681,7 @@ namespace MyBook
         private void ValidateAccountHoldingsBalance(Account account, List<Holding> holdings, List<AccountBalance> accountBalances)
         {
             if (accountBalances.Count == 0)
-                return;
+                throw new InvalidOperationException($"Missing expected account balance for holdings: {account.name}");
 
             var balanceSums = accountBalances
                 .GroupBy(balance => balance.t)
