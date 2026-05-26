@@ -1281,17 +1281,34 @@ namespace MyBook
 
         public Snapshot CreateDailySnapshot(DateTime snapshotDate)
         {
-            return CreateSnapshot(DateTime.Now, SnapshotSource.AutoDaily, BuildDailySnapshotKey(snapshotDate));
+            return CreateSnapshot(
+                DateTime.Now,
+                SnapshotSource.AutoDaily,
+                null,
+                revision => BuildDailySnapshotKey(snapshotDate, revision));
         }
 
         public Snapshot CreateSnapshot(DateTime time, SnapshotSource source = SnapshotSource.Manual, string? snapshotKey = null)
         {
-            var key = String.IsNullOrWhiteSpace(snapshotKey)
-                ? BuildSnapshotKey(source, time)
-                : snapshotKey.Trim();
+            return CreateSnapshot(
+                time,
+                source,
+                snapshotKey,
+                revision => BuildSnapshotKey(source, time, revision));
+        }
 
+        private Snapshot CreateSnapshot(
+            DateTime time,
+            SnapshotSource source,
+            string? snapshotKey,
+            Func<int, string> defaultKeyBuilder)
+        {
             return ExecuteLockedTransaction(() =>
             {
+                var revision = GetCurrentStatementImportRevision();
+                var key = String.IsNullOrWhiteSpace(snapshotKey)
+                    ? defaultKeyBuilder(revision)
+                    : snapshotKey.Trim();
                 var existing = db.Queryable<Snapshot>()
                     .Where(snapshot => snapshot.source == source && snapshot.snapshotKey == key)
                     .First();
@@ -1303,6 +1320,8 @@ namespace MyBook
                     source = source,
                     time = time,
                     schemaVersion = CurrentSnapshotSchemaVersion,
+                    maxStatementImportId = revision,
+                    effectiveDate = time.Date,
                     snapshotKey = key,
                     createdAt = DateTime.Now
                 };
@@ -1378,12 +1397,23 @@ namespace MyBook
             });
         }
 
+        private int GetCurrentStatementImportRevision()
+        {
+            return db.Queryable<StatementImport>()
+                .OrderByDescending(import => import.Id)
+                .First()
+                ?.Id ?? 0;
+        }
+
         public SnapshotData? GetDailySnapshot(DateTime date)
         {
-            var key = BuildDailySnapshotKey(date);
+            var keyPrefix = BuildDailySnapshotKey(date);
             var snapshot = db.Queryable<Snapshot>()
-                .Where(it => it.source == SnapshotSource.AutoDaily && it.snapshotKey == key)
-                .First();
+                .Where(it => it.source == SnapshotSource.AutoDaily)
+                .OrderByDescending(it => it.maxStatementImportId)
+                .ToList()
+                .FirstOrDefault(it => it.snapshotKey == keyPrefix
+                    || it.snapshotKey.StartsWith($"{keyPrefix}-r", StringComparison.Ordinal));
             return snapshot is null ? null : ReadSnapshotData(snapshot);
         }
 
@@ -1468,16 +1498,21 @@ namespace MyBook
             throw new InvalidOperationException($"Invalid snapshot enum value: {typeof(T).Name}.{value}");
         }
 
-        private static string BuildSnapshotKey(SnapshotSource source, DateTime time)
+        private static string BuildSnapshotKey(SnapshotSource source, DateTime time, int revision)
         {
             return source == SnapshotSource.AutoDaily
-                ? BuildDailySnapshotKey(time)
+                ? BuildDailySnapshotKey(time, revision)
                 : time.ToString("O", CultureInfo.InvariantCulture);
         }
 
         private static string BuildDailySnapshotKey(DateTime date)
         {
             return date.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        private static string BuildDailySnapshotKey(DateTime date, int revision)
+        {
+            return $"{BuildDailySnapshotKey(date)}-r{revision}";
         }
 
         private static string BuildSnapshotBalanceStableKey(string accountName, CurrencyType currencyType)
@@ -1641,6 +1676,8 @@ namespace MyBook
             List<AccountBalance> currentBalances,
             DateTime today)
         {
+            var targetRevision = GetCurrentStatementImportRevision();
+            var rollForwardStartDate = GetBalanceRollForwardStartDate();
             return dates
                 .Select(date =>
                 {
@@ -1653,11 +1690,7 @@ namespace MyBook
                             currentBalances.Select(CloneDashboardBalance).ToList());
                     }
 
-                    var snapshot = GetDailySnapshot(date);
-                    if (snapshot is not null)
-                        return BuildAssetSummaryBalanceSetFromSnapshot(date, snapshot);
-
-                    var baseSnapshot = GetLatestDailySnapshotBefore(date);
+                    var baseSnapshot = GetLatestBalanceSnapshotAtOrBefore(date, targetRevision);
                     if (baseSnapshot is null)
                         return new AssetSummaryBalanceSet(date, null, false, []);
 
@@ -1665,19 +1698,31 @@ namespace MyBook
                         date,
                         baseSnapshot.Snapshot.time,
                         true,
-                        BuildRolledForwardBalances(baseSnapshot, date));
+                        BuildRolledForwardBalances(baseSnapshot, date, targetRevision, rollForwardStartDate));
                 })
                 .ToList();
         }
 
-        private SnapshotData? GetLatestDailySnapshotBefore(DateTime date)
+        private DateTime GetBalanceRollForwardStartDate()
         {
-            var key = BuildDailySnapshotKey(date);
             var snapshot = db.Queryable<Snapshot>()
-                .Where(it => it.source == SnapshotSource.AutoDaily)
-                .OrderByDescending(it => it.snapshotKey)
-                .ToList()
-                .FirstOrDefault(it => String.CompareOrdinal(it.snapshotKey, key) < 0);
+                .Where(it => it.source == SnapshotSource.Manual && it.maxStatementImportId >= 0)
+                .OrderBy(it => it.effectiveDate)
+                .OrderBy(it => it.time)
+                .First();
+            return snapshot?.effectiveDate.Date ?? DateTime.MinValue.Date;
+        }
+
+        private SnapshotData? GetLatestBalanceSnapshotAtOrBefore(DateTime date, int targetRevision)
+        {
+            var snapshot = db.Queryable<Snapshot>()
+                .Where(it => it.maxStatementImportId >= 0
+                    && it.maxStatementImportId <= targetRevision
+                    && it.effectiveDate <= date.Date)
+                .OrderByDescending(it => it.effectiveDate)
+                .OrderByDescending(it => it.maxStatementImportId)
+                .OrderByDescending(it => it.time)
+                .First();
             return snapshot is null ? null : ReadSnapshotData(snapshot);
         }
 
@@ -1697,18 +1742,24 @@ namespace MyBook
             return new AssetSummaryBalanceSet(date, snapshot.Snapshot.time, true, balances);
         }
 
-        private List<AccountBalance> BuildRolledForwardBalances(SnapshotData baseSnapshot, DateTime targetDate)
+        private List<AccountBalance> BuildRolledForwardBalances(
+            SnapshotData baseSnapshot,
+            DateTime targetDate,
+            int targetRevision,
+            DateTime rollForwardStartDate)
         {
             var balances = baseSnapshot.AccountBalances
                 .GroupBy(balance => (balance.AccountId, balance.CurrencyType))
                 .ToDictionary(group => group.Key, group => group.Sum(balance => balance.Amount));
-            var baseDate = baseSnapshot.Snapshot.time.Date;
             var targetEnd = targetDate.Date.AddDays(1);
+            var baseRevision = baseSnapshot.Snapshot.maxStatementImportId;
+            // 快照表示某个StatementImport导入进度下的最新状态，而不是某个自然日的余额。
+            // 因此只能向前滚动：从快照revision之后新增的导入里，取所有发生在目标日结束前的record。
+            // 如果这些新导入的record发生在快照effectiveDate之前，也仍然要计入，因为快照创建时尚未包含它们。
             var records = db.Queryable<Record>()
-                .Where(record => !record.isInternal
-                    && record.matchedRecordId == null
-                    && !record.isRefundMatched
-                    && record.date > baseDate
+                .Where(record => record._statementImport_Id > baseRevision
+                    && record._statementImport_Id <= targetRevision
+                    && record.date > rollForwardStartDate
                     && record.date < targetEnd)
                 .ToList();
             foreach (var record in records)
@@ -2390,59 +2441,15 @@ namespace MyBook
             };
         }
 
-        public DatabaseCleanupResult CleanVolatileData()
+        public DatabaseCleanupResult CleanVolatileData(int? cleanToSnapshotId = null)
         {
             var beforeCounts = ReadCleanupCounts();
             ExecuteLockedTransaction(() =>
             {
-                db.Ado.ExecuteCommand("""
-                    delete snapshotItem
-                    from `SnapshotItems` snapshotItem
-                    left join (
-                        select `Id`
-                        from `Snapshots`
-                        where `source` = 'Manual'
-                        order by `time`, `Id`
-                        limit 1
-                    ) fixedSnapshot
-                        on snapshotItem.`_snapshot_Id` = fixedSnapshot.`Id`
-                    where fixedSnapshot.`Id` is null
-                    """);
-                db.Ado.ExecuteCommand("""
-                    delete snapshot
-                    from `Snapshots` snapshot
-                    left join (
-                        select `Id`
-                        from `Snapshots`
-                        where `source` = 'Manual'
-                        order by `time`, `Id`
-                        limit 1
-                    ) fixedSnapshot
-                        on snapshot.`Id` = fixedSnapshot.`Id`
-                    where fixedSnapshot.`Id` is null
-                    """);
-                ClearAllRecordMatches();
-                db.Deleteable<Record>().ExecuteCommand();
-                db.Deleteable<Holding>().ExecuteCommand();
-                db.Deleteable<AccountBalance>().ExecuteCommand();
-                db.Ado.ExecuteCommand("""
-                    delete statementImport
-                    from `StatementImports` statementImport
-                    left join (
-                        select candidate.`provider`, min(candidate.`Id`) as `Id`
-                        from `StatementImports` candidate
-                        join (
-                            select `provider`, min(`time`) as `time`
-                            from `StatementImports`
-                            group by `provider`
-                        ) earliest
-                            on candidate.`provider` = earliest.`provider`
-                            and candidate.`time` = earliest.`time`
-                        group by candidate.`provider`
-                    ) fixedImport
-                        on statementImport.`Id` = fixedImport.`Id`
-                    where fixedImport.`Id` is null
-                    """);
+                if (cleanToSnapshotId.HasValue)
+                    CleanToSnapshotCore(cleanToSnapshotId.Value);
+                else
+                    CleanToStartSnapshotCore();
             });
 
             return new DatabaseCleanupResult(
@@ -2452,6 +2459,156 @@ namespace MyBook
                     .OrderBy(it => it.provider)
                     .OrderBy(it => it.time)
                     .ToList());
+        }
+
+        private void CleanToStartSnapshotCore()
+        {
+            var startSnapshot = GetStartSnapshot();
+            CleanSnapshotsAfterStartSnapshot(startSnapshot);
+            ClearAllRecordMatches();
+            db.Deleteable<Record>().ExecuteCommand();
+            db.Ado.ExecuteCommand("""
+                delete statementImport
+                from `StatementImports` statementImport
+                left join (
+                    select candidate.`provider`, min(candidate.`Id`) as `Id`
+                    from `StatementImports` candidate
+                    join (
+                        select `provider`, min(`time`) as `time`
+                        from `StatementImports`
+                        group by `provider`
+                    ) earliest
+                        on candidate.`provider` = earliest.`provider`
+                        and candidate.`time` = earliest.`time`
+                    group by candidate.`provider`
+                ) fixedImport
+                    on statementImport.`Id` = fixedImport.`Id`
+                where fixedImport.`Id` is null
+                """);
+            if (startSnapshot is null)
+            {
+                db.Deleteable<Holding>().ExecuteCommand();
+                db.Deleteable<AccountBalance>().ExecuteCommand();
+                return;
+            }
+
+            RestoreCurrentStateFromSnapshot(ReadSnapshotData(startSnapshot));
+        }
+
+        private Snapshot? GetStartSnapshot()
+        {
+            return db.Queryable<Snapshot>()
+                .Where(snapshot => snapshot.source == SnapshotSource.Manual && snapshot.maxStatementImportId >= 0)
+                .OrderBy(snapshot => snapshot.effectiveDate)
+                .OrderBy(snapshot => snapshot.time)
+                .First();
+        }
+
+        private void CleanSnapshotsAfterStartSnapshot(Snapshot? startSnapshot)
+        {
+            if (startSnapshot is null)
+            {
+                db.Deleteable<SnapshotItem>().ExecuteCommand();
+                db.Deleteable<Snapshot>().ExecuteCommand();
+                return;
+            }
+
+            db.Ado.ExecuteCommand("""
+                delete from `SnapshotItems`
+                where `_snapshot_Id` <> @snapshotId
+                """,
+                new SugarParameter("@snapshotId", startSnapshot.Id));
+            db.Ado.ExecuteCommand("""
+                delete from `Snapshots`
+                where `Id` <> @snapshotId
+                """,
+                new SugarParameter("@snapshotId", startSnapshot.Id));
+        }
+
+        private void CleanToSnapshotCore(int snapshotId)
+        {
+            var snapshot = db.Queryable<Snapshot>()
+                .Where(it => it.Id == snapshotId)
+                .First();
+            if (snapshot is null)
+                throw new InvalidOperationException($"Snapshot not found: {snapshotId}");
+            if (snapshot.maxStatementImportId < 0)
+                throw new InvalidOperationException($"Snapshot does not have a valid import revision: {snapshotId}");
+
+            var snapshotData = ReadSnapshotData(snapshot);
+            DeleteSnapshotsAfter(snapshot);
+            ClearAllRecordMatches();
+            db.Ado.ExecuteCommand("""
+                delete from `Records`
+                where `_statementImport_Id` > @maxStatementImportId
+                """,
+                new SugarParameter("@maxStatementImportId", snapshot.maxStatementImportId));
+            db.Ado.ExecuteCommand("""
+                delete from `StatementImports`
+                where `Id` > @maxStatementImportId
+                """,
+                new SugarParameter("@maxStatementImportId", snapshot.maxStatementImportId));
+            RestoreCurrentStateFromSnapshot(snapshotData);
+        }
+
+        private void DeleteSnapshotsAfter(Snapshot snapshot)
+        {
+            db.Ado.ExecuteCommand("""
+                delete snapshotItem
+                from `SnapshotItems` snapshotItem
+                join `Snapshots` snapshot
+                    on snapshotItem.`_snapshot_Id` = snapshot.`Id`
+                where snapshot.`maxStatementImportId` > @maxStatementImportId
+                    or (
+                        snapshot.`maxStatementImportId` = @maxStatementImportId
+                        and snapshot.`Id` > @snapshotId
+                    )
+                """,
+                new SugarParameter("@maxStatementImportId", snapshot.maxStatementImportId),
+                new SugarParameter("@snapshotId", snapshot.Id));
+            db.Ado.ExecuteCommand("""
+                delete from `Snapshots`
+                where `maxStatementImportId` > @maxStatementImportId
+                    or (
+                        `maxStatementImportId` = @maxStatementImportId
+                        and `Id` > @snapshotId
+                    )
+                """,
+                new SugarParameter("@maxStatementImportId", snapshot.maxStatementImportId),
+                new SugarParameter("@snapshotId", snapshot.Id));
+        }
+
+        private void RestoreCurrentStateFromSnapshot(SnapshotData snapshot)
+        {
+            db.Deleteable<Holding>().ExecuteCommand();
+            db.Deleteable<AccountBalance>().ExecuteCommand();
+
+            var accountBalances = snapshot.AccountBalances
+                .Select(balance => new AccountBalance
+                {
+                    _account_Id = balance.AccountId,
+                    t = balance.CurrencyType,
+                    v = balance.Amount
+                })
+                .ToList();
+            if (accountBalances.Count > 0)
+                db.Insertable(accountBalances).ExecuteCommand();
+
+            var holdings = snapshot.Holdings
+                .Select(holding => new Holding
+                {
+                    _account_Id = holding.AccountId,
+                    code = holding.Code,
+                    holdingType = holding.HoldingType,
+                    quantity = holding.Quantity,
+                    _currentPrice_v = holding.CurrentPrice.v,
+                    _currentPrice_t = holding.CurrentPrice.t,
+                    displayText = holding.DisplayText,
+                    desc = holding.Description
+                })
+                .ToList();
+            if (holdings.Count > 0)
+                db.Insertable(holdings).ExecuteCommand();
         }
 
         public void CleanWiseImportedData()

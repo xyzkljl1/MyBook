@@ -293,6 +293,8 @@ namespace MyBook
     // 一方面大多数交易是流向外部，不需要记录对方账户状况，只是有时需要记录对方账户名以区分原因
     // 一方面在自己的账户间的交易，出入金额可能不同(例如手续费、购汇)，记录麻烦
     // 而且主要目的是记录收支状况，完全可以忽略自己账户间的交易
+    [SugarIndex("index_Records_balance_rollup", nameof(Record._account_Id), OrderByType.Asc, nameof(Record.t), OrderByType.Asc, nameof(Record._statementImport_Id), OrderByType.Asc, nameof(Record.date), OrderByType.Asc)]
+    [SugarIndex("index_Records_import_date", nameof(Record._statementImport_Id), OrderByType.Asc, nameof(Record.date), OrderByType.Asc, nameof(Record._account_Id), OrderByType.Asc, nameof(Record.t), OrderByType.Asc)]
     [SugarTable("Records")]
     public class Record : Currency // 收支记录
     {
@@ -412,6 +414,8 @@ namespace MyBook
     }
 
     [SugarIndex("unique_Snapshots_source_key", nameof(Snapshot.source), OrderByType.Asc, nameof(Snapshot.snapshotKey), OrderByType.Asc, true)]
+    [SugarIndex("index_Snapshots_effective_revision", nameof(Snapshot.effectiveDate), OrderByType.Asc, nameof(Snapshot.maxStatementImportId), OrderByType.Asc)]
+    [SugarIndex("index_Snapshots_revision", nameof(Snapshot.maxStatementImportId), OrderByType.Asc)]
     [SugarTable("Snapshots")]
     public class Snapshot
     {
@@ -426,6 +430,12 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "1")]
         public int schemaVersion { get; set; } = 1;
+
+        [SugarColumn(DefaultValue = "-1")]
+        public int maxStatementImportId { get; set; } = -1; // 该快照对应的StatementImport导入进度。
+
+        [SugarColumn(DefaultValue = "1000-01-01", ColumnDataType = "date")]
+        public DateTime effectiveDate { get; set; } = new(1000, 1, 1); // 快照作为余额向前滚动基准的业务日期。
 
         [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(128)")]
         public string snapshotKey { get; set; } = "";
