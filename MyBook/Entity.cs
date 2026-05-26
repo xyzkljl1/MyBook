@@ -321,6 +321,9 @@ namespace MyBook
         [Navigate(NavigateType.ManyToOne, nameof(_statementImport_Id), nameof(MyBook.StatementImport.Id))]
         public StatementImport? StatementImport { get; set; }
 
+        [Navigate(NavigateType.ManyToOne, nameof(_holding_Id), nameof(MyBook.Holding.Id))]
+        public Holding? Holding { get; set; }
+
         [Navigate(NavigateType.ManyToOne, nameof(matchedRecordId), nameof(MyBook.Record.Id))]
         public Record? MatchedRecord { get; set; }
 
@@ -386,6 +389,9 @@ namespace MyBook
         // 用于存储
         [SugarColumn(DefaultValue = "0")]
         public int _account_Id { get; set; } = 0;
+
+        [SugarColumn(IsNullable = true)]
+        public int? _holding_Id { get; set; } = null;
 
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public decimal? _descCurrency_v { get; set; }

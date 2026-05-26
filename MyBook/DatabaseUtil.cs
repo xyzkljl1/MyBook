@@ -24,6 +24,7 @@ namespace MyBook
             new("fk_AccountBalances_account", "AccountBalances", "_account_Id", "Accounts", "Id"),
             new("fk_Holdings_account", "Holdings", "_account_Id", "Accounts", "Id"),
             new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
+            new("fk_Records_holding", "Records", "_holding_Id", "Holdings", "Id"),
             new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id"),
             new("fk_Records_matchedRecord", "Records", "matchedRecordId", "Records", "Id"),
             new("fk_SnapshotItems_snapshot", "SnapshotItems", "_snapshot_Id", "Snapshots", "Id"),
@@ -897,6 +898,7 @@ namespace MyBook
                     1,
                     record.Id,
                     record._account_Id,
+                    record._holding_Id,
                     record.v,
                     record.t,
                     record.date,
@@ -1124,11 +1126,34 @@ namespace MyBook
                 var account = GetPostingAccount(record.Account);
                 record.Account = account;
                 record._account_Id = account.Id;
+                ResolveRecordHolding(record, account);
                 record._statementImport_Id = statementImportId;
             }
 
             if (recordList.Count > 0)
                 db.Insertable(recordList).ExecuteCommand();
+        }
+
+        private void ResolveRecordHolding(Record record, Account account)
+        {
+            if (record.Holding is null)
+                return;
+
+            var holding = record.Holding;
+            NormalizeHolding(holding);
+            var holdingAccount = holding.Account is null ? account : GetPostingAccount(holding.Account);
+            if (holdingAccount.Id != account.Id)
+            {
+                throw new InvalidOperationException(
+                    $"Record holding account mismatch: recordAccount={account.name}, holdingAccount={holdingAccount.name}, holding={holding.code}/{holding.holdingType}");
+            }
+
+            var existing = db.Queryable<Holding>()
+                .Where(it => it._account_Id == account.Id
+                    && it.code == holding.code
+                    && it.holdingType == holding.holdingType)
+                .First();
+            record._holding_Id = existing?.Id;
         }
 
         private void ValidateRelativeBalanceRecords(StatementImportProvider provider, List<Record> recordList)
@@ -3335,6 +3360,7 @@ namespace MyBook
             int SchemaVersion,
             int Id,
             int AccountId,
+            int? HoldingId,
             decimal Amount,
             CurrencyType Currency,
             DateTime Date,
