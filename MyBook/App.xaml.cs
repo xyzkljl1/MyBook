@@ -112,6 +112,13 @@ namespace MyBook
                 return;
             }
 
+            if (LocalDebugEntrypoint.TryRun(e.Args, out var localDebugExitCode))
+            {
+                Shutdown(localDebugExitCode);
+                Environment.Exit(localDebugExitCode);
+                return;
+            }
+
             if (e.Args.Any(arg => arg.Equals("--authorize-nexus-oauth-token", StringComparison.OrdinalIgnoreCase)))
             {
                 var exitCode = 0;

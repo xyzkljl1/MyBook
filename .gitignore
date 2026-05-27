@@ -18,6 +18,10 @@
 /Database/bootstrap-*.sql
 /Database/bootstrap.fixed-data.sql
 
+# 本地调试入口实现，不随代码提交
+/MyBook/*.Local.cs
+/MyBook/*.LocalDebug.cs
+
 # 本地下载或拆分的银行/券商账单与测试报表
 /DailyMyBook*.csv
 /IBKR_content_*.plain
