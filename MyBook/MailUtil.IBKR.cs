@@ -1236,12 +1236,19 @@ namespace MyBook
                 var other = ParseIBKRDecimalAt(row, 14, "FX MTM other");
                 var reportedHolding = ParseIBKRDecimalAt(row, 11, "FX MTM holding");
                 var reportedTotal = ParseIBKRDecimalAt(row, 15, "FX MTM total");
-                var preciseHolding = RoundIBKRMoneyForReportField(positionValues.PriorPositionRateImpact, row.Fields[11]) == reportedHolding
+                var hasQuantityChange = positionValues.PreviousQuantity != positionValues.CurrentQuantity;
+                var hasCashFlow = transaction != 0 || commission != 0 || other != 0;
+                var preciseHolding = !hasQuantityChange && !hasCashFlow
+                    ? positionValues.PriorPositionRateImpact
+                    : RoundIBKRMoneyForReportField(positionValues.PriorPositionRateImpact, row.Fields[11]) == reportedHolding
                     ? positionValues.PriorPositionRateImpact
                     : reportedHolding;
-                AssertIBKRMoneyFieldEquals(preciseHolding, reportedHolding, row.Fields[11], $"IBKR FX MTM holding display {FormatIBKRCsvRow(row)}");
+                if (hasQuantityChange || hasCashFlow)
+                    AssertIBKRMoneyFieldEquals(preciseHolding, reportedHolding, row.Fields[11], $"IBKR FX MTM holding display {FormatIBKRCsvRow(row)}");
+                else
+                    AssertIBKRMoneyEquals(reportedHolding, reportedTotal, $"IBKR FX MTM no-flow holding display {FormatIBKRCsvRow(row)}");
                 AssertIBKRMoneyFieldEquals(
-                    preciseHolding + transaction + commission + other,
+                    reportedHolding + transaction + commission + other,
                     reportedTotal,
                     row.Fields[15],
                     $"IBKR FX MTM row total {FormatIBKRCsvRow(row)}");
@@ -1275,7 +1282,13 @@ namespace MyBook
             var reportedCurrentMarketValue = ParseIBKRDecimalAt(row, 10, $"{context} current market value");
             AssertIBKRMoneyFieldEquals(calculatedPreviousMarketValue, reportedPreviousMarketValue, row.Fields[9], $"{context} previous market value display {FormatIBKRCsvRow(row)}");
             AssertIBKRMoneyFieldEquals(calculatedCurrentMarketValue, reportedCurrentMarketValue, row.Fields[10], $"{context} current market value display {FormatIBKRCsvRow(row)}");
-            return new IBKRFxPositionValues(cashCurrency, calculatedPreviousMarketValue, calculatedCurrentMarketValue, priorPositionRateImpact);
+            return new IBKRFxPositionValues(
+                cashCurrency,
+                previousQuantity,
+                currentQuantity,
+                calculatedPreviousMarketValue,
+                calculatedCurrentMarketValue,
+                priorPositionRateImpact);
         }
 
         private static void ValidateIBKRCashFxTranslationDisplay(IBKRCsvReport report, decimal reportedValue)
@@ -3262,6 +3275,8 @@ namespace MyBook
 
         private sealed record IBKRFxPositionValues(
             CurrencyType CashCurrency,
+            decimal PreviousQuantity,
+            decimal CurrentQuantity,
             decimal PreviousMarketValue,
             decimal CurrentMarketValue,
             decimal PriorPositionRateImpact);
