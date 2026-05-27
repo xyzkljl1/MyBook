@@ -816,7 +816,7 @@ namespace MyBook
             var builder = new IBKRRecordBuilder(account, reportDate, sourceName, baseCurrency, isInitialReport);
             var tradeTotals = ParseIBKRTradeSummary(report, contractInfos);
             var quantityChangeTotals = ParseIBKRPositionQuantityChangeRecords(report, builder, baseCurrency, contractInfos, tradeTotals);
-            var mtmTotals = ParseIBKRMtmRecords(report, builder, baseCurrency, contractInfos, quantityChangeTotals.CoveredTransactionHoldingKeys);
+            var mtmTotals = ParseIBKRMtmRecords(report, builder, baseCurrency, contractInfos, quantityChangeTotals.CoveredTransactionImpacts);
             var commissionTotals = ParseIBKRCommissionRecords(report, builder, baseCurrency, contractInfos);
             var interestAccrualTotals = ParseIBKRInterestAccrualRecords(report, builder, baseCurrency);
             var debitInterestTotals = ParseIBKRDebitInterestDetails(report);
@@ -915,7 +915,7 @@ namespace MyBook
             Dictionary<string, IBKRContractInfo> contractInfos,
             IBKRTransactionTotals tradeTotals)
         {
-            var coveredTransactionHoldingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var coveredTransactionImpacts = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
             decimal holdingValueChangeTotal = 0;
             decimal cashChangeTotal = 0;
             decimal coveredTransactionTotal = 0;
@@ -982,7 +982,8 @@ namespace MyBook
                         holding: contract);
                 }
 
-                coveredTransactionHoldingKeys.Add(holdingKey);
+                if (!coveredTransactionImpacts.TryAdd(holdingKey, preciseTransactionPriceImpact))
+                    throw new MailParseException($"Parse IBKR Report Fail, Duplicate covered position transaction: {contract.Code}");
                 holdingValueChangeTotal += holdingValueChange;
                 cashChangeTotal += cashChange;
                 coveredTransactionTotal += preciseTransactionPriceImpact;
@@ -993,7 +994,7 @@ namespace MyBook
                 holdingValueChangeTotal + cashChangeTotal,
                 "IBKR covered position transaction records");
             return new IBKRPositionQuantityChangeTotals(
-                coveredTransactionHoldingKeys,
+                coveredTransactionImpacts,
                 holdingValueChangeTotal,
                 cashChangeTotal,
                 coveredTransactionTotal);
@@ -1026,7 +1027,7 @@ namespace MyBook
             IBKRRecordBuilder builder,
             CurrencyType baseCurrency,
             Dictionary<string, IBKRContractInfo> contractInfos,
-            HashSet<string> coveredTransactionHoldingKeys)
+            Dictionary<string, decimal> coveredTransactionImpacts)
         {
             var rows = report.OptionalDataRows("按市值计算的表现总结").ToList();
             if (rows.Count == 0)
@@ -1042,6 +1043,7 @@ namespace MyBook
             decimal? grandTransactionTotal = null;
             decimal? grandCommissionTotal = null;
             decimal? grandOtherTotal = null;
+            var pendingCoveredTransactionImpacts = new Dictionary<string, decimal>(coveredTransactionImpacts, StringComparer.OrdinalIgnoreCase);
 
             foreach (var row in rows)
             {
@@ -1099,7 +1101,17 @@ namespace MyBook
                 var holdingKey = contract is null
                     ? $"FX\t{row.Fields[1]}"
                     : GetIBKRHoldingKey(contract);
-                if (!coveredTransactionHoldingKeys.Contains(holdingKey))
+                if (coveredTransactionImpacts.TryGetValue(holdingKey, out var coveredTransactionImpact))
+                {
+                    AssertIBKRMoneyFieldEquals(
+                        coveredTransactionImpact,
+                        transaction,
+                        row.Fields[7],
+                        $"IBKR covered MTM transaction {contract?.Code ?? row.Fields[1]}",
+                        MidpointRounding.ToEven);
+                    pendingCoveredTransactionImpacts.Remove(holdingKey);
+                }
+                else
                 {
                     builder.Add(
                         new Currency(transaction, baseCurrency),
@@ -1118,6 +1130,12 @@ namespace MyBook
                 AssertIBKRMoneyEquals(grandOtherTotal!.Value, otherTotal, "IBKR MTM grand other");
             }
 
+            if (pendingCoveredTransactionImpacts.Count != 0)
+            {
+                throw new MailParseException(
+                    $"Parse IBKR Report Fail, Missing covered MTM transactions: {String.Join(", ", pendingCoveredTransactionImpacts.Keys.OrderBy(key => key, StringComparer.OrdinalIgnoreCase))}");
+            }
+
             builder.Add(
                 new Currency(cashFxTranslation, baseCurrency),
                 "现金外汇换算收益/损失",
@@ -1129,50 +1147,65 @@ namespace MyBook
         private static decimal ParseIBKRCashFxTranslation(IBKRCsvReport report, CurrencyType baseCurrency)
         {
             var preciseValue = 0m;
+            var reportedValue = 0m;
             foreach (var row in report.OptionalDataRows("持仓与以市值计的盈亏"))
             {
                 if (!IsIBKRPositionSummaryRow(row) || row.Fields[1] != "外汇")
                     continue;
 
-                var valueCurrency = ParseIBKRCurrencyType(row.Fields[2]);
-                if (valueCurrency != baseCurrency)
-                    throw new MailParseException($"Parse IBKR Report Fail, Non-base FX MTM Value Currency: {FormatIBKRCsvRow(row)}");
-
-                var cashCurrency = ParseIBKRCurrencyType(row.Fields[3]);
-                if (cashCurrency == baseCurrency)
+                var positionValues = ParseIBKRFxPositionValues(row, baseCurrency, "IBKR FX MTM");
+                if (positionValues.CashCurrency == baseCurrency)
                     continue;
 
                 var transaction = ParseIBKRDecimalAt(row, 12, "FX MTM transaction");
                 var commission = ParseIBKRDecimalAt(row, 13, "FX MTM commission");
                 var other = ParseIBKRDecimalAt(row, 14, "FX MTM other");
-
-                // IBKR 已在外汇行中拆分 holding/transaction/commission/other。现金外汇换算
-                // 只取 holding 分量；其它分量由 MTM 和现金报告的对应路径处理。
-                var previousQuantity = ParseIBKRDecimalAt(row, 5, "FX previous quantity");
-                var currentQuantity = ParseIBKRDecimalAt(row, 6, "FX current quantity");
-                var previousRate = ParseIBKRDecimalAt(row, 7, "FX previous rate");
-                var currentRate = ParseIBKRDecimalAt(row, 8, "FX current rate");
-                var calculatedPreviousMarketValue = previousQuantity * previousRate;
-                var calculatedCurrentMarketValue = currentQuantity * currentRate;
-                var reportedPreviousMarketValue = ParseIBKRDecimalAt(row, 9, "FX previous market value");
-                var reportedCurrentMarketValue = ParseIBKRDecimalAt(row, 10, "FX current market value");
-                AssertIBKRMoneyEquals(RoundIBKRMoneyForReportField(calculatedPreviousMarketValue, row.Fields[9]), reportedPreviousMarketValue, $"IBKR FX previous market value display {FormatIBKRCsvRow(row)}");
-                AssertIBKRMoneyEquals(RoundIBKRMoneyForReportField(calculatedCurrentMarketValue, row.Fields[10]), reportedCurrentMarketValue, $"IBKR FX current market value display {FormatIBKRCsvRow(row)}");
-
                 var reportedHolding = ParseIBKRDecimalAt(row, 11, "FX MTM holding");
                 var reportedTotal = ParseIBKRDecimalAt(row, 15, "FX MTM total");
-                AssertIBKRMoneyEquals(reportedHolding + transaction + commission + other, reportedTotal, $"IBKR FX MTM row total {FormatIBKRCsvRow(row)}");
+                var preciseHolding = RoundIBKRMoneyForReportField(positionValues.PriorPositionRateImpact, row.Fields[11]) == reportedHolding
+                    ? positionValues.PriorPositionRateImpact
+                    : reportedHolding;
+                AssertIBKRMoneyFieldEquals(preciseHolding, reportedHolding, row.Fields[11], $"IBKR FX MTM holding display {FormatIBKRCsvRow(row)}");
+                AssertIBKRMoneyFieldEquals(
+                    preciseHolding + transaction + commission + other,
+                    reportedTotal,
+                    row.Fields[15],
+                    $"IBKR FX MTM row total {FormatIBKRCsvRow(row)}");
 
-                preciseValue += reportedHolding;
+                preciseValue += preciseHolding;
+                reportedValue += reportedHolding;
             }
 
-            ValidateIBKRCashFxTranslationDisplay(report, preciseValue);
+            ValidateIBKRCashFxTranslationDisplay(report, reportedValue);
             return preciseValue;
         }
 
-        private static void ValidateIBKRCashFxTranslationDisplay(IBKRCsvReport report, decimal preciseValue)
+        private static IBKRFxPositionValues ParseIBKRFxPositionValues(
+            IBKRCsvRow row,
+            CurrencyType baseCurrency,
+            string context)
         {
-            var roundedPreciseValue = RoundIBKRMoneyForReportDisplay(preciseValue);
+            var valueCurrency = ParseIBKRCurrencyType(row.Fields[2]);
+            if (valueCurrency != baseCurrency)
+                throw new MailParseException($"Parse IBKR Report Fail, Non-base FX Position Value Currency: {FormatIBKRCsvRow(row)}");
+
+            var cashCurrency = ParseIBKRCurrencyType(row.Fields[3]);
+            var previousQuantity = ParseIBKRDecimalAt(row, 5, $"{context} previous quantity");
+            var currentQuantity = ParseIBKRDecimalAt(row, 6, $"{context} current quantity");
+            var previousRate = ParseIBKRDecimalAt(row, 7, $"{context} previous rate");
+            var currentRate = ParseIBKRDecimalAt(row, 8, $"{context} current rate");
+            var calculatedPreviousMarketValue = previousQuantity * previousRate;
+            var calculatedCurrentMarketValue = currentQuantity * currentRate;
+            var priorPositionRateImpact = previousQuantity * (currentRate - previousRate);
+            var reportedPreviousMarketValue = ParseIBKRDecimalAt(row, 9, $"{context} previous market value");
+            var reportedCurrentMarketValue = ParseIBKRDecimalAt(row, 10, $"{context} current market value");
+            AssertIBKRMoneyFieldEquals(calculatedPreviousMarketValue, reportedPreviousMarketValue, row.Fields[9], $"{context} previous market value display {FormatIBKRCsvRow(row)}");
+            AssertIBKRMoneyFieldEquals(calculatedCurrentMarketValue, reportedCurrentMarketValue, row.Fields[10], $"{context} current market value display {FormatIBKRCsvRow(row)}");
+            return new IBKRFxPositionValues(cashCurrency, calculatedPreviousMarketValue, calculatedCurrentMarketValue, priorPositionRateImpact);
+        }
+
+        private static void ValidateIBKRCashFxTranslationDisplay(IBKRCsvReport report, decimal reportedValue)
+        {
             var cashReportValue = 0m;
             var hasCashReportValue = false;
             foreach (var row in report.RequireDataRows("现金报告"))
@@ -1186,13 +1219,11 @@ namespace MyBook
             }
 
             if (hasCashReportValue)
-                AssertIBKRMoneyEquals(roundedPreciseValue, cashReportValue, "IBKR cash FX translation cash report display");
+                AssertIBKRMoneyEquals(reportedValue, cashReportValue, "IBKR cash FX translation cash report display");
             else
-                AssertIBKRMoneyEquals(0, roundedPreciseValue, "IBKR missing cash FX translation cash report display");
+                AssertIBKRMoneyEquals(0, reportedValue, "IBKR missing cash FX translation cash report display");
 
-            // 精确值用于入库，报表显示值用于校验。这里要求“精确值保留 8 位小数”后必须
-            // 与现金报告、MTM 总表上读到的外汇换算显示值完全相等；如果不相等，说明 IBKR
-            // 改了报表口径或出现了我们尚未处理的新格式，必须报错而不是悄悄导入。
+            // 精确值逐行和 MTM 显示字段校验；这里校验现金报告与 MTM 总表的显示口径一致。
             var mtmReportValue = 0m;
             foreach (var row in report.OptionalDataRows("按市值计算的表现总结"))
             {
@@ -1212,7 +1243,7 @@ namespace MyBook
                 mtmReportValue += ParseIBKRDecimalAt(row, 6, "MTM FX holding");
             }
 
-            AssertIBKRMoneyEquals(roundedPreciseValue, mtmReportValue, "IBKR cash FX translation MTM display");
+            AssertIBKRMoneyEquals(reportedValue, mtmReportValue, "IBKR cash FX translation MTM display");
         }
 
         private static void AssertIBKRMtmRowTotal(IBKRCsvRow row)
@@ -2063,13 +2094,21 @@ namespace MyBook
                 return contract;
 
             var created = CreateIBKRContractInfo(group, code, code);
+            if (contractInfos.TryGetValue(created.Code, out contract))
+            {
+                contractInfos[code] = contract;
+                return contract;
+            }
+
             contractInfos[created.Code] = created;
+            if (!String.Equals(code, created.Code, StringComparison.OrdinalIgnoreCase))
+                contractInfos[code] = created;
             return created;
         }
 
         private static string ExtractIBKRBondCode(string text)
         {
-            var match = Regex.Match(text, @"T\s+\d+(?:\.\d+)?\s+\d{2}/\d{2}/\d{2}", RegexOptions.IgnoreCase);
+            var match = Regex.Match(text, @"T\s+\d+(?:(?:\.\d+)|(?:\s+\d+/\d+))?\s+\d{2}/\d{2}/\d{2}", RegexOptions.IgnoreCase);
             if (match.Success)
                 return Regex.Replace(match.Value, @"\s+", " ").Trim();
             return text;
@@ -2189,23 +2228,9 @@ namespace MyBook
                 if (!TryParseIBKRCurrencyType(row.Fields[3], out _))
                     continue;
 
-                var valueCurrency = ParseIBKRCurrencyType(row.Fields[2]);
-                if (valueCurrency != baseCurrency)
-                    throw new MailParseException($"Parse IBKR Report Fail, Non-base FX Position Value Currency: {FormatIBKRCsvRow(row)}");
-
-                var previousQuantity = ParseIBKRDecimalAt(row, 5, "FX previous quantity");
-                var currentQuantity = ParseIBKRDecimalAt(row, 6, "FX current quantity");
-                var previousRate = ParseIBKRDecimalAt(row, 7, "FX previous rate");
-                var currentRate = ParseIBKRDecimalAt(row, 8, "FX current rate");
-                var calculatedPreviousMarketValue = previousQuantity * previousRate;
-                var calculatedCurrentMarketValue = currentQuantity * currentRate;
-                var reportedPreviousMarketValue = ParseIBKRDecimalAt(row, 9, "FX previous market value");
-                var reportedCurrentMarketValue = ParseIBKRDecimalAt(row, 10, "FX current market value");
-                AssertIBKRMoneyFieldEquals(calculatedPreviousMarketValue, reportedPreviousMarketValue, row.Fields[9], $"IBKR precise FX previous market value display {FormatIBKRCsvRow(row)}");
-                AssertIBKRMoneyFieldEquals(calculatedCurrentMarketValue, reportedCurrentMarketValue, row.Fields[10], $"IBKR precise FX current market value display {FormatIBKRCsvRow(row)}");
-
-                previousTotal += calculatedPreviousMarketValue;
-                currentTotal += calculatedCurrentMarketValue;
+                var positionValues = ParseIBKRFxPositionValues(row, baseCurrency, "IBKR precise FX");
+                previousTotal += positionValues.PreviousMarketValue;
+                currentTotal += positionValues.CurrentMarketValue;
                 hasPositionCashRows = true;
             }
 
@@ -3144,10 +3169,16 @@ namespace MyBook
 
         private sealed record IBKRPreciseCashValues(decimal Start, decimal End);
 
+        private sealed record IBKRFxPositionValues(
+            CurrencyType CashCurrency,
+            decimal PreviousMarketValue,
+            decimal CurrentMarketValue,
+            decimal PriorPositionRateImpact);
+
         private sealed record IBKRMtmTotals(bool HasData, decimal Holding, decimal Transaction, decimal Commission, decimal Other);
 
         private sealed record IBKRPositionQuantityChangeTotals(
-            HashSet<string> CoveredTransactionHoldingKeys,
+            Dictionary<string, decimal> CoveredTransactionImpacts,
             decimal HoldingValueChange,
             decimal CashChange,
             decimal TransactionPriceImpact);
