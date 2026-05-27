@@ -114,7 +114,7 @@ namespace MyBook
         {
             using HttpClient client = new();
             client.Timeout = RequestTimeout;
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0");
+            ApplyNexusApplicationHeaders(client);
             using var content = new FormUrlEncodedContent(form);
             using var response = await client.PostAsync(NexusOAuthTokenEndpoint, content);
             var responseText = await response.Content.ReadAsStringAsync();
