@@ -186,7 +186,7 @@ namespace MyBook
         public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','PayPalMail','Manual')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
-        public const string AccountUsage = "enum('Life','Investment','Transit','Unknown')";
+        public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
     }
 
     static class MySqlDecimalColumnTypes
@@ -199,7 +199,7 @@ namespace MyBook
         Life,
         Investment,
         Transit,
-        Unknown
+        Undetermined
     }
 
     [SugarIndex("unique_AccountInternalIds_account_card_no", nameof(AccountInternalId._account_Id), OrderByType.Asc, nameof(AccountInternalId.cardNo), OrderByType.Asc, true)]
