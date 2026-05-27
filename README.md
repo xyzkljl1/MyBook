@@ -16,7 +16,8 @@ The project has been developed with extensive vibe coding using OpenAI GPT-5 Cod
 ## Repository Layout
 
 - `MyBook/` - WPF application source
-- `Database/bootstrap.sql` - schema plus fixed data used to rebuild an empty database
+- `Database/bootstrap.sql` - tracked database schema used to rebuild an empty database
+- `Database/bootstrap.fixed-data.sql` - ignored local fixed-data export used with the schema for a full rebuild
 - `MyBook/config.json.example` - tracked configuration template with blank or zero values
 - `*.TODO.cs` modules - placeholders or not-yet-verified integrations
 
@@ -63,17 +64,19 @@ When adding, removing, or renaming configuration keys, update `MyBook/config.jso
 
 The application validates the database schema on startup. Fixed data includes `Accounts` and fake/checkpoint `StatementImports`; imported records, holdings, snapshots, and OAuth tokens are runtime data.
 
-Rebuild an empty database from tracked schema and fixed data:
+Rebuild an empty database from the tracked schema plus the local fixed-data file:
 
 ```powershell
 dotnet run --project MyBook\MyBook.csproj -- --rebuild-database-from-bootstrap-sql
 ```
 
-Export current schema plus fixed data to `Database/bootstrap.sql`:
+Export the current schema to `Database/bootstrap.sql` and fixed data to the ignored `Database/bootstrap.fixed-data.sql`:
 
 ```powershell
 dotnet run --project MyBook\MyBook.csproj -- --export-bootstrap-sql
 ```
+
+`Database/bootstrap.fixed-data.sql` may contain private account metadata, so it is intentionally not tracked.
 
 Clean volatile imported data while preserving fixed data:
 

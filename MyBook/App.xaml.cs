@@ -365,10 +365,12 @@ namespace MyBook
 
         private static void WriteBootstrapSqlBackupResult(BootstrapSqlBackupResult result)
         {
-            Console.WriteLine($"Bootstrap SQL: {result.BootstrapPath}");
+            Console.WriteLine($"Bootstrap schema SQL: {result.BootstrapPath}");
+            Console.WriteLine($"Bootstrap fixed-data SQL: {result.FixedDataPath}");
             Console.WriteLine($"Backup directory: {result.BackupDirectory}");
             Console.WriteLine($"Hash: {result.Hash}");
-            Console.WriteLine($"Bootstrap changed: {result.BootstrapChanged}");
+            Console.WriteLine($"Bootstrap schema changed: {result.BootstrapChanged}");
+            Console.WriteLine($"Bootstrap fixed-data changed: {result.FixedDataChanged}");
             Console.WriteLine($"Backup written: {result.BackupWritten}");
         }
 
