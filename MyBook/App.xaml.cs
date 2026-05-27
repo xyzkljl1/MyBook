@@ -295,17 +295,6 @@ namespace MyBook
                         : mail.FetchOCBCReports(ParseMonthArgument(month))))
                 return;
 
-            if (RunMailFetchCommand(
-                    e.Args,
-                    "--fetch-paypal-reports",
-                    "FetchPayPalReports",
-                    "--paypal-month",
-                    TimeSpan.FromMinutes(10),
-                    (mail, month) => String.IsNullOrWhiteSpace(month)
-                        ? mail.FetchPayPalReports()
-                        : mail.FetchPayPalReports(ParseMonthArgument(month))))
-                return;
-
             var startupConfig = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
             new DatabaseUtil(startupConfig).EnsureBootstrapSqlBackupIfChanged("startup");
 

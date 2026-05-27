@@ -81,6 +81,24 @@ namespace MyBook
                 query,
                 message => IsOCBCStatementMail(message, statementMonth),
                 GetMailDateTime);
+            var message = messages.FirstOrDefault();
+            if (message is not null)
+                return message;
+
+            return await SearchSupplementalOCBCStatementMail(statementMonth, subject);
+        }
+
+        private async Task<MimeMessage?> SearchSupplementalOCBCStatementMail(DateTime statementMonth, string subject)
+        {
+            var messages = await SearchSupplementalStatementMails(
+                $"OCBC statement {statementMonth:yyyy-MM}",
+                subject,
+                statementMonth,
+                message => IsOCBCStatementContent(message, statementMonth),
+                GetMailDateTime);
+            if (messages.Count > 0)
+                Console.WriteLine($"Find supplemental OCBC statement {statementMonth:yyyy-MM} from self-sent mail");
+
             return messages.FirstOrDefault();
         }
 
@@ -89,10 +107,16 @@ namespace MyBook
             if (!IsFrom(message, OCBCMailSender))
                 return false;
 
+            return IsOCBCStatementContent(message, statementMonth);
+        }
+
+        private static bool IsOCBCStatementContent(MimeMessage message, DateTime statementMonth)
+        {
             if (!TryParseOCBCStatementSubjectMonth(message.Subject ?? "", out var subjectMonth))
                 return false;
 
-            return subjectMonth == FirstDayOfMonth(statementMonth);
+            return subjectMonth == FirstDayOfMonth(statementMonth)
+                && HasMatchingAttachment(message, (_, fileName) => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
         }
 
         private static DateTime ParseOCBCStatementSubjectMonth(string subject)
@@ -120,7 +144,7 @@ namespace MyBook
 
         private static string BuildOCBCStatementSubject(DateTime statementMonth)
         {
-            return $"OCBC: Your Combined e-Statement for {statementMonth:MMM yyyy}";
+            return $"OCBC: Your Combined e-Statement for {statementMonth.ToString("MMM yyyy", CultureInfo.InvariantCulture)}";
         }
 
         private List<Account> GetOCBCStatementAccounts()

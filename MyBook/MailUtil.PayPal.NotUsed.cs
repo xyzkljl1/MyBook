@@ -7,7 +7,7 @@ using MimeKit;
 
 namespace MyBook
 {
-    // PayPal mail discovery only. My PayPal accounts currently do not have PayPal balance enabled
+    // NotUsed: PayPal mail discovery only. My PayPal accounts currently do not have PayPal balance enabled
     // and are used only as a payment tool, so PayPal mails are not converted into Records.
     partial class MailUtil
     {

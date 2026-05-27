@@ -148,6 +148,26 @@ namespace MyBook
                 String.Equals(mailbox.Address, sender, StringComparison.OrdinalIgnoreCase));
         }
 
+        private static bool IsToOrCc(MimeMessage message, string recipient)
+        {
+            return message.To.Mailboxes.Concat(message.Cc.Mailboxes).Any(mailbox =>
+                String.Equals(mailbox.Address, recipient, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private string GetConfiguredYahooAddress()
+        {
+            var yahooUser = username.Trim();
+            return yahooUser.Contains('@', StringComparison.Ordinal)
+                ? yahooUser
+                : $"{yahooUser}@yahoo.com";
+        }
+
+        private bool IsSelfSentYahooMessage(MimeMessage message)
+        {
+            var yahooAddress = GetConfiguredYahooAddress();
+            return IsFrom(message, yahooAddress) && IsToOrCc(message, yahooAddress);
+        }
+
         private static byte[] ReadMimePartBytes(MimePart mimePart)
         {
             using var memory = new MemoryStream();
@@ -205,6 +225,33 @@ namespace MyBook
                 Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
 
             return messages;
+        }
+
+        private async Task<List<MimeMessage>> SearchSupplementalStatementMails(
+            string label,
+            string subject,
+            DateTime statementMonth,
+            Func<MimeMessage, bool>? messageFilter,
+            Func<MimeMessage, DateTime>? orderDateSelector = null)
+        {
+            if (!ShouldSearchSupplementalStatementMail(statementMonth))
+                return [];
+
+            var yahooAddress = GetConfiguredYahooAddress();
+            var query = SearchQuery.FromContains(yahooAddress)
+                .And(SearchQuery.SubjectContains(subject))
+                .And(SearchQuery.SentSince(statementMonth.Date));
+            return await SearchMessages(
+                $"{label} supplemental from {statementMonth:yyyy-MM-dd}",
+                query,
+                message => IsSelfSentYahooMessage(message) && (messageFilter?.Invoke(message) ?? true),
+                orderDateSelector);
+        }
+
+        private static bool ShouldSearchSupplementalStatementMail(DateTime statementMonth)
+        {
+            var currentMonth = FirstDayOfMonth(DateTime.Today);
+            return FirstDayOfMonth(statementMonth).AddMonths(2) <= currentMonth;
         }
 
         private async Task<List<MimeMessage>> SearchMessages(

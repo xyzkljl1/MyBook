@@ -20,6 +20,7 @@ The project has been developed with extensive vibe coding using OpenAI GPT-5 Cod
 - `Database/bootstrap.fixed-data.sql` - ignored local fixed-data export used with the schema for a full rebuild
 - `MyBook/config.json.example` - tracked configuration template with blank or zero values
 - `*.TODO.cs` modules - placeholders or not-yet-verified integrations
+- `*.NotUsed.cs` modules - integrations kept for reference but not currently used
 
 Local statements, downloaded reports, `config.json`, database backups, and other private/runtime files are intentionally ignored.
 
@@ -38,8 +39,7 @@ Expected files:
 - `MailUtil.ICBCHistory` fetches ICBC historical-detail PDF mail attachments on demand or by date range and imports debit-account history details and credit-card history supplements when the statement balance chain and overlap checks pass.
 - `MailUtil.IBKR` fetches Interactive Brokers `DailyMyBook` CSV reports daily from mailbox attachments and imports cash, NAV, positions, trades, commissions, transfers, interest, dividends, withholding tax, FX translation, and end-of-day holdings. It can also read local initial reports before daily reports exist.
 - `MailUtil.Wise` imports local initial Wise XML statements from `initialReports` when the Wise account has no history, then fetches monthly Wise XML statements from mailbox attachments and imports per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers.
-- `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines.
-- `MailUtil.PayPal` fetches PayPal mail statements monthly from configured mailbox messages and imports supported PayPal payment events for configured PayPal accounts.
+- `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines; if an old month is missing, it can also import a self-sent supplemental statement mail with the original subject and PDF attachment.
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly reports through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
 - `LocalUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
@@ -128,7 +128,6 @@ dotnet run --project MyBook\MyBook.csproj -- --fetch-icbc-history-details
 dotnet run --project MyBook\MyBook.csproj -- --fetch-ibkr-reports
 dotnet run --project MyBook\MyBook.csproj -- --fetch-wise-reports
 dotnet run --project MyBook\MyBook.csproj -- --fetch-ocbc-reports
-dotnet run --project MyBook\MyBook.csproj -- --fetch-paypal-reports
 ```
 
 Useful local/debug commands:
@@ -174,6 +173,12 @@ The following modules are intentionally present as placeholders or not-yet-compl
 - `WebUtil.Meituan.TODO.cs`
 
 These modules should fail loudly or remain unconnected until implemented and validated.
+
+## NotUsed Modules
+
+The following modules are kept in the codebase but are not part of the current active import workflow:
+
+- `MailUtil.PayPal.NotUsed.cs`
 
 ## Accuracy Notes
 
