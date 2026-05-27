@@ -2,8 +2,6 @@
 
 MyBook is a local personal finance and asset tracking application. It imports statements from banks, broker reports, mail attachments, local files, and selected web APIs, then stores records, balances, holdings, snapshots, and fixed bootstrap data in MySQL.
 
-The project is intentionally strict about accounting accuracy: statement totals are used for validation, not as a substitute for detailed records, and imports are expected to be atomic.
-
 ## Tech Stack
 
 - .NET 8 WPF desktop application
@@ -21,6 +19,19 @@ The project is intentionally strict about accounting accuracy: statement totals 
 - `*.TODO.cs` modules - placeholders or not-yet-verified integrations
 
 Local statements, downloaded reports, `config.json`, database backups, and other private/runtime files are intentionally ignored.
+
+## Implemented Account Sources
+
+- `MailUtil.ICBC` fetches ICBC credit-card statements monthly from mailbox messages and imports card balances plus RMB and foreign-currency transaction details.
+- `MailUtil.ICBCHistory` fetches ICBC historical-detail PDF mail attachments on demand or by date range and imports debit-account history details and credit-card history supplements when the statement balance chain and overlap checks pass.
+- `MailUtil.IBKR` fetches Interactive Brokers `DailyMyBook` CSV reports daily from mailbox attachments and imports cash, NAV, positions, trades, commissions, transfers, interest, dividends, withholding tax, FX translation, and end-of-day holdings. It can also read local initial reports before daily reports exist.
+- `MailUtil.Wise` fetches Wise XML statements monthly from mailbox attachments and imports per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers.
+- `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines.
+- `MailUtil.PayPal` fetches PayPal mail statements monthly from configured mailbox messages and imports supported PayPal payment events for configured PayPal accounts.
+- `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly reports through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
+- `LocalUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
+- `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
+- `WebUtil.Meituan.TODO` will fetch Meituan account balance information.
 
 ## Configuration
 
@@ -143,4 +154,3 @@ These modules should fail loudly or remain unconnected until implemented and val
 - External imports should update records and holdings/balances as one atomic operation.
 - Account balances are derived from holdings through the `AccountBalances` view.
 - Snapshots represent database state at an import progress point, not natural-date account state.
-- Do not fabricate residual records to force statement validation to pass.
