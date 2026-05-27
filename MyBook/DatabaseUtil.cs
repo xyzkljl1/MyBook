@@ -25,8 +25,8 @@ namespace MyBook
         private const string BootstrapBackupDirectoryName = "DatabaseBackups";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
-        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(Snapshot), typeof(SnapshotItem)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(Snapshot), typeof(SnapshotItem)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -138,6 +138,36 @@ namespace MyBook
                 throw new ArgumentException("Debug SQL is empty.", nameof(sql));
 
             return ExecuteLockedTransaction(() => db.Ado.ExecuteCommand(sql));
+        }
+
+        public OAuthToken? GetOAuthToken(OAuthTokenProvider provider)
+        {
+            return db.Queryable<OAuthToken>()
+                .Where(token => token.provider == provider)
+                .First();
+        }
+
+        public void SaveOAuthToken(OAuthToken token)
+        {
+            ExecuteLockedTransaction(() =>
+            {
+                var existing = db.Queryable<OAuthToken>()
+                    .Where(item => item.provider == token.provider)
+                    .First();
+                if (existing is null)
+                {
+                    token.Id = db.Insertable(token).ExecuteReturnIdentity();
+                    return;
+                }
+
+                existing.accessToken = token.accessToken;
+                existing.refreshToken = token.refreshToken;
+                existing.tokenType = token.tokenType;
+                existing.scope = token.scope;
+                existing.expiresAt = token.expiresAt;
+                existing.updateTime = token.updateTime;
+                db.Updateable(existing).ExecuteCommand();
+            });
         }
 
         public BootstrapSqlBackupResult EnsureBootstrapSqlBackupIfChanged(string reason)
@@ -4176,6 +4206,8 @@ namespace MyBook
                 return "AccountInternalIds";
             if (type == typeof(AccountBalance))
                 return "AccountBalances";
+            if (type == typeof(OAuthToken))
+                return "OAuthTokens";
             if (type == typeof(Record))
                 return "Records";
             if (type == typeof(Holding))

@@ -187,6 +187,7 @@ namespace MyBook
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
+        public const string OAuthTokenProvider = "enum('Nexus')";
     }
 
     static class MySqlDecimalColumnTypes
@@ -200,6 +201,40 @@ namespace MyBook
         Investment,
         Transit,
         Undetermined
+    }
+
+    public enum OAuthTokenProvider
+    {
+        Nexus
+    }
+
+    [SugarIndex("unique_OAuthTokens_provider", nameof(provider), OrderByType.Asc, true)]
+    [SugarTable("OAuthTokens")]
+    public class OAuthToken
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [SugarColumn(DefaultValue = "Nexus", ColumnDataType = MySqlEnumColumnTypes.OAuthTokenProvider, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public OAuthTokenProvider provider { get; set; } = OAuthTokenProvider.Nexus;
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(4096)")]
+        public string accessToken { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(4096)")]
+        public string refreshToken { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "Bearer", ColumnDataType = "varchar(32)")]
+        public string tokenType { get; set; } = "Bearer";
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(1024)")]
+        public string scope { get; set; } = "";
+
+        [SugarColumn(IsNullable = true, ColumnDataType = "datetime(6)")]
+        public DateTime? expiresAt { get; set; }
+
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime updateTime { get; set; }
     }
 
     [SugarIndex("unique_AccountInternalIds_account_card_no", nameof(AccountInternalId._account_Id), OrderByType.Asc, nameof(AccountInternalId.cardNo), OrderByType.Asc, true)]

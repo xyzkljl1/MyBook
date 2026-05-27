@@ -207,6 +207,31 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--authorize-nexus-oauth-token", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    var database = new DatabaseUtil(config);
+                    var graphQL = new GraphQLUtil(config, database);
+                    var tokens = Task.Run(graphQL.AuthorizeNexusOAuthToken)
+                        .WaitAsync(TimeSpan.FromMinutes(10))
+                        .GetAwaiter()
+                        .GetResult();
+                    Console.WriteLine($"Authorized Nexus OAuth token. expiresAt={tokens.ExpiresAt:O}");
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"AuthorizeNexusOAuthToken failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
             if (RunMailFetchCommand(
                     e.Args,
                     "--fetch-icbc-bills",
