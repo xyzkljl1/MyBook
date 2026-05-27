@@ -7,6 +7,7 @@ namespace MyBook
         public List<MonthlyFlowSeries> MonthlyFlowSeries { get; set; } = [];
         public MonthlyFlowSeries RmbMonthlyFlowSeries { get; set; } = new();
         public List<MonthlyFlowAccountStatistics> MonthlyAccounts { get; set; } = [];
+        public List<AccountNetFlowStatistics> AccountNetFlows { get; set; } = [];
         public List<ReasonFlowSeries> RmbReasonFlowSeriesByMonth { get; set; } = [];
         public int DefaultReasonMonthIndex { get; set; }
         public InvestmentStatistics InvestmentByReason { get; set; } = new();
@@ -54,6 +55,23 @@ namespace MyBook
         public string DisplayName { get; set; } = "";
         public List<MonthlyFlowSeries> MonthlyFlowSeries { get; set; } = [];
         public MonthlyFlowSeries RmbMonthlyFlowSeries { get; set; } = new();
+    }
+
+    public class AccountNetFlowStatistics
+    {
+        public string AccountPrefix { get; set; } = "";
+        public string DisplayName { get; set; } = "";
+        public decimal NetRmb { get; set; }
+        public bool HasMissingExchangeRate { get; set; }
+        public int RecordCount { get; set; }
+        public List<AccountNetFlowCurrencyTotal> CurrencyTotals { get; set; } = [];
+    }
+
+    public class AccountNetFlowCurrencyTotal
+    {
+        public CurrencyType Currency { get; set; }
+        public decimal Amount { get; set; }
+        public decimal? RmbAmount { get; set; }
     }
 
     public class MonthlyFlowPoint

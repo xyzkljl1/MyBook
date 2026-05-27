@@ -100,7 +100,7 @@ CREATE TABLE `records` (
 
 CREATE TABLE `snapshots` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `source` enum('AutoDaily','Manual') NOT NULL DEFAULT 'AutoDaily',
+  `source` enum('AutoDaily','Manual','Start') NOT NULL DEFAULT 'AutoDaily',
   `time` datetime(6) NOT NULL,
   `schemaVersion` int NOT NULL DEFAULT '1',
   `snapshotKey` varchar(128) NOT NULL DEFAULT '',

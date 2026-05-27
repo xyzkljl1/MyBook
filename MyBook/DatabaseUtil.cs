@@ -2367,6 +2367,15 @@ namespace MyBook
                 .Where(balance => balance.v != 0)
                 .ToList();
             var holdings = db.Queryable<Holding>().ToList();
+            var cashHoldingIds = holdings
+                .Where(holding => holding.holdingType == HoldingType.Cash)
+                .Select(holding => holding.Id)
+                .ToHashSet();
+            var accountNetFlowRecords = db.Queryable<Record>()
+                .Where(record => !record.isRefundMatched && record.date < today.Date.AddDays(1))
+                .ToList()
+                .Where(record => cashHoldingIds.Contains(record._holding_Id))
+                .ToList();
             var investmentAccountIds = accountList
                 .Where(account => account.usage == AccountUsage.Investment)
                 .Select(account => account.Id)
@@ -2385,6 +2394,7 @@ namespace MyBook
                 .Select(balance => balance.t)
                 .Union(records.Select(record => record.t))
                 .Union(investmentRecords.Select(record => record.t))
+                .Union(accountNetFlowRecords.Select(record => record.t))
                 .Union(assetSummaryBalances.SelectMany(point => point.Balances.Select(balance => balance.t)))
                 .Distinct()
                 .ToList();
@@ -2404,6 +2414,10 @@ namespace MyBook
                     accountList,
                     records,
                     firstMonth,
+                    exchangeRates),
+                AccountNetFlows = BuildAccountNetFlowStatistics(
+                    accountList,
+                    accountNetFlowRecords,
                     exchangeRates),
                 RmbReasonFlowSeriesByMonth = reasonMonths
                     .Select(month => BuildRmbReasonFlowSeries(lifeRecords, month, month.AddMonths(1), exchangeRates))
@@ -2896,6 +2910,114 @@ namespace MyBook
             };
         }
 
+        private List<AccountNetFlowStatistics> BuildAccountNetFlowStatistics(
+            List<Account> accounts,
+            List<Record> records,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var accountTypesById = accounts
+                .ToDictionary(account => account.Id, account => GetAccountType(account.name));
+            var accountTypesByName = accounts
+                .GroupBy(account => account.name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => GetAccountType(group.First().name), StringComparer.OrdinalIgnoreCase);
+            var matchedRecordIds = records
+                .Where(record => record.matchedRecordId.HasValue)
+                .Select(record => record.matchedRecordId!.Value)
+                .Distinct()
+                .ToList();
+            var matchedRecordAccountTypes = matchedRecordIds.Count == 0
+                ? new Dictionary<int, string>()
+                : db.Queryable<Record>()
+                    .Where(record => matchedRecordIds.Contains(record.Id))
+                    .ToList()
+                    .Where(record => accountTypesById.ContainsKey(record._account_Id))
+                    .ToDictionary(record => record.Id, record => accountTypesById[record._account_Id]);
+
+            return records
+                .Where(record => record.v != 0
+                    && accountTypesById.ContainsKey(record._account_Id)
+                    && IsExternalToAccountType(record, accountTypesById, accountTypesByName, matchedRecordAccountTypes))
+                .GroupBy(record => accountTypesById[record._account_Id], StringComparer.OrdinalIgnoreCase)
+                .Select(group => BuildAccountNetFlowStatistic(group.Key, group.ToList(), exchangeRates))
+                .Where(statistic => statistic.HasMissingExchangeRate
+                    ? statistic.CurrencyTotals.Any(total => total.Amount != 0)
+                    : statistic.NetRmb != 0)
+                .OrderByDescending(statistic => Math.Abs(statistic.NetRmb))
+                .ThenBy(statistic => statistic.DisplayName)
+                .ToList();
+        }
+
+        private static AccountNetFlowStatistics BuildAccountNetFlowStatistic(
+            string accountType,
+            List<Record> records,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var totals = records
+                .GroupBy(record => record.t)
+                .Select(group =>
+                {
+                    var amount = group.Sum(record => record.v);
+                    return new AccountNetFlowCurrencyTotal
+                    {
+                        Currency = group.Key,
+                        Amount = amount,
+                        RmbAmount = TryConvertToRmb(amount, group.Key, exchangeRates)
+                    };
+                })
+                .Where(total => total.Amount != 0)
+                .OrderByDescending(total => Math.Abs(total.RmbAmount ?? 0))
+                .ThenBy(total => total.Currency)
+                .ToList();
+
+            return new AccountNetFlowStatistics
+            {
+                AccountPrefix = accountType,
+                DisplayName = BuildAccountTypeDisplayName(accountType),
+                NetRmb = RoundAccountNetFlowRmb(totals
+                    .Where(total => total.RmbAmount.HasValue)
+                    .Sum(total => total.RmbAmount!.Value)),
+                HasMissingExchangeRate = totals.Any(total => !total.RmbAmount.HasValue),
+                RecordCount = records.Count,
+                CurrencyTotals = totals
+            };
+        }
+
+        private static decimal RoundAccountNetFlowRmb(decimal value)
+        {
+            return Decimal.Round(value, 0, MidpointRounding.ToEven);
+        }
+
+        private static bool IsExternalToAccountType(
+            Record record,
+            Dictionary<int, string> accountTypesById,
+            Dictionary<string, string> accountTypesByName,
+            Dictionary<int, string> matchedRecordAccountTypes)
+        {
+            var accountType = accountTypesById[record._account_Id];
+            var counterpartyType = ResolveCounterpartyAccountType(record, accountTypesByName, matchedRecordAccountTypes);
+            return counterpartyType is null
+                || !String.Equals(accountType, counterpartyType, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string? ResolveCounterpartyAccountType(
+            Record record,
+            Dictionary<string, string> accountTypesByName,
+            Dictionary<int, string> matchedRecordAccountTypes)
+        {
+            if (record.matchedRecordId.HasValue
+                && matchedRecordAccountTypes.TryGetValue(record.matchedRecordId.Value, out var matchedAccountType))
+            {
+                return matchedAccountType;
+            }
+
+            if (!TryResolveCounterpartyName(record, out var counterpartyName))
+                return null;
+
+            return accountTypesByName.TryGetValue(counterpartyName, out var accountType)
+                ? accountType
+                : null;
+        }
+
         private static ReasonFlowSeries BuildRmbReasonFlowSeries(
             List<Record> records,
             DateTime start,
@@ -3350,6 +3472,7 @@ namespace MyBook
         private Snapshot? GetStartSnapshot()
         {
             return db.Queryable<Snapshot>()
+                .Where(snapshot => snapshot.source == SnapshotSource.Start)
                 .OrderBy(snapshot => snapshot.Id)
                 .First();
         }
