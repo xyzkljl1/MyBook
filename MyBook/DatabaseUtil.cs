@@ -23,9 +23,11 @@ namespace MyBook
         private const int BootstrapBackupRetention = 3;
         private const string BootstrapSqlRelativePath = "Database/bootstrap.sql";
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
-        private const string BootstrapBackupDirectoryName = "DatabaseBackups";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
+        private static readonly Regex BootstrapBackupFileRegex = new(
+            @"^(?<prefix>bootstrap-\d{8}-\d{6}-\d{6}-(?<hash>[0-9a-f]{12}))\.(?<kind>schema|fixed-data)\.sql$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
         private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
         private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(Snapshot), typeof(SnapshotItem)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
@@ -181,12 +183,12 @@ namespace MyBook
             var workspaceRoot = FindWorkspaceRoot();
             var bootstrapPath = Path.Combine(workspaceRoot, BootstrapSqlRelativePath);
             var fixedDataPath = Path.Combine(workspaceRoot, BootstrapFixedDataSqlRelativePath);
-            var backupDirectory = Path.Combine(workspaceRoot, BootstrapBackupDirectoryName);
-            var hash = ComputeContentHash(scripts.SchemaSql);
+            var backupDirectory = Path.GetDirectoryName(bootstrapPath) ?? workspaceRoot;
+            var hash = ComputeBootstrapBackupHash(scripts);
 
             var bootstrapChanged = WriteTextIfChanged(bootstrapPath, scripts.SchemaSql);
             var fixedDataChanged = WriteTextIfChanged(fixedDataPath, scripts.FixedDataSql);
-            var backupWritten = WriteBootstrapBackupIfChanged(backupDirectory, scripts.SchemaSql, hash);
+            var backupWritten = WriteBootstrapBackupIfChanged(backupDirectory, scripts, hash);
             PruneBootstrapBackups(backupDirectory);
 
             return new BootstrapSqlBackupResult(
@@ -394,21 +396,20 @@ namespace MyBook
             return true;
         }
 
-        private static bool WriteBootstrapBackupIfChanged(string backupDirectory, string sql, string hash)
+        private static bool WriteBootstrapBackupIfChanged(string backupDirectory, BootstrapSqlScripts scripts, string hash)
         {
             Directory.CreateDirectory(backupDirectory);
-            var latestBackup = Directory.GetFiles(backupDirectory, "bootstrap-*.sql")
-                .Select(path => new FileInfo(path))
-                .OrderByDescending(file => file.LastWriteTimeUtc)
-                .ThenByDescending(file => file.Name, StringComparer.Ordinal)
+            var latestBackup = GetBootstrapBackupSets(backupDirectory)
+                .Where(backup => backup.IsComplete)
+                .OrderByDescending(backup => backup.LastWriteTimeUtc)
+                .ThenByDescending(backup => backup.Prefix, StringComparer.Ordinal)
                 .FirstOrDefault();
-            if (latestBackup is not null && ComputeFileHash(latestBackup.FullName) == hash)
+            if (latestBackup is not null && ComputeBootstrapBackupSetHash(latestBackup) == hash)
                 return false;
 
-            var backupPath = Path.Combine(
-                backupDirectory,
-                $"bootstrap-{DateTime.Now:yyyyMMdd-HHmmss-ffffff}-{hash[..12]}.sql");
-            WriteAllTextAtomic(backupPath, sql);
+            var backupPrefix = $"bootstrap-{DateTime.Now:yyyyMMdd-HHmmss-ffffff}-{hash[..12]}";
+            WriteAllTextAtomic(Path.Combine(backupDirectory, $"{backupPrefix}.schema.sql"), scripts.SchemaSql);
+            WriteAllTextAtomic(Path.Combine(backupDirectory, $"{backupPrefix}.fixed-data.sql"), scripts.FixedDataSql);
             return true;
         }
 
@@ -417,22 +418,43 @@ namespace MyBook
             if (!Directory.Exists(backupDirectory))
                 return;
 
+            var backupSets = GetBootstrapBackupSets(backupDirectory);
             var keptHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var keepPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var file in Directory.GetFiles(backupDirectory, "bootstrap-*.sql")
-                .Select(path => new FileInfo(path))
-                .OrderByDescending(file => file.LastWriteTimeUtc)
-                .ThenByDescending(file => file.Name, StringComparer.Ordinal))
+            var recognizedPaths = new HashSet<string>(
+                backupSets.SelectMany(backup => backup.Paths),
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (var backup in backupSets
+                .Where(backup => backup.IsComplete)
+                .OrderByDescending(backup => backup.LastWriteTimeUtc)
+                .ThenByDescending(backup => backup.Prefix, StringComparer.Ordinal))
             {
-                var hash = ComputeFileHash(file.FullName);
+                var hash = ComputeBootstrapBackupSetHash(backup);
                 if (keptHashes.Count < BootstrapBackupRetention && keptHashes.Add(hash))
                 {
-                    keepPaths.Add(file.FullName);
+                    foreach (var path in backup.Paths)
+                        keepPaths.Add(path);
                     continue;
                 }
 
-                if (!keepPaths.Contains(file.FullName))
-                    File.Delete(file.FullName);
+                foreach (var path in backup.Paths)
+                {
+                    if (!keepPaths.Contains(path))
+                        File.Delete(path);
+                }
+            }
+
+            foreach (var backup in backupSets.Where(backup => !backup.IsComplete))
+            {
+                foreach (var path in backup.Paths)
+                    File.Delete(path);
+            }
+
+            foreach (var path in Directory.GetFiles(backupDirectory, "bootstrap-*.sql"))
+            {
+                if (!recognizedPaths.Contains(path))
+                    File.Delete(path);
             }
         }
 
@@ -443,9 +465,51 @@ namespace MyBook
             File.Move(tempPath, path, true);
         }
 
-        private static string ComputeFileHash(string path)
+        private static string ComputeBootstrapBackupHash(BootstrapSqlScripts scripts)
         {
-            return ComputeContentHash(File.ReadAllText(path, Encoding.UTF8));
+            return ComputeContentHash(BuildBootstrapBackupHashContent(scripts.SchemaSql, scripts.FixedDataSql));
+        }
+
+        private static string ComputeBootstrapBackupSetHash(BootstrapBackupSet backup)
+        {
+            if (!backup.IsComplete)
+                throw new InvalidOperationException($"Incomplete bootstrap backup set: {backup.Prefix}");
+
+            return ComputeContentHash(BuildBootstrapBackupHashContent(
+                File.ReadAllText(backup.SchemaPath!, Encoding.UTF8),
+                File.ReadAllText(backup.FixedDataPath!, Encoding.UTF8)));
+        }
+
+        private static string BuildBootstrapBackupHashContent(string schemaSql, string fixedDataSql)
+        {
+            return schemaSql + "\n-- MyBook fixed-data backup boundary --\n" + fixedDataSql;
+        }
+
+        private static List<BootstrapBackupSet> GetBootstrapBackupSets(string backupDirectory)
+        {
+            if (!Directory.Exists(backupDirectory))
+                return [];
+
+            return Directory.GetFiles(backupDirectory, "bootstrap-*.sql")
+                .Select(path => (Path: path, Match: BootstrapBackupFileRegex.Match(Path.GetFileName(path))))
+                .Where(item => item.Match.Success)
+                .GroupBy(item => item.Match.Groups["prefix"].Value, StringComparer.OrdinalIgnoreCase)
+                .Select(group =>
+                {
+                    var first = group.First();
+                    var schemaPath = group
+                        .FirstOrDefault(item => String.Equals(item.Match.Groups["kind"].Value, "schema", StringComparison.OrdinalIgnoreCase))
+                        .Path;
+                    var fixedDataPath = group
+                        .FirstOrDefault(item => String.Equals(item.Match.Groups["kind"].Value, "fixed-data", StringComparison.OrdinalIgnoreCase))
+                        .Path;
+                    return new BootstrapBackupSet(
+                        first.Match.Groups["prefix"].Value,
+                        first.Match.Groups["hash"].Value,
+                        String.IsNullOrWhiteSpace(schemaPath) ? null : schemaPath,
+                        String.IsNullOrWhiteSpace(fixedDataPath) ? null : fixedDataPath);
+                })
+                .ToList();
         }
 
         private static string ComputeContentHash(string content)
@@ -4517,6 +4581,31 @@ namespace MyBook
             string ColumnName,
             string ReferencedTableName,
             string ReferencedColumnName);
+
+        private sealed record BootstrapBackupSet(
+            string Prefix,
+            string Hash,
+            string? SchemaPath,
+            string? FixedDataPath)
+        {
+            public bool IsComplete => SchemaPath is not null && FixedDataPath is not null;
+
+            public IEnumerable<string> Paths
+            {
+                get
+                {
+                    if (SchemaPath is not null)
+                        yield return SchemaPath;
+                    if (FixedDataPath is not null)
+                        yield return FixedDataPath;
+                }
+            }
+
+            public DateTime LastWriteTimeUtc => Paths
+                .Select(File.GetLastWriteTimeUtc)
+                .DefaultIfEmpty(DateTime.MinValue)
+                .Max();
+        }
     }
 
     class SnapshotData

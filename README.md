@@ -86,6 +86,7 @@ dotnet run --project MyBook\MyBook.csproj -- --export-bootstrap-sql
 ```
 
 `Database/bootstrap.fixed-data.sql` may contain private account metadata, so it is intentionally not tracked.
+Backup versions are kept as ignored `Database/bootstrap-*.schema.sql` and `Database/bootstrap-*.fixed-data.sql` file pairs.
 
 Clean volatile imported data while preserving fixed data:
 

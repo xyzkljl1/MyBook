@@ -15,7 +15,7 @@
 # 本地指令和临时记录，不随代码提交
 /AGENTS.md
 /TODO.md
-/DatabaseBackups/
+/Database/bootstrap-*.sql
 /Database/bootstrap.fixed-data.sql
 
 # 本地下载或拆分的银行/券商账单与测试报表
