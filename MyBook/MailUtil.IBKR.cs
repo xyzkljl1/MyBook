@@ -895,7 +895,6 @@ namespace MyBook
                 AssertIBKRMoneyEquals(positionTransfer, transferTotal.Total, "IBKR position transfer");
 
             AddIBKROtherFxTranslationRecord(report, builder, baseCurrency);
-            AddIBKRNavPrecisionResidualRecord(builder, baseCurrency, expectedNavChange);
             if (expectedNavChange != builder.NetAssetChangeTotal)
             {
                 throw new MailParseException(
@@ -903,29 +902,6 @@ namespace MyBook
             }
 
             return builder.Records;
-        }
-
-        private static void AddIBKRNavPrecisionResidualRecord(
-            IBKRRecordBuilder builder,
-            CurrencyType baseCurrency,
-            decimal expectedNavChange)
-        {
-            var residual = expectedNavChange - builder.NetAssetChangeTotal;
-            if (residual == 0)
-                return;
-            var absResidual = Math.Abs(residual);
-            var maximumResidual = builder.AllowLargeStatementResidual ? 100m : 1m;
-            if (absResidual > maximumResidual)
-                return;
-
-            var reason = absResidual <= 0.000001m
-                ? "报表精度差异"
-                : "报表分项口径差异";
-            builder.Add(
-                new Currency(residual, baseCurrency),
-                reason,
-                $"NavResidual/expected={expectedNavChange}/records={builder.NetAssetChangeTotal}",
-                destAccount: baseCurrency.ToString());
         }
 
         private static void AddIBKRPreciseFxTransactionRecord(
