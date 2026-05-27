@@ -1,0 +1,16 @@
+﻿{
+    "yahoo_user":  "",
+    "yahoo_pass":  "",
+    "alphavantage_key":  "",
+    "ib_gateway_port":  0,
+    "database_connection":  "",
+    "nexus_api_key":  "",
+    "gmail_user":  "",
+    "gmail_app_pwd":  "",
+    "nexus_oauth_client_id":  "",
+    "nexus_oauth_client_secret":  "",
+    "nexus_oauth_scope":  "",
+    "ocbc_statement_passwords":  [
+
+                                 ]
+}

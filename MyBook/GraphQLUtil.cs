@@ -3,6 +3,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 
 namespace MyBook
@@ -15,24 +16,34 @@ namespace MyBook
 
         private readonly IConfigurationRoot config;
         private readonly DatabaseUtil? database;
-        private readonly string nexusApiKey;
+        private readonly string? nexusApiKey;
 
         public GraphQLUtil(IConfigurationRoot config, DatabaseUtil? database = null)
         {
             this.config = config;
             this.database = database;
-            nexusApiKey = config["nexus_api_key"]
-                ?? throw new InvalidOperationException("Missing nexus_api_key in config.json");
-            if (String.IsNullOrWhiteSpace(nexusApiKey))
-                throw new InvalidOperationException("nexus_api_key in config.json is empty");
+            nexusApiKey = OptionalConfig("nexus_api_key");
         }
 
         private async Task<JObject> ExecuteNexusQuery(string query, object? variables = null)
         {
             using HttpClient client = new();
             client.Timeout = RequestTimeout;
-            client.DefaultRequestHeaders.Add("apikey", nexusApiKey);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0");
+            var accessToken = await GetNexusOAuthAccessToken();
+            if (!String.IsNullOrWhiteSpace(accessToken))
+            {
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            }
+            else if (!String.IsNullOrWhiteSpace(nexusApiKey))
+            {
+                client.DefaultRequestHeaders.Add("apikey", nexusApiKey);
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    "Missing Nexus credentials. Authorize Nexus OAuth token in database or configure nexus_api_key.");
+            }
 
             var requestBody = JsonConvert.SerializeObject(new
             {
@@ -62,6 +73,12 @@ namespace MyBook
             return String.Join("; ", errors
                 .Select(error => error["message"]?.ToString())
                 .Where(message => !String.IsNullOrWhiteSpace(message)));
+        }
+
+        private string? OptionalConfig(string key)
+        {
+            var value = config[key];
+            return String.IsNullOrWhiteSpace(value) ? null : value.Trim();
         }
     }
 }

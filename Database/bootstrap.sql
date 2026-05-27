@@ -29,6 +29,19 @@ CREATE TABLE `accountinternalids` (
   CONSTRAINT `fk_AccountInternalIds_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `oauthtokens` (
+  `Id` int NOT NULL AUTO_INCREMENT,
+  `provider` enum('Nexus') NOT NULL DEFAULT 'Nexus',
+  `accessToken` varchar(4096) NOT NULL DEFAULT '',
+  `refreshToken` varchar(4096) NOT NULL DEFAULT '',
+  `tokenType` varchar(32) NOT NULL DEFAULT 'Bearer',
+  `scope` varchar(1024) NOT NULL DEFAULT '',
+  `expiresAt` datetime(6) DEFAULT NULL,
+  `updateTime` datetime(6) NOT NULL,
+  PRIMARY KEY (`Id`),
+  UNIQUE KEY `unique_OAuthTokens_provider` (`provider`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE `finance` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `code` varchar(255) NOT NULL DEFAULT '',
