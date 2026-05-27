@@ -2,6 +2,8 @@
 
 MyBook is a local personal finance and asset tracking application. It imports statements from banks, broker reports, mail attachments, local files, and selected web APIs, then stores records, balances, holdings, snapshots, and fixed bootstrap data in MySQL.
 
+The project has been developed with extensive vibe coding using OpenAI GPT-5 Codex, plus a small amount of manual editing.
+
 ## Tech Stack
 
 - .NET 8 WPF desktop application
@@ -28,6 +30,7 @@ Local statements, downloaded reports, `config.json`, database backups, and other
 - `MailUtil.Wise` fetches Wise XML statements monthly from mailbox attachments and imports per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers.
 - `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines.
 - `MailUtil.PayPal` fetches PayPal mail statements monthly from configured mailbox messages and imports supported PayPal payment events for configured PayPal accounts.
+- `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly reports through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
 - `LocalUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
 - `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
@@ -143,6 +146,7 @@ The following modules are intentionally present as placeholders or not-yet-compl
 
 - `GraphQLUtil.NexusOAuth.TODO.cs`
 - `LocalUtil.WeChat.TODO.cs`
+- `MailUtil.Steam.TODO.cs`
 - `WebUtil.Bilibili.TODO.cs`
 - `WebUtil.Meituan.TODO.cs`
 
