@@ -1,7 +1,10 @@
 using Microsoft.Extensions.Configuration;
 using SqlSugar;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 
@@ -17,9 +20,13 @@ namespace MyBook
         private const string InitializationRecordSourcePrefix = "InitialRecord/";
         private const string InitialHoldingReason = "Initial holding";
         private const string InitialCashBalanceReason = "Initial cash balance";
+        private const int BootstrapBackupRetention = 3;
+        private const string BootstrapSqlRelativePath = "Database/bootstrap.sql";
+        private const string BootstrapBackupDirectoryName = "DatabaseBackups";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
         private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(Snapshot), typeof(SnapshotItem)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -36,22 +43,52 @@ namespace MyBook
 
         public DatabaseUtil(IConfigurationRoot config)
         {
-            var connectionString = config["database_connection"]
+            db = CreateDatabaseClient(GetDatabaseConnectionString(config));
+            DbValidateSchema();
+            DbValidateForeignKeys();
+            ValidateAccountPrimaryRelations();
+            DbValidateAccountBalancesViewDefinition();
+            ValidateAllAccountBalancesFromHoldings();
+        }
+
+        public static void DbRebuildFromBootstrapSql(IConfigurationRoot config)
+        {
+            var bootstrapPath = Path.Combine(FindWorkspaceRoot(), BootstrapSqlRelativePath);
+            if (!File.Exists(bootstrapPath))
+                throw new FileNotFoundException($"Missing bootstrap SQL: {bootstrapPath}", bootstrapPath);
+
+            var db = CreateDatabaseClient(GetDatabaseConnectionString(config));
+            db.DbMaintenance.CreateDatabase();
+            var objectCount = db.Ado.GetInt("""
+                select count(*)
+                from information_schema.tables
+                where table_schema = database()
+                """);
+            if (objectCount != 0)
+                throw new InvalidOperationException("Refuse to rebuild database because the target database is not empty.");
+
+            foreach (var statement in SplitSqlStatements(File.ReadAllText(bootstrapPath, Encoding.UTF8)))
+                db.Ado.ExecuteCommand(statement);
+
+            _ = new DatabaseUtil(config);
+        }
+
+        private static string GetDatabaseConnectionString(IConfigurationRoot config)
+        {
+            return config["database_connection"]
                 ?? config.GetConnectionString("Default")
                 ?? DefaultConnectionString;
+        }
 
-            db = new SqlSugarClient(new ConnectionConfig
+        private static SqlSugarClient CreateDatabaseClient(string connectionString)
+        {
+            return new SqlSugarClient(new ConnectionConfig
             {
                 ConnectionString = connectionString,
                 DbType = DbType.MySql,
                 InitKeyType = InitKeyType.Attribute,
                 IsAutoCloseConnection = true
             });
-            DbValidateSchema();
-            DbValidateForeignKeys();
-            ValidateAccountPrimaryRelations();
-            DbValidateAccountBalancesViewDefinition();
-            ValidateAllAccountBalancesFromHoldings();
         }
 
         private T ExecuteLockedTransaction<T>(Func<T> action)
@@ -101,6 +138,446 @@ namespace MyBook
                 throw new ArgumentException("Debug SQL is empty.", nameof(sql));
 
             return ExecuteLockedTransaction(() => db.Ado.ExecuteCommand(sql));
+        }
+
+        public BootstrapSqlBackupResult EnsureBootstrapSqlBackupIfChanged(string reason)
+        {
+            var sql = ExecuteLockedTransaction(BuildBootstrapSql);
+            var workspaceRoot = FindWorkspaceRoot();
+            var bootstrapPath = Path.Combine(workspaceRoot, BootstrapSqlRelativePath);
+            var backupDirectory = Path.Combine(workspaceRoot, BootstrapBackupDirectoryName);
+            var hash = ComputeContentHash(sql);
+
+            var bootstrapChanged = WriteTextIfChanged(bootstrapPath, sql);
+            var backupWritten = WriteBootstrapBackupIfChanged(backupDirectory, sql, hash);
+            PruneBootstrapBackups(backupDirectory);
+
+            return new BootstrapSqlBackupResult(
+                bootstrapPath,
+                backupDirectory,
+                hash,
+                bootstrapChanged,
+                backupWritten,
+                reason);
+        }
+
+        private string BuildBootstrapSql()
+        {
+            DbValidateSchema();
+            DbValidateForeignKeys();
+            ValidateAccountPrimaryRelations();
+            DbValidateAccountBalancesViewDefinition();
+            ValidateAllAccountBalancesFromHoldings();
+
+            var builder = new StringBuilder();
+            builder.AppendLine("-- MyBook bootstrap SQL. Schema plus fixed data only.");
+            builder.AppendLine("-- Generated by MyBook; keep this file in sync with database structure.");
+            builder.AppendLine("SET NAMES utf8mb4;");
+            builder.AppendLine("SET FOREIGN_KEY_CHECKS=0;");
+            builder.AppendLine();
+
+            foreach (var type in SchemaTableTypes)
+            {
+                builder.AppendLine(NormalizeCreateTableSql(GetTableCreateSql(GetTableName(type))));
+                builder.AppendLine();
+            }
+
+            builder.AppendLine(NormalizeCreateViewSql(GetViewCreateSql("AccountBalances")));
+            builder.AppendLine();
+
+            AppendFixedDataSql(builder);
+            builder.AppendLine("SET FOREIGN_KEY_CHECKS=1;");
+
+            return builder.ToString().ReplaceLineEndings("\n");
+        }
+
+        private string GetTableCreateSql(string tableName)
+        {
+            var result = db.Ado.GetDataTable($"show create table `{tableName}`");
+            if (result.Rows.Count == 0)
+                throw new InvalidOperationException($"Database schema mismatch: missing table {tableName}");
+
+            foreach (System.Data.DataColumn column in result.Columns)
+            {
+                if (String.Equals(column.ColumnName, "Create Table", StringComparison.OrdinalIgnoreCase))
+                    return result.Rows[0][column]?.ToString() ?? "";
+            }
+
+            throw new InvalidOperationException($"Database schema mismatch: cannot read create SQL for table {tableName}");
+        }
+
+        private static string NormalizeCreateTableSql(string sql)
+        {
+            var normalized = sql.Trim().TrimEnd(';');
+            normalized = Regex.Replace(normalized, @"\sAUTO_INCREMENT=\d+", "", RegexOptions.IgnoreCase);
+            return normalized + ";";
+        }
+
+        private static string NormalizeCreateViewSql(string sql)
+        {
+            var normalized = sql.Trim().TrimEnd(';');
+            normalized = Regex.Replace(
+                normalized,
+                @"\sDEFINER=`[^`]+`@`[^`]+`",
+                "",
+                RegexOptions.IgnoreCase);
+            return normalized + ";";
+        }
+
+        private void AppendFixedDataSql(StringBuilder builder)
+        {
+            var accounts = db.Queryable<Account>()
+                .OrderBy(account => account.Id)
+                .ToList();
+            AppendInsertSql(
+                builder,
+                "Accounts",
+                ["Id", "name", "desc", "email", "relativeBalance", "isCredit", "usage", "_primaryAccount_Id"],
+                accounts.Select(account => new[]
+                {
+                    SqlValue(account.Id),
+                    SqlValue(account.name),
+                    SqlValue(account.desc),
+                    SqlValue(account.email),
+                    SqlValue(account.relativeBalance),
+                    SqlValue(account.isCredit),
+                    SqlValue(account.usage),
+                    SqlValue(account._primaryAccount_Id)
+                }));
+
+            var fixedImports = GetFixedStatementImports();
+            AppendInsertSql(
+                builder,
+                "StatementImports",
+                ["Id", "provider", "time", "statementKey"],
+                fixedImports.Select(statementImport => new[]
+                {
+                    SqlValue(statementImport.Id),
+                    SqlValue(statementImport.provider),
+                    SqlValue(statementImport.time),
+                    SqlValue(statementImport.statementKey)
+                }));
+        }
+
+        private static void AppendInsertSql(
+            StringBuilder builder,
+            string tableName,
+            IReadOnlyList<string> columns,
+            IEnumerable<IReadOnlyList<string>> rows)
+        {
+            var rowList = rows.ToList();
+            if (rowList.Count == 0)
+            {
+                builder.AppendLine($"-- No fixed data for `{tableName}`.");
+                builder.AppendLine();
+                return;
+            }
+
+            builder.Append("INSERT INTO `");
+            builder.Append(tableName);
+            builder.Append("` (");
+            builder.Append(String.Join(", ", columns.Select(column => $"`{column}`")));
+            builder.AppendLine(") VALUES");
+            for (var i = 0; i < rowList.Count; i++)
+            {
+                builder.Append("  (");
+                builder.Append(String.Join(", ", rowList[i]));
+                builder.Append(i == rowList.Count - 1 ? ");" : "),");
+                builder.AppendLine();
+            }
+
+            builder.AppendLine();
+        }
+
+        private List<StatementImport> GetFixedStatementImports()
+        {
+            return db.Ado.SqlQuery<StatementImport>("""
+                select statementImport.`Id`, statementImport.`provider`, statementImport.`time`, statementImport.`statementKey`
+                from `StatementImports` statementImport
+                join (
+                    select candidate.`provider`, min(candidate.`Id`) as `Id`
+                    from `StatementImports` candidate
+                    join (
+                        select `provider`, min(`time`) as `time`
+                        from `StatementImports`
+                        group by `provider`
+                    ) earliest
+                        on candidate.`provider` = earliest.`provider`
+                        and candidate.`time` = earliest.`time`
+                    group by candidate.`provider`
+                ) fixedImport
+                    on statementImport.`Id` = fixedImport.`Id`
+                order by statementImport.`Id`
+                """);
+        }
+
+        private static string SqlValue(int value)
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string SqlValue(int? value)
+        {
+            return value.HasValue ? SqlValue(value.Value) : "NULL";
+        }
+
+        private static string SqlValue(bool value)
+        {
+            return value ? "1" : "0";
+        }
+
+        private static string SqlValue(DateTime value)
+        {
+            return "'" + value.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + "'";
+        }
+
+        private static string SqlValue(Enum value)
+        {
+            return SqlValue(value.ToString());
+        }
+
+        private static string SqlValue(string? value)
+        {
+            if (value is null)
+                return "NULL";
+
+            return "'" + value
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("'", "''", StringComparison.Ordinal)
+                + "'";
+        }
+
+        private static bool WriteTextIfChanged(string path, string content)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            if (File.Exists(path) && File.ReadAllText(path, Encoding.UTF8) == content)
+                return false;
+
+            WriteAllTextAtomic(path, content);
+            return true;
+        }
+
+        private static bool WriteBootstrapBackupIfChanged(string backupDirectory, string sql, string hash)
+        {
+            Directory.CreateDirectory(backupDirectory);
+            var latestBackup = Directory.GetFiles(backupDirectory, "bootstrap-*.sql")
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .ThenByDescending(file => file.Name, StringComparer.Ordinal)
+                .FirstOrDefault();
+            if (latestBackup is not null && ComputeFileHash(latestBackup.FullName) == hash)
+                return false;
+
+            var backupPath = Path.Combine(
+                backupDirectory,
+                $"bootstrap-{DateTime.Now:yyyyMMdd-HHmmss-ffffff}-{hash[..12]}.sql");
+            WriteAllTextAtomic(backupPath, sql);
+            return true;
+        }
+
+        private static void PruneBootstrapBackups(string backupDirectory)
+        {
+            if (!Directory.Exists(backupDirectory))
+                return;
+
+            var keptHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var keepPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.GetFiles(backupDirectory, "bootstrap-*.sql")
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .ThenByDescending(file => file.Name, StringComparer.Ordinal))
+            {
+                var hash = ComputeFileHash(file.FullName);
+                if (keptHashes.Count < BootstrapBackupRetention && keptHashes.Add(hash))
+                {
+                    keepPaths.Add(file.FullName);
+                    continue;
+                }
+
+                if (!keepPaths.Contains(file.FullName))
+                    File.Delete(file.FullName);
+            }
+        }
+
+        private static void WriteAllTextAtomic(string path, string content)
+        {
+            var tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(tempPath, content, new UTF8Encoding(false));
+            File.Move(tempPath, path, true);
+        }
+
+        private static string ComputeFileHash(string path)
+        {
+            return ComputeContentHash(File.ReadAllText(path, Encoding.UTF8));
+        }
+
+        private static string ComputeContentHash(string content)
+        {
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
+        }
+
+        private static List<string> SplitSqlStatements(string sql)
+        {
+            var statements = new List<string>();
+            var current = new StringBuilder();
+            var inSingleQuote = false;
+            var inDoubleQuote = false;
+            var inBacktick = false;
+            var inLineComment = false;
+            var inBlockComment = false;
+
+            for (var i = 0; i < sql.Length; i++)
+            {
+                var c = sql[i];
+                var next = i + 1 < sql.Length ? sql[i + 1] : '\0';
+
+                if (inLineComment)
+                {
+                    current.Append(c);
+                    if (c == '\n')
+                        inLineComment = false;
+                    continue;
+                }
+
+                if (inBlockComment)
+                {
+                    current.Append(c);
+                    if (c == '*' && next == '/')
+                    {
+                        current.Append(next);
+                        i++;
+                        inBlockComment = false;
+                    }
+                    continue;
+                }
+
+                if (inSingleQuote)
+                {
+                    current.Append(c);
+                    if (c == '\\' && next != '\0')
+                    {
+                        current.Append(next);
+                        i++;
+                    }
+                    else if (c == '\'')
+                    {
+                        if (next == '\'')
+                        {
+                            current.Append(next);
+                            i++;
+                        }
+                        else
+                        {
+                            inSingleQuote = false;
+                        }
+                    }
+                    continue;
+                }
+
+                if (inDoubleQuote)
+                {
+                    current.Append(c);
+                    if (c == '\\' && next != '\0')
+                    {
+                        current.Append(next);
+                        i++;
+                    }
+                    else if (c == '"')
+                    {
+                        inDoubleQuote = false;
+                    }
+                    continue;
+                }
+
+                if (inBacktick)
+                {
+                    current.Append(c);
+                    if (c == '`')
+                        inBacktick = false;
+                    continue;
+                }
+
+                if (c == '-' && next == '-')
+                {
+                    current.Append(c);
+                    current.Append(next);
+                    i++;
+                    inLineComment = true;
+                    continue;
+                }
+
+                if (c == '#')
+                {
+                    current.Append(c);
+                    inLineComment = true;
+                    continue;
+                }
+
+                if (c == '/' && next == '*')
+                {
+                    current.Append(c);
+                    current.Append(next);
+                    i++;
+                    inBlockComment = true;
+                    continue;
+                }
+
+                if (c == '\'')
+                {
+                    current.Append(c);
+                    inSingleQuote = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    current.Append(c);
+                    inDoubleQuote = true;
+                    continue;
+                }
+
+                if (c == '`')
+                {
+                    current.Append(c);
+                    inBacktick = true;
+                    continue;
+                }
+
+                if (c == ';')
+                {
+                    var statement = current.ToString().Trim();
+                    if (!String.IsNullOrWhiteSpace(statement))
+                        statements.Add(statement);
+                    current.Clear();
+                    continue;
+                }
+
+                current.Append(c);
+            }
+
+            var tail = current.ToString().Trim();
+            if (!String.IsNullOrWhiteSpace(tail))
+                statements.Add(tail);
+
+            return statements;
+        }
+
+        private static string FindWorkspaceRoot()
+        {
+            foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory }.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var directory = new DirectoryInfo(start);
+                while (directory is not null)
+                {
+                    if (File.Exists(Path.Combine(directory.FullName, "AGENTS.md"))
+                        && File.Exists(Path.Combine(directory.FullName, "MyBook", "MyBook.csproj")))
+                        return directory.FullName;
+
+                    directory = directory.Parent;
+                }
+            }
+
+            return Directory.GetCurrentDirectory();
         }
 
         private void AcquireDatabaseWriteLock()
@@ -3947,6 +4424,14 @@ namespace MyBook
         public Dictionary<string, int> AfterCounts { get; }
         public List<StatementImport> FixedStatementImports { get; }
     }
+
+    sealed record BootstrapSqlBackupResult(
+        string BootstrapPath,
+        string BackupDirectory,
+        string Hash,
+        bool BootstrapChanged,
+        bool BackupWritten,
+        string Reason);
 
     class StatementRecordHoldingImport
     {
