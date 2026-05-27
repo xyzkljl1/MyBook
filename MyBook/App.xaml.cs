@@ -40,6 +40,46 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--export-bootstrap-sql", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    var result = new DatabaseUtil(config).EnsureBootstrapSqlBackupIfChanged("manual export");
+                    WriteBootstrapSqlBackupResult(result);
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"Export bootstrap SQL failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
+            if (e.Args.Any(arg => arg.Equals("--rebuild-database-from-bootstrap-sql", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    DatabaseUtil.DbRebuildFromBootstrapSql(config);
+                    Console.WriteLine("Rebuilt database from bootstrap SQL.");
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"Rebuild database from bootstrap SQL failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
             if (e.Args.Any(arg => arg.Equals("--debug-sql", StringComparison.OrdinalIgnoreCase))
                 || e.Args.Any(arg => arg.StartsWith("--debug-sql=", StringComparison.OrdinalIgnoreCase))
                 || e.Args.Any(arg => arg.Equals("--debug-sql-file", StringComparison.OrdinalIgnoreCase))
@@ -241,6 +281,9 @@ namespace MyBook
                         : mail.FetchPayPalReports(ParseMonthArgument(month))))
                 return;
 
+            var startupConfig = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+            new DatabaseUtil(startupConfig).EnsureBootstrapSqlBackupIfChanged("startup");
+
             MainWindow = new MainWindow();
             MainWindow.Show();
         }
@@ -293,6 +336,15 @@ namespace MyBook
             Console.WriteLine("Fixed StatementImports:");
             foreach (var statementImport in result.FixedStatementImports)
                 Console.WriteLine($"{statementImport.Id} {statementImport.provider} {statementImport.time:yyyy-MM-dd HH:mm:ss.ffffff}");
+        }
+
+        private static void WriteBootstrapSqlBackupResult(BootstrapSqlBackupResult result)
+        {
+            Console.WriteLine($"Bootstrap SQL: {result.BootstrapPath}");
+            Console.WriteLine($"Backup directory: {result.BackupDirectory}");
+            Console.WriteLine($"Hash: {result.Hash}");
+            Console.WriteLine($"Bootstrap changed: {result.BootstrapChanged}");
+            Console.WriteLine($"Backup written: {result.BackupWritten}");
         }
 
         private static int? ReadCleanToSnapshotId(string[] args)
