@@ -8,6 +8,7 @@ using System.Text;
 
 namespace MyBook
 {
+    // TODO: Nexus OAuth flow is implemented but not remotely verified until a valid client id is available.
     partial class GraphQLUtil
     {
         // Do not change this URI unless the Nexus OAuth app redirect URI is changed too.
