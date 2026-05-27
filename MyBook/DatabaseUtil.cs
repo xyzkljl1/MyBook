@@ -3552,12 +3552,14 @@ namespace MyBook
         public DatabaseCleanupResult CleanVolatileData(int? cleanToSnapshotId = null)
         {
             var beforeCounts = ReadCleanupCounts();
+            var preservedFinance = ReadFinancePreservationItems();
             ExecuteLockedTransaction(() =>
             {
                 if (cleanToSnapshotId.HasValue)
                     CleanToSnapshotCore(cleanToSnapshotId.Value);
                 else
                     CleanToStartSnapshotCore();
+                ValidateFinancePreserved(preservedFinance);
             });
 
             return new DatabaseCleanupResult(
@@ -3567,6 +3569,28 @@ namespace MyBook
                     .OrderBy(it => it.provider)
                     .OrderBy(it => it.time)
                     .ToList());
+        }
+
+        private List<FinancePreservationItem> ReadFinancePreservationItems()
+        {
+            return db.Queryable<Finance>()
+                .OrderBy(finance => finance.Id)
+                .ToList()
+                .Select(finance => new FinancePreservationItem(
+                    finance.Id,
+                    finance.code,
+                    finance.holdingType,
+                    finance._currentPrice_v,
+                    finance._currentPrice_t,
+                    finance.currentPriceTime))
+                .ToList();
+        }
+
+        private void ValidateFinancePreserved(List<FinancePreservationItem> expected)
+        {
+            var actual = ReadFinancePreservationItems();
+            if (!expected.SequenceEqual(actual))
+                throw new InvalidOperationException("Database cleanup must not change Finance rows.");
         }
 
         private void CleanToStartSnapshotCore()
@@ -4581,6 +4605,14 @@ namespace MyBook
             string ColumnName,
             string ReferencedTableName,
             string ReferencedColumnName);
+
+        private sealed record FinancePreservationItem(
+            int Id,
+            string Code,
+            HoldingType HoldingType,
+            decimal CurrentPriceValue,
+            CurrencyType CurrentPriceCurrency,
+            long CurrentPriceTime);
 
         private sealed record BootstrapBackupSet(
             string Prefix,
