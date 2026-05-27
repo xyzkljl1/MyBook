@@ -581,7 +581,17 @@ namespace MyBook
                 preciseNav.StartingCash,
                 useBeginningValues: true);
             var holdings = ParseIBKRHoldings(report, account, baseCurrency, positionHoldings, sourceName, preciseNav.EndingCash);
-            var records = ParseIBKRRecords(report, account, baseCurrency, contractInfos, reportDate.Date, sourceName, preciseNav.End - preciseNav.Start, isInitialReport);
+            var records = ParseIBKRRecords(
+                report,
+                account,
+                baseCurrency,
+                contractInfos,
+                reportDate.Date,
+                sourceName,
+                preciseNav.End - preciseNav.Start,
+                preciseNav.StartingCash,
+                preciseNav.EndingCash,
+                isInitialReport);
             var internalCardNos = new List<AccountInternalId>
             {
                 new()
@@ -811,6 +821,8 @@ namespace MyBook
             DateTime reportDate,
             string sourceName,
             decimal expectedNavChange,
+            decimal preciseStartingCash,
+            decimal preciseEndingCash,
             bool isInitialReport)
         {
             var builder = new IBKRRecordBuilder(account, reportDate, sourceName, baseCurrency, isInitialReport);
@@ -824,6 +836,14 @@ namespace MyBook
             var dividendAccrualChangeTotal = ParseIBKRDividendAccrualChangeRecords(report, builder, baseCurrency, contractInfos);
             var transferTotal = ParseIBKRTransferRecords(report, builder, baseCurrency, account, contractInfos);
             var cashTotals = ParseIBKRCashRecords(report, builder, baseCurrency, tradeTotals, commissionTotals);
+            AddIBKRPreciseFxTransactionRecord(
+                builder,
+                baseCurrency,
+                preciseStartingCash,
+                preciseEndingCash,
+                tradeTotals,
+                mtmTotals,
+                cashTotals);
 
             if (mtmTotals.HasData)
             {
@@ -905,6 +925,54 @@ namespace MyBook
                 new Currency(residual, baseCurrency),
                 reason,
                 $"NavResidual/expected={expectedNavChange}/records={builder.NetAssetChangeTotal}",
+                destAccount: baseCurrency.ToString());
+        }
+
+        private static void AddIBKRPreciseFxTransactionRecord(
+            IBKRRecordBuilder builder,
+            CurrencyType baseCurrency,
+            decimal preciseStartingCash,
+            decimal preciseEndingCash,
+            IBKRTransactionTotals tradeTotals,
+            IBKRMtmTotals mtmTotals,
+            IBKRCashTotals cashTotals)
+        {
+            if (!tradeTotals.HasFxTrades && mtmTotals.FxTransaction == 0)
+                return;
+            if (!mtmTotals.HasData)
+                throw new MailParseException("Parse IBKR Report Fail, FX trades without MTM data");
+
+            AssertIBKRMoneyWithin(
+                mtmTotals.CashFxTranslation,
+                cashTotals.CashFxTranslation,
+                0.0000001m,
+                "IBKR cash FX translation display");
+
+            var cashReportFxTransaction = cashTotals.TradeBuy + cashTotals.TradeSell - tradeTotals.StockBondProceeds;
+            var preciseFxTransaction =
+                preciseEndingCash
+                - preciseStartingCash
+                - cashTotals.NonTradeCashFlow
+                - tradeTotals.StockBondProceeds
+                - mtmTotals.CashFxTranslation;
+
+            AssertIBKRMoneyWithin(
+                preciseFxTransaction,
+                cashReportFxTransaction,
+                0.0000001m,
+                "IBKR cash report implied FX transaction");
+
+            var displayTolerance = Math.Max(0.00001m, mtmTotals.FxTransactionDisplayUnit * 10);
+            AssertIBKRMoneyWithin(
+                preciseFxTransaction,
+                mtmTotals.FxTransaction,
+                displayTolerance,
+                "IBKR MTM FX transaction display");
+
+            builder.Add(
+                new Currency(preciseFxTransaction, baseCurrency),
+                "交易价格影响",
+                $"FxTransaction/precise={preciseFxTransaction}/cashReport={cashReportFxTransaction}/mtm={mtmTotals.FxTransaction}",
                 destAccount: baseCurrency.ToString());
         }
 
@@ -1031,7 +1099,7 @@ namespace MyBook
         {
             var rows = report.OptionalDataRows("按市值计算的表现总结").ToList();
             if (rows.Count == 0)
-                return new IBKRMtmTotals(false, 0, 0, 0, 0);
+                return new IBKRMtmTotals(false, 0, 0, 0, 0, 0, 0, 0);
 
             var cashFxTranslation = ParseIBKRCashFxTranslation(report, baseCurrency);
             decimal holdingTotal = 0;
@@ -1039,6 +1107,8 @@ namespace MyBook
             decimal commissionTotal = 0;
             decimal otherTotal = 0;
             decimal brokerInterestOtherTotal = 0;
+            decimal fxTransactionTotal = 0;
+            decimal fxTransactionDisplayUnit = 0;
             decimal? grandHoldingTotal = null;
             decimal? grandTransactionTotal = null;
             decimal? grandCommissionTotal = null;
@@ -1088,15 +1158,19 @@ namespace MyBook
                 transactionTotal += transaction;
                 commissionTotal += commission;
                 otherTotal += other;
-                if (assetClass != "外汇")
+                if (assetClass == "外汇")
                 {
-                    builder.Add(
-                        new Currency(holding, baseCurrency),
-                        "持仓价格变动",
-                        $"MTM/{FormatIBKRCsvRow(row)}",
-                        destAccount: contract!.Code,
-                        holding: contract);
+                    fxTransactionTotal += transaction;
+                    fxTransactionDisplayUnit = Math.Max(fxTransactionDisplayUnit, GetIBKRReportFieldUnit(row.Fields[7]));
+                    continue;
                 }
+
+                builder.Add(
+                    new Currency(holding, baseCurrency),
+                    "持仓价格变动",
+                    $"MTM/{FormatIBKRCsvRow(row)}",
+                    destAccount: contract!.Code,
+                    holding: contract);
 
                 var holdingKey = contract is null
                     ? $"FX\t{row.Fields[1]}"
@@ -1141,7 +1215,7 @@ namespace MyBook
                 "现金外汇换算收益/损失",
                 $"CashFxTranslation/{cashFxTranslation}",
                 destAccount: baseCurrency.ToString());
-            return new IBKRMtmTotals(true, holdingTotal, transactionTotal, commissionTotal, otherTotal + brokerInterestOtherTotal);
+            return new IBKRMtmTotals(true, holdingTotal, transactionTotal, commissionTotal, otherTotal + brokerInterestOtherTotal, cashFxTranslation, fxTransactionTotal, fxTransactionDisplayUnit);
         }
 
         private static decimal ParseIBKRCashFxTranslation(IBKRCsvReport report, CurrencyType baseCurrency)
@@ -1278,10 +1352,11 @@ namespace MyBook
             var rows = report.OptionalDataRows("按代码显示的交易总结").ToList();
             var assetRows = report.OptionalDataRows("按资产类型显示的交易总结").ToList();
             if (rows.Count == 0 && assetRows.Count == 0)
-                return new IBKRTransactionTotals(false, 0, 0, 0, 0, 0, false, []);
+                return new IBKRTransactionTotals(false, 0, 0, 0, 0, 0, 0, false, []);
 
             decimal buyTotal = 0;
             decimal sellTotal = 0;
+            decimal stockBondProceeds = 0;
             int buyQuantity = 0;
             int sellQuantity = 0;
             decimal? reportedBuyTotal = null;
@@ -1310,6 +1385,7 @@ namespace MyBook
                     hasFxTrades = true;
                 if (assetClass is "股票" or "债券")
                 {
+                    stockBondProceeds += rowBuyTotal + rowSellTotal;
                     var rawBuyQuantity = ParseIBKRIntegerQuantityOrZero(row.Fields[3], "trade buy quantity", row);
                     var rawSellQuantity = ParseIBKRIntegerQuantityOrZero(row.Fields[6], "trade sell quantity", row);
                     buyQuantity += rawBuyQuantity;
@@ -1356,7 +1432,7 @@ namespace MyBook
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Trade Asset Summary Class: {FormatIBKRCsvRow(row)}");
             }
 
-            return new IBKRTransactionTotals(true, buyTotal + sellTotal, buyTotal, sellTotal, 0, buyQuantity + sellQuantity, hasFxTrades, trades);
+            return new IBKRTransactionTotals(true, buyTotal + sellTotal, buyTotal, sellTotal, stockBondProceeds, 0, buyQuantity + sellQuantity, hasFxTrades, trades);
         }
 
         private IBKRCommissionTotals ParseIBKRCommissionRecords(
@@ -1766,6 +1842,8 @@ namespace MyBook
             decimal commission = 0;
             decimal tradeBuy = 0;
             decimal tradeSell = 0;
+            decimal nonTradeCashFlow = 0;
+            decimal cashFxTranslation = 0;
             foreach (var row in rows)
             {
                 AssertIBKRCashReportFieldCount(row);
@@ -1787,6 +1865,7 @@ namespace MyBook
                         break;
                     case "佣金":
                         commission += amount;
+                        nonTradeCashFlow += amount;
                         if (!commissionTotals.HasData && amount != 0)
                         {
                             throw new MailParseException(
@@ -1805,9 +1884,11 @@ namespace MyBook
                     case "股息":
                     case "代替股息的支付":
                     case "代扣税款":
+                        nonTradeCashFlow += amount;
                         builder.Add(new Currency(amount, baseCurrency), label, $"CashReport/{FormatIBKRCsvRow(row)}", destAccount: baseCurrency.ToString());
                         break;
                     case "现金外汇换算收益/损失":
+                        cashFxTranslation += amount;
                         // 已由 MTM 外汇行体现，避免同一基础货币折算影响重复生成 record。
                         break;
                     case "存款":
@@ -1816,6 +1897,7 @@ namespace MyBook
                     case "转出":
                     case "内部转账":
                     case "账户转账":
+                        nonTradeCashFlow += amount;
                         builder.Add(
                             new Currency(amount, baseCurrency),
                             label,
@@ -1834,7 +1916,7 @@ namespace MyBook
                 AssertIBKRMoneyEquals(tradeSell, transactionTotals.SellProceeds, "IBKR cash sell transactions");
             }
 
-            return new IBKRCashTotals(commission, tradeBuy, tradeSell);
+            return new IBKRCashTotals(commission, tradeBuy, tradeSell, nonTradeCashFlow, cashFxTranslation);
         }
 
         private List<Holding> ParseIBKRHoldings(
@@ -2960,6 +3042,15 @@ namespace MyBook
                 throw new MailParseException($"Parse IBKR Report Fail, {context} mismatch: expected {expected}, got {actual}");
         }
 
+        private static void AssertIBKRMoneyWithin(decimal expected, decimal actual, decimal tolerance, string context)
+        {
+            if (Math.Abs(expected - actual) > tolerance)
+            {
+                throw new MailParseException(
+                    $"Parse IBKR Report Fail, {context} mismatch: expected {expected}, got {actual}, tolerance {tolerance}");
+            }
+        }
+
         private static void AssertIBKRMoneyDisplayEquals(decimal preciseValue, decimal displayedValue, string context)
         {
             var roundedPreciseValue = RoundIBKRMoneyForReportDisplay(preciseValue);
@@ -3175,7 +3266,15 @@ namespace MyBook
             decimal CurrentMarketValue,
             decimal PriorPositionRateImpact);
 
-        private sealed record IBKRMtmTotals(bool HasData, decimal Holding, decimal Transaction, decimal Commission, decimal Other);
+        private sealed record IBKRMtmTotals(
+            bool HasData,
+            decimal Holding,
+            decimal Transaction,
+            decimal Commission,
+            decimal Other,
+            decimal CashFxTranslation,
+            decimal FxTransaction,
+            decimal FxTransactionDisplayUnit);
 
         private sealed record IBKRPositionQuantityChangeTotals(
             Dictionary<string, decimal> CoveredTransactionImpacts,
@@ -3188,6 +3287,7 @@ namespace MyBook
             decimal Proceeds,
             decimal BuyProceeds,
             decimal SellProceeds,
+            decimal StockBondProceeds,
             decimal Commission,
             int Quantity,
             bool HasFxTrades,
@@ -3231,7 +3331,12 @@ namespace MyBook
 
         private sealed record IBKRInterestTotals(bool HasData, decimal Total);
 
-        private sealed record IBKRCashTotals(decimal Commission, decimal TradeBuy, decimal TradeSell);
+        private sealed record IBKRCashTotals(
+            decimal Commission,
+            decimal TradeBuy,
+            decimal TradeSell,
+            decimal NonTradeCashFlow,
+            decimal CashFxTranslation);
 
         private sealed record IBKRTransferTotals(bool HasData, decimal Total);
 
