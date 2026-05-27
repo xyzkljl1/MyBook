@@ -40,6 +40,7 @@ namespace MyBook
 
         public async Task FetchWiseReports()
         {
+            ImportWiseInitialReportsIfNeeded();
             await FetchMonthlyStatements(WiseProvider, "Wise statement", FetchWiseReport);
         }
 
@@ -51,13 +52,7 @@ namespace MyBook
         public void DebugFetchLocalWiseReports(string? directory = null)
         {
             var files = FindLocalWiseStatementXmlFiles(directory);
-            var attachments = files
-                .Select(file => new InMemoryWiseStatementAttachment(
-                    Path.GetFileName(file),
-                    null,
-                    File.ReadAllBytes(file)))
-                .ToList();
-            var parsed = ParseWiseStatementAttachments(attachments)
+            var parsed = ParseWiseStatementFiles(files)
                 .OrderBy(statement => statement.StatementStartDate)
                 .ThenBy(statement => statement.StatementEndDate)
                 .ToList();
@@ -66,6 +61,40 @@ namespace MyBook
 
             var saved = SaveWiseParsedStatement(parsed[0]);
             PrintWiseParsedStatementSummary("Local Wise XML", parsed[0], saved);
+        }
+
+        private bool ImportWiseInitialReportsIfNeeded()
+        {
+            var account = database.GetAccountByName(WiseAccountName);
+            if (database.HasAccountHistory(account))
+                return false;
+
+            var statements = LoadWiseInitialStatements();
+            if (statements.Count == 0)
+                throw new FileNotFoundException($"No local Wise initial XML statement found in {InitialReportDirectoryName}.");
+
+            foreach (var statement in statements)
+            {
+                var saved = SaveWiseParsedStatement(statement);
+                PrintWiseParsedStatementSummary("Wise initial XML", statement, saved);
+            }
+
+            return true;
+        }
+
+        private List<WiseParsedStatement> LoadWiseInitialStatements()
+        {
+            var files = FindWiseInitialStatementXmlFiles();
+            if (files.Count == 0)
+                return [];
+
+            var statements = ParseWiseStatementFiles(files)
+                .OrderBy(statement => statement.StatementStartDate)
+                .ThenBy(statement => statement.StatementEndDate)
+                .ThenBy(statement => statement.StatementKey, StringComparer.Ordinal)
+                .ToList();
+            ValidateWiseInitialStatementChain(statements);
+            return statements;
         }
 
         private async Task<bool> FetchWiseReport(DateTime date)
@@ -127,30 +156,51 @@ namespace MyBook
                     : null);
         }
 
+        private List<WiseParsedStatement> ParseWiseStatementFiles(List<string> files)
+        {
+            var attachments = files
+                .Select(file => new InMemoryWiseStatementAttachment(
+                    Path.GetFileName(file),
+                    null,
+                    File.ReadAllBytes(file)))
+                .ToList();
+            return ParseWiseStatementAttachments(attachments);
+        }
+
+        private List<string> FindWiseInitialStatementXmlFiles()
+        {
+            var directory = FindInitialReportsDirectory();
+            return directory is null ? [] : FindWiseStatementXmlFilesInDirectories([directory]);
+        }
+
         private List<string> FindLocalWiseStatementXmlFiles(string? directory)
         {
-            var directories = new[]
-                {
-                    directory,
-                    Path.Combine(Directory.GetCurrentDirectory(), "archive"),
-                    Path.Combine(Directory.GetCurrentDirectory(), "..", "archive"),
-                    Directory.GetCurrentDirectory()
-                }
-                .Where(value => !String.IsNullOrWhiteSpace(value))
-                .Select(value => Path.GetFullPath(value!))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Where(Directory.Exists)
-                .ToList();
-
-            var files = directories
-                .SelectMany(dir => Directory.GetFiles(dir, "statement_*.xml"))
-                .Where(file => WiseStatementFileNameRegex.IsMatch(Path.GetFileName(file)))
-                .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            List<string> directories = String.IsNullOrWhiteSpace(directory)
+                ? FindInitialReportsDirectory() is { } initialDirectory
+                    ? [initialDirectory]
+                    : []
+                : [Path.GetFullPath(directory)];
+            var files = FindWiseStatementXmlFilesInDirectories(directories);
             if (files.Count == 0)
                 throw new FileNotFoundException("No local Wise XML statement found.");
 
             return files;
+        }
+
+        private static List<string> FindWiseStatementXmlFilesInDirectories(IEnumerable<string> directories)
+        {
+            var existingDirectories = directories
+                .Where(value => !String.IsNullOrWhiteSpace(value))
+                .Select(Path.GetFullPath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(Directory.Exists)
+                .ToList();
+
+            return existingDirectories
+                .SelectMany(dir => Directory.GetFiles(dir, "statement_*.xml"))
+                .Where(file => WiseStatementFileNameRegex.IsMatch(Path.GetFileName(file)))
+                .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private List<WiseParsedStatement> ParseWiseStatementAttachments(List<InMemoryWiseStatementAttachment> attachments)
@@ -203,6 +253,48 @@ namespace MyBook
                 statements.Select(statement => new AccountBalance(first.Account, statement.BeginningBalance)).ToList(),
                 statements.Select(statement => new AccountBalance(first.Account, statement.EndingBalance)).ToList(),
                 statements.SelectMany(statement => statement.InternalCardNos).ToList());
+        }
+
+        private static void ValidateWiseInitialStatementChain(List<WiseParsedStatement> statements)
+        {
+            if (statements.Count == 0)
+                return;
+
+            ValidateWiseZeroInitialStatementStart(statements[0]);
+            for (var i = 1; i < statements.Count; i++)
+            {
+                var previous = statements[i - 1];
+                var current = statements[i];
+                AssertWiseBalanceSnapshotsEqual(
+                    previous.EndingBalances,
+                    current.BeginningBalances,
+                    $"Wise initial balance chain {previous.StatementEndDate:yyyy-MM-dd}->{current.StatementStartDate:yyyy-MM-dd}");
+            }
+        }
+
+        private static void ValidateWiseZeroInitialStatementStart(WiseParsedStatement statement)
+        {
+            foreach (var balance in statement.BeginningBalances)
+            {
+                if (balance.v != 0)
+                    throw new MailParseException($"Parse Wise XML Fail, Initial Statement Nonzero Beginning Balance: {balance.v} {balance.t}");
+            }
+        }
+
+        private static void AssertWiseBalanceSnapshotsEqual(
+            List<AccountBalance> expected,
+            List<AccountBalance> actual,
+            string context)
+        {
+            var expectedValues = expected.ToDictionary(balance => balance.t, balance => balance.v);
+            var actualValues = actual.ToDictionary(balance => balance.t, balance => balance.v);
+            foreach (var currency in expectedValues.Keys.Concat(actualValues.Keys).Distinct())
+            {
+                expectedValues.TryGetValue(currency, out var expectedValue);
+                actualValues.TryGetValue(currency, out var actualValue);
+                if (expectedValue != actualValue)
+                    throw new MailParseException($"Parse Wise XML Fail, {context} mismatch: {currency} expected {expectedValue}, got {actualValue}");
+            }
         }
 
         private WiseCurrencyStatement ParseWiseCurrencyStatement(

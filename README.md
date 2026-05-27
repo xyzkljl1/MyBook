@@ -23,12 +23,21 @@ The project has been developed with extensive vibe coding using OpenAI GPT-5 Cod
 
 Local statements, downloaded reports, `config.json`, database backups, and other private/runtime files are intentionally ignored.
 
+## Local Initial Reports
+
+`initialReports/` is an ignored private directory for account history that predates normal recurring imports. When an IBKR or Wise account has no imported history, the importer first reads matching local files from this directory, validates that the initial statement starts from zero and that multi-part statements connect by balance, then continues with normal mailbox fetching.
+
+Expected files:
+
+- `IBKR_INITIAL_*.csv` - IBKR initial CSV reports.
+- `statement_*.xml` - Wise initial XML statements.
+
 ## Implemented Account Sources
 
 - `MailUtil.ICBC` fetches ICBC credit-card statements monthly from mailbox messages and imports card balances plus RMB and foreign-currency transaction details.
 - `MailUtil.ICBCHistory` fetches ICBC historical-detail PDF mail attachments on demand or by date range and imports debit-account history details and credit-card history supplements when the statement balance chain and overlap checks pass.
 - `MailUtil.IBKR` fetches Interactive Brokers `DailyMyBook` CSV reports daily from mailbox attachments and imports cash, NAV, positions, trades, commissions, transfers, interest, dividends, withholding tax, FX translation, and end-of-day holdings. It can also read local initial reports before daily reports exist.
-- `MailUtil.Wise` fetches Wise XML statements monthly from mailbox attachments and imports per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers.
+- `MailUtil.Wise` imports local initial Wise XML statements from `initialReports` when the Wise account has no history, then fetches monthly Wise XML statements from mailbox attachments and imports per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers.
 - `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines.
 - `MailUtil.PayPal` fetches PayPal mail statements monthly from configured mailbox messages and imports supported PayPal payment events for configured PayPal accounts.
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
@@ -126,7 +135,7 @@ Useful local/debug commands:
 
 ```powershell
 dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-ibkr-reports
-dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-wise-reports
+dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-wise-reports --wise-local-dir initialReports
 dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-icbc-history-details
 dotnet run --project MyBook\MyBook.csproj -- --debug-sql "SHOW TABLES"
 ```

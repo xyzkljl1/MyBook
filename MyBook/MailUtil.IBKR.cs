@@ -16,7 +16,6 @@ namespace MyBook
         private const StatementImportProvider IBKRProvider = StatementImportProvider.IBKRReportMail;
         private const string IBKRReportSender = "donotreply@interactivebrokers.com";
         private const string IBKRDailyReportType = "DailyMyBook";
-        private const string IBKRInitialReportDirectoryName = "initialReports";
         private const string IBKRInitialReportFilePrefix = "IBKR_INITIAL_";
         private const int IBKRMissingReportLimitDays = 14;
         private const string IBKRStockYieldEnhancementLoanSection = "股票收益提升计划股证券出借活动";
@@ -434,7 +433,7 @@ namespace MyBook
 
         private List<IBKRParsedReport> LoadIBKRInitialReports(Account account)
         {
-            var directory = FindIBKRInitialReportsDirectory();
+            var directory = FindInitialReportsDirectory();
             if (directory is null)
                 return [];
 
@@ -528,33 +527,6 @@ namespace MyBook
         private static IBKRHoldingSnapshotValue CreateIBKRHoldingSnapshotValue(Holding holding)
         {
             return new IBKRHoldingSnapshotValue(holding.quantity, holding.totalPrice);
-        }
-
-        private static string? FindIBKRInitialReportsDirectory()
-        {
-            foreach (var root in EnumerateIBKRInitialReportSearchRoots())
-            {
-                var directory = Path.Combine(root, IBKRInitialReportDirectoryName);
-                if (Directory.Exists(directory))
-                    return directory;
-            }
-
-            return null;
-        }
-
-        private static IEnumerable<string> EnumerateIBKRInitialReportSearchRoots()
-        {
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
-            {
-                var directory = new DirectoryInfo(start);
-                while (directory is not null)
-                {
-                    if (seen.Add(directory.FullName))
-                        yield return directory.FullName;
-                    directory = directory.Parent;
-                }
-            }
         }
 
         private IBKRParsedReport ParseIBKRInitialReportCsv(string path)

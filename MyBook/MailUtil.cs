@@ -16,6 +16,7 @@ namespace MyBook
     // 邮件账单获取的共同依赖与通用 IMAP/解析辅助逻辑。
     partial class MailUtil
     {
+        private const string InitialReportDirectoryName = "initialReports";
         private readonly string username;
         private readonly string apppasswd;
         private readonly DatabaseUtil database;
@@ -90,6 +91,33 @@ namespace MyBook
         private static DateTime FirstDayOfMonth(DateTime date)
         {
             return new DateTime(date.Year, date.Month, 1);
+        }
+
+        private static string? FindInitialReportsDirectory()
+        {
+            foreach (var root in EnumerateInitialReportSearchRoots())
+            {
+                var directory = Path.Combine(root, InitialReportDirectoryName);
+                if (Directory.Exists(directory))
+                    return directory;
+            }
+
+            return null;
+        }
+
+        private static IEnumerable<string> EnumerateInitialReportSearchRoots()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+            {
+                var directory = new DirectoryInfo(start);
+                while (directory is not null)
+                {
+                    if (seen.Add(directory.FullName))
+                        yield return directory.FullName;
+                    directory = directory.Parent;
+                }
+            }
         }
 
         private static (DateTime Since, DateTime Before) GetMonthRange(DateTime date)
