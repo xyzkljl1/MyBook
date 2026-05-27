@@ -20,6 +20,8 @@ namespace MyBook
         private const string IBKRInitialReportFilePrefix = "IBKR_INITIAL_";
         private const int IBKRMissingReportLimitDays = 14;
         private const string IBKRStockYieldEnhancementLoanSection = "股票收益提升计划股证券出借活动";
+        private const string IBKRStockYieldEnhancementLoanSectionWithoutActivity = "股票收益提升计划股证券出借";
+        private const string IBKRStockYieldEnhancementCollateralHeldSection = "在IBKRSS持有的股票收益提升计划证券抵押品";
         private const string IBKRStockYieldEnhancementLoanFeeSection = "股票收益提升计划证券出借赚取费用详情";
         private const string IBKRStockYieldEnhancementLoanRateSection = "股票收益提升计划证券出借利率详情";
         private const string IBKRInterestSection = "利息";
@@ -44,6 +46,9 @@ namespace MyBook
 
         private static readonly string[] IBKRCashReportFullHeader = ["货币总结", "货币", "总数", "证券", "期货", "本月截至当前", "本年截至当前", ""];
         private static readonly string[] IBKRCashReportShortHeader = ["货币总结", "货币", "总数", "证券", "期货", ""];
+        private static readonly string[] IBKRStockYieldEnhancementLoanFullHeader = ["资产分类", "货币", "代码", "日期", "描述", "", "交易号码", "数量", "抵押品金额"];
+        private static readonly string[] IBKRStockYieldEnhancementLoanShortHeader = ["资产分类", "货币", "代码", "交易号码", "数量", "客户抵押品的股票收益提升计划利率 (%)", "抵押品金额"];
+        private static readonly string[] IBKRStockYieldEnhancementCollateralHeldHeader = ["资产分类", "货币", "代码", "数量", "价格", "价值"];
 
         private static readonly HashSet<string> IBKRCsvSections = new(StringComparer.Ordinal)
         {
@@ -66,6 +71,7 @@ namespace MyBook
             "代码",
             IBKRTransferSection,
             IBKRStockYieldEnhancementLoanSection,
+            IBKRStockYieldEnhancementCollateralHeldSection,
             IBKRStockYieldEnhancementLoanFeeSection,
             IBKRStockYieldEnhancementLoanRateSection,
             IBKRInterestSection,
@@ -157,7 +163,11 @@ namespace MyBook
             ],
             [IBKRStockYieldEnhancementLoanSection] =
             [
-                ["资产分类", "货币", "代码", "日期", "描述", "", "交易号码", "数量", "抵押品金额"]
+                IBKRStockYieldEnhancementLoanFullHeader
+            ],
+            [IBKRStockYieldEnhancementCollateralHeldSection] =
+            [
+                IBKRStockYieldEnhancementLoanFullHeader
             ],
             [IBKRStockYieldEnhancementLoanFeeSection] =
             [
@@ -224,6 +234,17 @@ namespace MyBook
             [
                 ["资产分类", "货币", "代码", "日期/时间", "数量", "佣金", "经纪商收费 执行", "经纪商收费 清算", "第三方收费 执行", "第三方收费 清算", "第三方收费 交易费", "其他"],
                 ["资产分类", "货币", "代码", "日期/时间", "数量", "佣金 in USD", "经纪商收费 执行 in USD", "经纪商收费 清算 in USD", "第三方收费 执行 in USD", "第三方收费 清算 in USD", "第三方收费 交易费 in USD", "其他 in USD"]
+            ],
+            [IBKRStockYieldEnhancementLoanSection] =
+            [
+                IBKRStockYieldEnhancementLoanFullHeader,
+                IBKRStockYieldEnhancementLoanShortHeader
+            ],
+            [IBKRStockYieldEnhancementCollateralHeldSection] =
+            [
+                IBKRStockYieldEnhancementLoanFullHeader,
+                IBKRStockYieldEnhancementLoanShortHeader,
+                IBKRStockYieldEnhancementCollateralHeldHeader
             ]
         };
 
@@ -1970,8 +1991,6 @@ namespace MyBook
                 {
                     if (amount == 0)
                         continue;
-                    if (!useBeginningValues)
-                        throw new MailParseException($"Parse IBKR Report Fail, Unsupported Nonzero Stock Yield Enhancement NAV Component: {component}/{amount}");
 
                     var adjustmentCode = component == "抵押品价值"
                         ? "COLLATERAL_VALUE"
@@ -2207,11 +2226,16 @@ namespace MyBook
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Stock Position Summary Asset: {FormatIBKRCsvRow(row)}");
 
                 var code = row.Fields[2];
+                var inIBQuantity = ParseIBKRIntegerQuantityAt(row, 4, "in-IB stock quantity");
+                var borrowedQuantity = ParseIBKRIntegerQuantityAt(row, 5, "borrowed stock quantity");
+                var lentQuantity = ParseIBKRIntegerQuantityAt(row, 6, "lent stock quantity");
                 var netQuantity = ParseIBKRIntegerQuantityAt(row, 7, "net stock quantity");
+                if (inIBQuantity + borrowedQuantity + lentQuantity != netQuantity)
+                    throw new MailParseException($"Parse IBKR Report Fail, Stock Position Summary Quantity Mismatch: {FormatIBKRCsvRow(row)}");
                 if (!stockHoldings.TryGetValue(code, out var holdingQuantity))
                     throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Holding: {FormatIBKRCsvRow(row)}");
-                if (holdingQuantity != netQuantity)
-                    throw new MailParseException($"Parse IBKR Report Fail, Stock Holding Quantity Mismatch: {code}/{holdingQuantity}/{netQuantity}");
+                if (holdingQuantity != inIBQuantity)
+                    throw new MailParseException($"Parse IBKR Report Fail, Stock Holding Quantity Mismatch: {code}/{holdingQuantity}/{inIBQuantity}");
             }
         }
 
@@ -2475,7 +2499,7 @@ namespace MyBook
                 if (fields.Count < 2)
                     throw new MailParseException($"Parse IBKR Report Fail, Invalid CSV Row {sourceName}:{lineNumber}: {line}");
 
-                var sectionName = fields[0].Trim('\uFEFF', ' ');
+                var sectionName = NormalizeIBKRCsvSectionName(fields[0].Trim('\uFEFF', ' '));
                 var rowType = fields[1].Trim();
                 if (!IBKRCsvSections.Contains(sectionName))
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown CSV Section: {sectionName}");
@@ -2495,6 +2519,13 @@ namespace MyBook
             ValidateIBKRCsvHeaders(report);
             ValidateIBKRInformationalSections(report);
             return report;
+        }
+
+        private static string NormalizeIBKRCsvSectionName(string sectionName)
+        {
+            return sectionName == IBKRStockYieldEnhancementLoanSectionWithoutActivity
+                ? IBKRStockYieldEnhancementLoanSection
+                : sectionName;
         }
 
         private static void ValidateIBKRCsvHeaders(IBKRCsvReport report)
@@ -2578,7 +2609,8 @@ namespace MyBook
                     throw new MailParseException($"Parse IBKR Report Fail, Invalid Code Legend Row: {FormatIBKRCsvRow(row)}");
             }
 
-            ValidateIBKRStockYieldEnhancementLoanSection(report);
+            ValidateIBKRStockYieldEnhancementLoanSection(report, IBKRStockYieldEnhancementLoanSection);
+            ValidateIBKRStockYieldEnhancementLoanSection(report, IBKRStockYieldEnhancementCollateralHeldSection);
             ValidateIBKRStockYieldEnhancementLoanFeeDetailSection(report, IBKRStockYieldEnhancementLoanFeeSection);
             ValidateIBKRStockYieldEnhancementLoanFeeDetailSection(report, IBKRStockYieldEnhancementLoanRateSection);
             ValidateIBKRMoneyDetailSection(report, IBKRInterestSection, 4);
@@ -2593,51 +2625,134 @@ namespace MyBook
             ValidateIBKRStatementPeriodPnlSection(report);
         }
 
-        private static void ValidateIBKRStockYieldEnhancementLoanSection(IBKRCsvReport report)
+        private static void ValidateIBKRStockYieldEnhancementLoanSection(IBKRCsvReport report, string sectionName)
         {
-            var rows = report.OptionalDataRows(IBKRStockYieldEnhancementLoanSection).ToList();
+            var rows = report.OptionalDataRows(sectionName).ToList();
             if (rows.Count == 0)
                 return;
 
             decimal collateralTotal = 0;
-            decimal? reportedTotal = null;
+            decimal reportedTotal = 0;
+            var reportedTotalCount = 0;
             foreach (var row in rows)
             {
-                AssertIBKRFieldCount(row, 9);
-                if (row.Fields[0] == "总数")
+                if (row.Fields.Count == 7)
                 {
-                    if (reportedTotal.HasValue)
-                        throw new MailParseException($"Parse IBKR Report Fail, Duplicate Stock Yield Enhancement Total: {FormatIBKRCsvRow(row)}");
-                    if (row.Fields.Take(8).Skip(1).Any(field => !String.IsNullOrWhiteSpace(field)))
-                        throw new MailParseException($"Parse IBKR Report Fail, Invalid Stock Yield Enhancement Total: {FormatIBKRCsvRow(row)}");
-
-                    reportedTotal = ParseIBKRDecimalAt(row, 8, "stock yield enhancement collateral total");
+                    ValidateIBKRStockYieldEnhancementLoanShortRow(row, sectionName, ref collateralTotal, ref reportedTotal, ref reportedTotalCount);
                     continue;
                 }
 
-                if (row.Fields[0] != "股票")
-                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Stock Yield Enhancement Asset Class: {FormatIBKRCsvRow(row)}");
+                if (row.Fields.Count == 6 && sectionName == IBKRStockYieldEnhancementCollateralHeldSection)
+                {
+                    ValidateIBKRStockYieldEnhancementCollateralHeldRow(row, sectionName, ref collateralTotal, ref reportedTotal, ref reportedTotalCount);
+                    continue;
+                }
+
+                AssertIBKRFieldCount(row, 9);
+                if (row.Fields[0] == "总数")
+                {
+                    if (row.Fields.Take(8).Skip(1).Any(field => !String.IsNullOrWhiteSpace(field)))
+                        throw new MailParseException($"Parse IBKR Report Fail, Invalid Stock Yield Enhancement Total: {sectionName}, {FormatIBKRCsvRow(row)}");
+
+                    reportedTotal += ParseIBKRDecimalAt(row, 8, "stock yield enhancement collateral total");
+                    reportedTotalCount++;
+                    continue;
+                }
+
+                ValidateIBKRStockYieldEnhancementAssetClass(row, sectionName);
                 _ = ParseIBKRCurrencyType(row.Fields[1]);
                 if (String.IsNullOrWhiteSpace(row.Fields[2]))
-                    throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Code: {FormatIBKRCsvRow(row)}");
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Code: {sectionName}, {FormatIBKRCsvRow(row)}");
                 _ = ParseIBKRDate(row.Fields[3]);
                 if (String.IsNullOrWhiteSpace(row.Fields[4]))
-                    throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Description: {FormatIBKRCsvRow(row)}");
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Description: {sectionName}, {FormatIBKRCsvRow(row)}");
                 if (String.IsNullOrWhiteSpace(row.Fields[6]))
-                    throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Transaction Number: {FormatIBKRCsvRow(row)}");
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Transaction Number: {sectionName}, {FormatIBKRCsvRow(row)}");
                 _ = ParseIBKRDecimalAt(row, 7, "stock yield enhancement quantity");
                 collateralTotal += ParseIBKRDecimalAt(row, 8, "stock yield enhancement collateral");
             }
 
-            if (!reportedTotal.HasValue)
-                throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Total: {report.SourceName}");
-            AssertIBKRMoneyEquals(reportedTotal.Value, collateralTotal, "IBKR stock yield enhancement collateral total");
+            if (reportedTotalCount == 0)
+                throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Total: {sectionName}, {report.SourceName}");
+            AssertIBKRMoneyEquals(reportedTotal, collateralTotal, "IBKR stock yield enhancement collateral total");
 
-            foreach (var row in report.OptionalNoteRows(IBKRStockYieldEnhancementLoanSection))
+            foreach (var row in report.OptionalNoteRows(sectionName))
             {
                 if (row.Fields.Count != 1 || String.IsNullOrWhiteSpace(row.Fields[0]))
-                    throw new MailParseException($"Parse IBKR Report Fail, Invalid Stock Yield Enhancement Note: {FormatIBKRCsvRow(row)}");
+                    throw new MailParseException($"Parse IBKR Report Fail, Invalid Stock Yield Enhancement Note: {sectionName}, {FormatIBKRCsvRow(row)}");
             }
+        }
+
+        private static void ValidateIBKRStockYieldEnhancementAssetClass(IBKRCsvRow row, string sectionName)
+        {
+            if (IBKRAssetGroups.Contains(row.Fields[0]) || row.Fields[0] == "证券")
+                return;
+
+            throw new MailParseException($"Parse IBKR Report Fail, Unknown Stock Yield Enhancement Asset Class: {sectionName}, {FormatIBKRCsvRow(row)}");
+        }
+
+        private static void ValidateIBKRStockYieldEnhancementLoanShortRow(
+            IBKRCsvRow row,
+            string sectionName,
+            ref decimal collateralTotal,
+            ref decimal reportedTotal,
+            ref int reportedTotalCount)
+        {
+            if (row.Fields[0] == "总数")
+            {
+                if (row.Fields.Take(6).Skip(1).Any(field => !String.IsNullOrWhiteSpace(field)))
+                    throw new MailParseException($"Parse IBKR Report Fail, Invalid Stock Yield Enhancement Total: {sectionName}, {FormatIBKRCsvRow(row)}");
+
+                reportedTotal += ParseIBKRDecimalAt(row, 6, "stock yield enhancement collateral total");
+                reportedTotalCount++;
+                return;
+            }
+
+            ValidateIBKRStockYieldEnhancementAssetClass(row, sectionName);
+            _ = ParseIBKRCurrencyType(row.Fields[1]);
+            if (String.IsNullOrWhiteSpace(row.Fields[2]))
+                throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Code: {sectionName}, {FormatIBKRCsvRow(row)}");
+            if (String.IsNullOrWhiteSpace(row.Fields[3]))
+                throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Transaction Number: {sectionName}, {FormatIBKRCsvRow(row)}");
+            _ = ParseIBKRDecimalAt(row, 4, "stock yield enhancement quantity");
+            _ = ParseIBKRDecimalAt(row, 5, "stock yield enhancement collateral rate");
+            collateralTotal += ParseIBKRDecimalAt(row, 6, "stock yield enhancement collateral");
+        }
+
+        private static void ValidateIBKRStockYieldEnhancementCollateralHeldRow(
+            IBKRCsvRow row,
+            string sectionName,
+            ref decimal collateralTotal,
+            ref decimal reportedTotal,
+            ref int reportedTotalCount)
+        {
+            if (row.Fields[0] == "总数")
+            {
+                if (row.Fields.Take(5).Skip(1).Any(field => !String.IsNullOrWhiteSpace(field)))
+                    throw new MailParseException($"Parse IBKR Report Fail, Invalid Stock Yield Enhancement Total: {sectionName}, {FormatIBKRCsvRow(row)}");
+
+                reportedTotal += ParseIBKRDecimalAt(row, 5, "stock yield enhancement collateral held total");
+                reportedTotalCount++;
+                return;
+            }
+
+            ValidateIBKRStockYieldEnhancementAssetClass(row, sectionName);
+            _ = ParseIBKRCurrencyType(row.Fields[1]);
+            if (String.IsNullOrWhiteSpace(row.Fields[2]))
+                throw new MailParseException($"Parse IBKR Report Fail, Missing Stock Yield Enhancement Code: {sectionName}, {FormatIBKRCsvRow(row)}");
+            var quantity = ParseIBKRDecimalAt(row, 3, "stock yield enhancement collateral held quantity");
+            var price = ParseIBKRDecimalAt(row, 4, "stock yield enhancement collateral held price");
+            var value = ParseIBKRDecimalAt(row, 5, "stock yield enhancement collateral held value");
+            var priceDivisor = row.Fields[0] == "证券" ? 100m : 1m;
+            AssertIBKRValueMatchesDisplayedUnitPrice(
+                quantity,
+                price,
+                row.Fields[4],
+                value,
+                row.Fields[5],
+                priceDivisor,
+                $"IBKR stock yield enhancement collateral held value {row.Fields[2]}");
+            collateralTotal += value;
         }
 
         private static void ValidateIBKRStockYieldEnhancementLoanFeeDetailSection(IBKRCsvReport report, string sectionName)
@@ -3091,6 +3206,26 @@ namespace MyBook
             {
                 throw new MailParseException(
                     $"Parse IBKR Report Fail, {context} mismatch: expected display {roundedPreciseValue} from precise {preciseValue}, got {displayedValue}");
+            }
+        }
+
+        private static void AssertIBKRValueMatchesDisplayedUnitPrice(
+            decimal quantity,
+            decimal displayedUnitPrice,
+            string unitPriceText,
+            decimal displayedValue,
+            string valueText,
+            decimal priceDivisor,
+            string context)
+        {
+            var expectedValue = quantity * displayedUnitPrice / priceDivisor;
+            var unitPriceTolerance = Math.Abs(quantity) * GetIBKRReportFieldUnit(unitPriceText) / priceDivisor / 2m;
+            var valueTolerance = GetIBKRReportFieldUnit(valueText);
+            var tolerance = unitPriceTolerance + valueTolerance;
+            if (Math.Abs(expectedValue - displayedValue) > tolerance)
+            {
+                throw new MailParseException(
+                    $"Parse IBKR Report Fail, {context} mismatch: expected {expectedValue} from displayed unit price {displayedUnitPrice}, got {displayedValue}, tolerance {tolerance}");
             }
         }
 
