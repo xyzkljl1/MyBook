@@ -15,6 +15,8 @@ namespace MyBook
         Timer? dailyTimer;
         readonly SemaphoreSlim fetchLock = new(1, 1);
         const int MonthlyFetchIntervalDays = 27;
+        const int ICBCHistoryDetailFetchIntervalDays = 90;
+        const int ICBCHistoryDetailSearchWindowMonths = 5;
 
         public void RunSchedule()
         {
@@ -60,6 +62,8 @@ namespace MyBook
             {
                 if (ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail))
                     await TryFetchAsync("ICBC", mail.FetchICBCBills);
+                if (ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays))
+                    await TryFetchAsync("ICBC history detail", FetchICBCHistoryDetailsScheduledAsync);
                 await TryFetchAsync("IBKR", mail.FetchIBKRReports);
                 if (ShouldFetchMonthlyProvider("Wise", StatementImportProvider.WiseMail))
                     await TryFetchAsync("Wise", mail.FetchWiseReports);
@@ -104,6 +108,19 @@ namespace MyBook
 
             Console.WriteLine($"skip scheduled {name} fetch: last import {latestImportTime.Value:yyyy-MM-dd}, elapsed {elapsedDays:0} days");
             return false;
+        }
+
+        private async Task FetchICBCHistoryDetailsScheduledAsync()
+        {
+            if (mail is null || database is null)
+                return;
+
+            var today = DateTime.Today;
+            await mail.FetchICBCHistoryDetails(today.AddMonths(-ICBCHistoryDetailSearchWindowMonths));
+            database.MarkStatementProcessedOnce(
+                StatementImportProvider.ICBCHistoryDetailMail,
+                today,
+                $"scheduled-empty-import-{today:yyyyMMdd}");
         }
 
         private static async Task TryFetchAsync(string name, Func<Task> fetch)
