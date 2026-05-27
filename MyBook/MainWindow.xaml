@@ -302,23 +302,23 @@
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="当前余额" Width="180">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}"
+                                                     Text="{Binding CurrentBalanceText}"
+                                                     FontSize="13"
+                                                     TextAlignment="Right"
+                                                     Foreground="#334155"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
                                 <DataGridTemplateColumn Header="原币净额" Width="*">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBox Style="{StaticResource SelectableText}"
                                                      Text="{Binding CurrencyDetails}"
                                                      FontSize="13"
-                                                     Foreground="#64748B"/>
-                                        </DataTemplate>
-                                    </DataGridTemplateColumn.CellTemplate>
-                                </DataGridTemplateColumn>
-                                <DataGridTemplateColumn Header="记录" Width="90">
-                                    <DataGridTemplateColumn.CellTemplate>
-                                        <DataTemplate>
-                                            <TextBox Style="{StaticResource SelectableText}"
-                                                     Text="{Binding RecordCountText}"
-                                                     FontSize="13"
-                                                     TextAlignment="Right"
                                                      Foreground="#64748B"/>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>

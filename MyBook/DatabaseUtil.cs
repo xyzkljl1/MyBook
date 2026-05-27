@@ -2536,6 +2536,7 @@ namespace MyBook
                     exchangeRates),
                 AccountNetFlows = BuildAccountNetFlowStatistics(
                     accountList,
+                    balances,
                     accountNetFlowRecords,
                     exchangeRates),
                 RmbReasonFlowSeriesByMonth = reasonMonths
@@ -3031,11 +3032,19 @@ namespace MyBook
 
         private List<AccountNetFlowStatistics> BuildAccountNetFlowStatistics(
             List<Account> accounts,
+            List<AccountBalance> balances,
             List<Record> records,
             Dictionary<CurrencyType, decimal> exchangeRates)
         {
             var accountTypesById = accounts
                 .ToDictionary(account => account.Id, account => GetAccountType(account.name));
+            var currentBalancesByAccountType = balances
+                .Where(balance => balance.v != 0 && accountTypesById.ContainsKey(balance._account_Id))
+                .GroupBy(balance => accountTypesById[balance._account_Id], StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    group => group.Key,
+                    group => BuildAccountCurrentBalance(group.ToList(), exchangeRates),
+                    StringComparer.OrdinalIgnoreCase);
             var accountTypesByName = accounts
                 .GroupBy(account => account.name, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => GetAccountType(group.First().name), StringComparer.OrdinalIgnoreCase);
@@ -3057,7 +3066,11 @@ namespace MyBook
                     && accountTypesById.ContainsKey(record._account_Id)
                     && IsExternalToAccountType(record, accountTypesById, accountTypesByName, matchedRecordAccountTypes))
                 .GroupBy(record => accountTypesById[record._account_Id], StringComparer.OrdinalIgnoreCase)
-                .Select(group => BuildAccountNetFlowStatistic(group.Key, group.ToList(), exchangeRates))
+                .Select(group =>
+                {
+                    currentBalancesByAccountType.TryGetValue(group.Key, out var currentBalance);
+                    return BuildAccountNetFlowStatistic(group.Key, group.ToList(), currentBalance, exchangeRates);
+                })
                 .Where(statistic => statistic.HasMissingExchangeRate
                     ? statistic.CurrencyTotals.Any(total => total.Amount != 0)
                     : statistic.NetRmb != 0)
@@ -3069,6 +3082,7 @@ namespace MyBook
         private static AccountNetFlowStatistics BuildAccountNetFlowStatistic(
             string accountType,
             List<Record> records,
+            AccountCurrentBalance? currentBalance,
             Dictionary<CurrencyType, decimal> exchangeRates)
         {
             var totals = records
@@ -3095,10 +3109,25 @@ namespace MyBook
                 NetRmb = RoundAccountNetFlowRmb(totals
                     .Where(total => total.RmbAmount.HasValue)
                     .Sum(total => total.RmbAmount!.Value)),
+                CurrentBalanceRmb = currentBalance?.Rmb ?? 0,
                 HasMissingExchangeRate = totals.Any(total => !total.RmbAmount.HasValue),
-                RecordCount = records.Count,
+                HasMissingCurrentBalanceExchangeRate = currentBalance?.HasMissingExchangeRate ?? false,
                 CurrencyTotals = totals
             };
+        }
+
+        private static AccountCurrentBalance BuildAccountCurrentBalance(
+            List<AccountBalance> balances,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var converted = balances
+                .Select(balance => TryConvertToRmb(balance.v, balance.t, exchangeRates))
+                .ToList();
+            return new AccountCurrentBalance(
+                RoundAccountNetFlowRmb(converted
+                    .Where(value => value.HasValue)
+                    .Sum(value => value!.Value)),
+                converted.Any(value => !value.HasValue));
         }
 
         private static decimal RoundAccountNetFlowRmb(decimal value)
@@ -4592,6 +4621,10 @@ namespace MyBook
             string Code,
             HoldingType HoldingType,
             int Quantity);
+
+        private sealed record AccountCurrentBalance(
+            decimal Rmb,
+            bool HasMissingExchangeRate);
 
         private enum HistoricalBalanceDateBasis
         {

@@ -62,8 +62,9 @@ namespace MyBook
         public string AccountPrefix { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public decimal NetRmb { get; set; }
+        public decimal CurrentBalanceRmb { get; set; }
         public bool HasMissingExchangeRate { get; set; }
-        public int RecordCount { get; set; }
+        public bool HasMissingCurrentBalanceExchangeRate { get; set; }
         public List<AccountNetFlowCurrencyTotal> CurrencyTotals { get; set; } = [];
     }
 

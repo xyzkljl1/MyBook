@@ -1121,28 +1121,35 @@ namespace MyBook
         public string DisplayName { get; set; } = "";
         public decimal NetRmb { get; set; }
         public string NetRmbText { get; set; } = "";
+        public string CurrentBalanceText { get; set; } = "";
         public string CurrencyDetails { get; set; } = "";
-        public string RecordCountText { get; set; } = "";
         public bool IsInflow => NetRmb > 0;
         public bool IsOutflow => NetRmb < 0;
 
         public static AccountNetFlowStatisticsViewModel From(AccountNetFlowStatistics statistics)
         {
             var missingRateText = statistics.HasMissingExchangeRate ? " + 未折算" : "";
+            var missingBalanceRateText = statistics.HasMissingCurrentBalanceExchangeRate ? " + 未折算" : "";
             return new AccountNetFlowStatisticsViewModel
             {
                 DisplayName = statistics.DisplayName,
                 NetRmb = statistics.NetRmb,
                 NetRmbText = $"{FormatSignedMoney(statistics.NetRmb, "¥")}{missingRateText}",
+                CurrentBalanceText = $"{FormatMoney(statistics.CurrentBalanceRmb, "¥")}{missingBalanceRateText}",
                 CurrencyDetails = String.Join("、", statistics.CurrencyTotals.Select(FormatCurrencyTotal)),
-                RecordCountText = $"{statistics.RecordCount} 笔"
             };
         }
 
         private static string FormatCurrencyTotal(AccountNetFlowCurrencyTotal total)
         {
             var symbol = CurrencySummaryViewModel.FormatCurrencySymbol(total.Currency);
-            return $"{total.Currency} {FormatSignedMoneyExact(total.Amount, symbol)}";
+            return $"{total.Currency} {FormatSignedMoneyRounded(total.Amount, symbol)}";
+        }
+
+        private static string FormatMoney(decimal value, string symbol)
+        {
+            var sign = value < 0 ? "-" : "";
+            return $"{sign}{symbol}{MoneyText.FormatAmount(Math.Abs(value))}";
         }
 
         private static string FormatSignedMoney(decimal value, string symbol)
@@ -1151,10 +1158,11 @@ namespace MyBook
             return $"{sign}{symbol}{MoneyText.FormatAmount(Math.Abs(value))}";
         }
 
-        private static string FormatSignedMoneyExact(decimal value, string symbol)
+        private static string FormatSignedMoneyRounded(decimal value, string symbol)
         {
-            var sign = value > 0 ? "+" : value < 0 ? "-" : "";
-            var amount = Math.Abs(value).ToString("#,0.##################", CultureInfo.InvariantCulture);
+            var rounded = Decimal.Round(value, 0, MidpointRounding.ToEven);
+            var sign = rounded > 0 ? "+" : rounded < 0 ? "-" : "";
+            var amount = Math.Abs(rounded).ToString("#,0", CultureInfo.InvariantCulture);
             return $"{sign}{symbol}{amount}";
         }
     }
