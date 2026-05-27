@@ -294,19 +294,7 @@ namespace MyBook
             return db.Ado.SqlQuery<StatementImport>("""
                 select statementImport.`Id`, statementImport.`provider`, statementImport.`time`, statementImport.`statementKey`
                 from `StatementImports` statementImport
-                join (
-                    select candidate.`provider`, min(candidate.`Id`) as `Id`
-                    from `StatementImports` candidate
-                    join (
-                        select `provider`, min(`time`) as `time`
-                        from `StatementImports`
-                        group by `provider`
-                    ) earliest
-                        on candidate.`provider` = earliest.`provider`
-                        and candidate.`time` = earliest.`time`
-                    group by candidate.`provider`
-                ) fixedImport
-                    on statementImport.`Id` = fixedImport.`Id`
+                where statementImport.`statementKey` = ''
                 order by statementImport.`Id`
                 """);
         }
@@ -748,6 +736,7 @@ namespace MyBook
 
                     savedStatementImportIds.Add(statementImportId.Value);
                     saved.Add(true);
+                    shouldValidateBeginningBalances[import.Provider] = true;
                 }
 
                 MatchKnownInternalTransfersForStatements(savedStatementImportIds);
@@ -915,6 +904,11 @@ namespace MyBook
             return (
                 records.Min(record => record.date).Date,
                 records.Min(record => record.postingDate ?? record.date).Date);
+        }
+
+        public bool HasAccountHistory(Account account)
+        {
+            return AccountHasHistory(account);
         }
 
         private bool AccountHasHistory(Account account)
@@ -3341,22 +3335,8 @@ namespace MyBook
             ClearAllRecordMatches();
             db.Deleteable<Record>().ExecuteCommand();
             db.Ado.ExecuteCommand("""
-                delete statementImport
-                from `StatementImports` statementImport
-                left join (
-                    select candidate.`provider`, min(candidate.`Id`) as `Id`
-                    from `StatementImports` candidate
-                    join (
-                        select `provider`, min(`time`) as `time`
-                        from `StatementImports`
-                        group by `provider`
-                    ) earliest
-                        on candidate.`provider` = earliest.`provider`
-                        and candidate.`time` = earliest.`time`
-                    group by candidate.`provider`
-                ) fixedImport
-                    on statementImport.`Id` = fixedImport.`Id`
-                where fixedImport.`Id` is null
+                delete from `StatementImports`
+                where `statementKey` <> ''
                 """);
             if (startSnapshot is null)
             {
