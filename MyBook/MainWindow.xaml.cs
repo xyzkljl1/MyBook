@@ -359,6 +359,7 @@ namespace MyBook
         public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> RmbMonthlySeries { get; set; } = [];
         public List<MonthlyFlowAccountStatisticsViewModel> MonthlyAccounts { get; set; } = [];
+        public List<AccountNetFlowStatisticsViewModel> AccountNetFlows { get; set; } = [];
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
         public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
@@ -583,6 +584,9 @@ namespace MyBook
                 RmbMonthlySeries = [MonthlyFlowSeriesViewModel.From(data.RmbMonthlyFlowSeries)],
                 MonthlyAccounts = monthlyAccounts
                     .Select(MonthlyFlowAccountStatisticsViewModel.From)
+                    .ToList(),
+                AccountNetFlows = data.AccountNetFlows
+                    .Select(AccountNetFlowStatisticsViewModel.From)
                     .ToList(),
                 ReasonMonthSeries = reasonSeries,
                 InvestmentAccounts = investmentAccounts
@@ -1100,6 +1104,49 @@ namespace MyBook
                     .ToList(),
                 RmbMonthlySeries = [MonthlyFlowSeriesViewModel.From(account.RmbMonthlyFlowSeries)]
             };
+        }
+    }
+
+    public class AccountNetFlowStatisticsViewModel
+    {
+        public string DisplayName { get; set; } = "";
+        public decimal NetRmb { get; set; }
+        public string NetRmbText { get; set; } = "";
+        public string CurrencyDetails { get; set; } = "";
+        public string RecordCountText { get; set; } = "";
+        public bool IsInflow => NetRmb > 0;
+        public bool IsOutflow => NetRmb < 0;
+
+        public static AccountNetFlowStatisticsViewModel From(AccountNetFlowStatistics statistics)
+        {
+            var missingRateText = statistics.HasMissingExchangeRate ? " + 未折算" : "";
+            return new AccountNetFlowStatisticsViewModel
+            {
+                DisplayName = statistics.DisplayName,
+                NetRmb = statistics.NetRmb,
+                NetRmbText = $"{FormatSignedMoney(statistics.NetRmb, "¥")}{missingRateText}",
+                CurrencyDetails = String.Join("、", statistics.CurrencyTotals.Select(FormatCurrencyTotal)),
+                RecordCountText = $"{statistics.RecordCount} 笔"
+            };
+        }
+
+        private static string FormatCurrencyTotal(AccountNetFlowCurrencyTotal total)
+        {
+            var symbol = CurrencySummaryViewModel.FormatCurrencySymbol(total.Currency);
+            return $"{total.Currency} {FormatSignedMoneyExact(total.Amount, symbol)}";
+        }
+
+        private static string FormatSignedMoney(decimal value, string symbol)
+        {
+            var sign = value > 0 ? "+" : value < 0 ? "-" : "";
+            return $"{sign}{symbol}{MoneyText.FormatAmount(Math.Abs(value))}";
+        }
+
+        private static string FormatSignedMoneyExact(decimal value, string symbol)
+        {
+            var sign = value > 0 ? "+" : value < 0 ? "-" : "";
+            var amount = Math.Abs(value).ToString("#,0.##################", CultureInfo.InvariantCulture);
+            return $"{sign}{symbol}{amount}";
         }
     }
 

@@ -184,7 +184,7 @@ namespace MyBook
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued')";
         public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','PayPalMail','Manual')";
-        public const string SnapshotSource = "enum('AutoDaily','Manual')";
+        public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Unknown')";
     }
@@ -409,6 +409,7 @@ namespace MyBook
     {
         AutoDaily,
         Manual,
+        Start,
     }
 
     public enum SnapshotItemType

@@ -250,6 +250,85 @@
                 </Grid>
             </TabItem>
 
+            <TabItem Header="账户资金">
+                <Border Style="{StaticResource Card}" Margin="0,16,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <DockPanel Margin="0,0,0,12">
+                            <TextBlock Text="账户整体资金净出入" FontSize="15" FontWeight="SemiBold" Foreground="#334155"/>
+                        </DockPanel>
+                        <DataGrid Grid.Row="1"
+                                  ItemsSource="{Binding AccountNetFlows}"
+                                  AutoGenerateColumns="False"
+                                  IsReadOnly="True"
+                                  CanUserAddRows="False"
+                                  HeadersVisibility="Column"
+                                  GridLinesVisibility="None"
+                                  SelectionUnit="CellOrRowHeader">
+                            <DataGrid.Columns>
+                                <DataGridTemplateColumn Header="账户整体" Width="180">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}"
+                                                     Text="{Binding DisplayName}"
+                                                     FontSize="13"
+                                                     Foreground="#334155"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="净流动" Width="180">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Text="{Binding NetRmbText}"
+                                                     FontSize="13"
+                                                     FontWeight="SemiBold">
+                                                <TextBox.Style>
+                                                    <Style BasedOn="{StaticResource SelectableText}" TargetType="TextBox">
+                                                        <Setter Property="Foreground" Value="#334155"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsInflow}" Value="True">
+                                                                <Setter Property="Foreground" Value="#047857"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding IsOutflow}" Value="True">
+                                                                <Setter Property="Foreground" Value="#BE123C"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBox.Style>
+                                            </TextBox>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="原币净额" Width="*">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}"
+                                                     Text="{Binding CurrencyDetails}"
+                                                     FontSize="13"
+                                                     Foreground="#64748B"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="记录" Width="90">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}"
+                                                     Text="{Binding RecordCountText}"
+                                                     FontSize="13"
+                                                     TextAlignment="Right"
+                                                     Foreground="#64748B"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Border>
+            </TabItem>
+
             <TabItem Header="月度支出">
                 <Border Style="{StaticResource Card}" Margin="0,16,0,0">
                     <Grid>
