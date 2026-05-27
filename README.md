@@ -122,25 +122,6 @@ During scheduled fetches:
 
 Debug builds do not run scheduled fetch tasks. The app prints `skip scheduled fetch in DEBUG` and only performs fetches when an explicit command-line fetch/debug command is used.
 
-## Common Import Commands
-
-```powershell
-dotnet run --project MyBook\MyBook.csproj -- --fetch-icbc-bills
-dotnet run --project MyBook\MyBook.csproj -- --fetch-icbc-history-details
-dotnet run --project MyBook\MyBook.csproj -- --fetch-ibkr-reports
-dotnet run --project MyBook\MyBook.csproj -- --fetch-wise-reports
-dotnet run --project MyBook\MyBook.csproj -- --fetch-ocbc-reports
-```
-
-Useful local/debug commands:
-
-```powershell
-dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-ibkr-reports
-dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-wise-reports --wise-local-dir initialReports
-dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-icbc-history-details
-dotnet run --project MyBook\MyBook.csproj -- --debug-sql "SHOW TABLES"
-```
-
 ## Nexus OAuth
 
 Nexus API requests include the application headers required by the Nexus API Acceptable Use Policy:
