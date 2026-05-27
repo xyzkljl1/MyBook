@@ -53,6 +53,7 @@
 - `StatementImportStartDate` 不要体现在代码里，通过向数据库写入 fake 数据实现。
 - 数据库中的 `Account` 和 fake/checkpoint `StatementImport` 是固定数据，永远不要修改，除非用户明确要求。
 - `Account` 是不常增加的数据，不允许导入流程直接创建；所有查找 `Account` 的地方只允许 Get，找不到就报错。
+- `Account.name` 中的 account type 不是敏感信息，但 account id、尾号、账号片段等是敏感信息，不允许硬编码在代码中。
 - 数据库中的枚举值不要使用中文。
 - 对于现有和新增的模块，除非用户明确说明要读取 `Account.email` 或邮箱属性，否则忽略邮箱属性。
 - 账号或卡号只允许从总结、摘要中明确写明为账号、卡号或类似含义的数据读取；不要从交易明细中推断或登记账号、卡号。

@@ -242,7 +242,7 @@ namespace MyBook
                     .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
                     .ToList();
                 var defaultDetailAccountName = accounts
-                    .Where(account => !String.Equals(account.name, "UNKNOWN", StringComparison.OrdinalIgnoreCase))
+                    .Where(account => account.usage != AccountUsage.Undetermined)
                     .OrderBy(account => account.Id)
                     .Select(account => account.name)
                     .FirstOrDefault()
