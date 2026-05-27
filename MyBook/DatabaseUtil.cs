@@ -1335,7 +1335,7 @@ namespace MyBook
         {
             if (TryResolveCounterpartyName(record, out var counterpartyName)
                 && accountsByName.TryGetValue(counterpartyName, out var namedAccount)
-                && !IsUnknownAccount(namedAccount))
+                && !IsUndeterminedAccount(namedAccount))
             {
                 return GetPostingAccount(namedAccount);
             }
@@ -1344,7 +1344,7 @@ namespace MyBook
                 null,
                 $"record {record.Id} internal transfer match",
                 record.DestAccount);
-            if (matchedAccount is null || IsUnknownAccount(matchedAccount))
+            if (matchedAccount is null || IsUndeterminedAccount(matchedAccount))
                 return null;
 
             return GetPostingAccount(matchedAccount);
@@ -2357,7 +2357,7 @@ namespace MyBook
                 .Where(record => lifeAccountIds.Contains(record._account_Id))
                 .ToList();
             var monthlyAccountIds = accountList
-                .Where(account => account.usage != AccountUsage.Unknown)
+                .Where(account => account.usage != AccountUsage.Undetermined)
                 .Select(account => account.Id)
                 .ToHashSet();
             var monthlyRecords = records
@@ -2846,7 +2846,7 @@ namespace MyBook
             Dictionary<CurrencyType, decimal> exchangeRates)
         {
             var filterAccounts = accounts
-                .Where(account => account.usage != AccountUsage.Unknown)
+                .Where(account => account.usage != AccountUsage.Undetermined)
                 .Select(account => new
                 {
                     AccountId = account.Id,
@@ -3331,14 +3331,14 @@ namespace MyBook
         private static List<InternalCardNoCandidate> PreferKnownAccountMatches(List<InternalCardNoCandidate> matches)
         {
             var knownMatches = matches
-                .Where(match => !IsUnknownAccount(match.Account))
+                .Where(match => !IsUndeterminedAccount(match.Account))
                 .ToList();
             return knownMatches.Count > 0 ? knownMatches : matches;
         }
 
-        private static bool IsUnknownAccount(Account account)
+        private static bool IsUndeterminedAccount(Account account)
         {
-            return account.usage == AccountUsage.Unknown;
+            return account.usage == AccountUsage.Undetermined;
         }
 
         private static string NormalizeInternalCardToken(string value)

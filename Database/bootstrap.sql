@@ -9,7 +9,7 @@ CREATE TABLE `accounts` (
   `desc` varchar(255) NOT NULL DEFAULT '',
   `relativeBalance` tinyint(1) NOT NULL DEFAULT '1',
   `isCredit` tinyint(1) NOT NULL DEFAULT '0',
-  `usage` enum('Life','Investment','Transit','Unknown') NOT NULL DEFAULT 'Life',
+  `usage` enum('Life','Investment','Transit','Undetermined') NOT NULL DEFAULT 'Life',
   `_primaryAccount_Id` int DEFAULT NULL,
   `email` varchar(255) DEFAULT NULL,
   PRIMARY KEY (`Id`),
