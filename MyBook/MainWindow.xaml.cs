@@ -17,8 +17,6 @@ namespace MyBook
     /// </summary>
     public partial class MainWindow : Window
     {
-        private const string DefaultDetailAccountName = "ICBC";
-
         [DllImport("kernel32.dll")]
         private static extern bool AllocConsole();
 
@@ -238,8 +236,19 @@ namespace MyBook
             {
                 var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
                 var database = new DatabaseUtil(config);
-                var accountNames = database.GetAccountNames();
-                viewModel.SetDetailAccountNames(accountNames, DefaultDetailAccountName);
+                var accounts = database.GetAllAccounts();
+                var accountNames = accounts
+                    .Select(account => account.name)
+                    .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var defaultDetailAccountName = accounts
+                    .Where(account => !String.Equals(account.name, "UNKNOWN", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(account => account.Id)
+                    .Select(account => account.name)
+                    .FirstOrDefault()
+                    ?? accountNames.FirstOrDefault()
+                    ?? "";
+                viewModel.SetDetailAccountNames(accountNames, defaultDetailAccountName);
                 var details = database.GetRecordDetails(viewModel.DetailStartDate, viewModel.DetailEndDate, viewModel.SelectedDetailAccountName)
                     .Select(RecordDetailRowViewModel.From)
                     .ToList();
