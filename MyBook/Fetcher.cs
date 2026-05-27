@@ -75,6 +75,11 @@ namespace MyBook
                     await TryFetchAsync("exchange rate", stock.FetchExchangeRates);
                 if (database is not null)
                 {
+                    await TryFetchAsync("allocated expense cache", () =>
+                    {
+                        database.ProcessAllocatedExpenseDirtyRecords();
+                        return Task.CompletedTask;
+                    });
                     await TryFetchAsync("snapshot", () =>
                     {
                         database.CreateDailySnapshot();

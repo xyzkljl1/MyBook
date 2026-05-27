@@ -327,6 +327,7 @@ namespace MyBook
     // 一方面大多数交易是流向外部，不需要记录对方账户状况，只是有时需要记录对方账户名以区分原因
     // 一方面在自己的账户间的交易，出入金额可能不同(例如手续费、购汇)，记录麻烦
     // 而且主要目的是记录收支状况，完全可以忽略自己账户间的交易
+    [SugarIndex("index_Records_allocated_expense_dirty", nameof(Record.allocatedExpenseCacheDirty), OrderByType.Asc)]
     [SugarIndex("index_Records_balance_rollup", nameof(Record._account_Id), OrderByType.Asc, nameof(Record.t), OrderByType.Asc, nameof(Record._statementImport_Id), OrderByType.Asc, nameof(Record.date), OrderByType.Asc)]
     [SugarIndex("index_Records_import_date", nameof(Record._statementImport_Id), OrderByType.Asc, nameof(Record.date), OrderByType.Asc, nameof(Record._account_Id), OrderByType.Asc, nameof(Record.t), OrderByType.Asc)]
     [SugarTable("Records")]
@@ -378,6 +379,12 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "0")]
         public int HoldingQuantity { get; set; } = 0; // 交易涉及的持仓数量，非持仓交易为 0。
+
+        [SugarColumn(IsNullable = true)]
+        public int? expenseAllocationDays { get; set; } = null; // UI 支出统计均摊天数，表示交易日及之前共 N 天。
+
+        [SugarColumn(DefaultValue = "1")]
+        public bool allocatedExpenseCacheDirty { get; set; } = true; // 均摊支出缓存维护状态，不属于业务数据。
 
         public DateTime date { get; set; } // 交易日，表示交易实际发生的日期。
 
@@ -438,6 +445,23 @@ namespace MyBook
     }
     public class Records : List<Record>
     {
+    }
+
+    [SugarIndex("index_AllocatedExpenseItems_date", nameof(AllocatedExpenseItem.date), OrderByType.Asc)]
+    [SugarTable("AllocatedExpenseItems")]
+    public class AllocatedExpenseItem
+    {
+        [SugarColumn(IsPrimaryKey = true)]
+        public int _record_Id { get; set; }
+
+        [SugarColumn(IsPrimaryKey = true, ColumnDataType = "date")]
+        public DateTime date { get; set; }
+
+        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal amount { get; set; } = 0;
+
+        [Navigate(NavigateType.ManyToOne, nameof(_record_Id), nameof(MyBook.Record.Id))]
+        public Record? Record { get; set; }
     }
 
     public enum SnapshotSource

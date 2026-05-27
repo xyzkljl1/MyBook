@@ -84,6 +84,8 @@ CREATE TABLE `records` (
   `matchedRecordId` int DEFAULT NULL,
   `matchedRecordReason` varchar(1024) NOT NULL DEFAULT '',
   `isRefundMatched` tinyint(1) NOT NULL DEFAULT '0',
+  `expenseAllocationDays` int DEFAULT NULL,
+  `allocatedExpenseCacheDirty` tinyint(1) NOT NULL DEFAULT '1',
   `date` datetime NOT NULL,
   `updateTime` datetime NOT NULL,
   `Source` varchar(1024) NOT NULL DEFAULT '',
@@ -105,10 +107,20 @@ CREATE TABLE `records` (
   KEY `index_Records_import_date` (`_statementImport_Id`,`date`,`_account_Id`,`_Currency_t`),
   KEY `fk_Records_matchedRecord` (`matchedRecordId`),
   KEY `fk_Records_holding` (`_holding_Id`),
+  KEY `index_Records_allocated_expense_dirty` (`allocatedExpenseCacheDirty`),
   CONSTRAINT `fk_Records_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`),
   CONSTRAINT `fk_Records_holding` FOREIGN KEY (`_holding_Id`) REFERENCES `holdings` (`Id`),
   CONSTRAINT `fk_Records_matchedRecord` FOREIGN KEY (`matchedRecordId`) REFERENCES `records` (`Id`),
   CONSTRAINT `fk_Records_statementImport` FOREIGN KEY (`_statementImport_Id`) REFERENCES `statementimports` (`Id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `allocatedexpenseitems` (
+  `_record_Id` int NOT NULL,
+  `date` date NOT NULL,
+  `amount` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
+  PRIMARY KEY (`_record_Id`,`date`),
+  KEY `index_AllocatedExpenseItems_date` (`date`),
+  CONSTRAINT `fk_AllocatedExpenseItems_record` FOREIGN KEY (`_record_Id`) REFERENCES `records` (`Id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `snapshots` (
@@ -144,5 +156,13 @@ CREATE TABLE `snapshotitems` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `accountbalances` AS select cast(row_number() OVER (ORDER BY `grouped`.`_account_Id`,`grouped`.`currency_type` )  as signed) AS `Id`,`grouped`.`amount` AS `amount`,`grouped`.`currency_type` AS `currency_type`,`grouped`.`_account_Id` AS `_account_Id` from (select `holdings`.`_account_Id` AS `_account_Id`,`holdings`.`_currentPrice_t` AS `currency_type`,sum((case when (`holdings`.`holdingType` = 'UST') then round((`holdings`.`quantity` * `holdings`.`_currentPrice_v`),2) else (`holdings`.`quantity` * `holdings`.`_currentPrice_v`) end)) AS `amount` from `holdings` group by `holdings`.`_account_Id`,`holdings`.`_currentPrice_t` having (`amount` <> 0)) `grouped`;
+
+CREATE TRIGGER `trg_Records_alloc_exp_ins`
+BEFORE INSERT ON `Records`
+FOR EACH ROW SET NEW.`allocatedExpenseCacheDirty` = 1;
+
+CREATE TRIGGER `trg_Records_alloc_exp_upd`
+BEFORE UPDATE ON `Records`
+FOR EACH ROW SET NEW.`allocatedExpenseCacheDirty` = IF(NOT (OLD.`Id` <=> NEW.`Id` AND OLD.`_Currency_v` <=> NEW.`_Currency_v` AND OLD.`_Currency_t` <=> NEW.`_Currency_t` AND OLD.`DestAccount` <=> NEW.`DestAccount` AND OLD.`isInternal` <=> NEW.`isInternal` AND OLD.`matchedRecordId` <=> NEW.`matchedRecordId` AND OLD.`matchedRecordReason` <=> NEW.`matchedRecordReason` AND OLD.`isRefundMatched` <=> NEW.`isRefundMatched` AND OLD.`HoldingQuantity` <=> NEW.`HoldingQuantity` AND OLD.`expenseAllocationDays` <=> NEW.`expenseAllocationDays` AND OLD.`date` <=> NEW.`date` AND OLD.`postingDate` <=> NEW.`postingDate` AND OLD.`updateTime` <=> NEW.`updateTime` AND OLD.`Source` <=> NEW.`Source` AND OLD.`Reason` <=> NEW.`Reason` AND CAST(OLD.`backup` AS CHAR) <=> CAST(NEW.`backup` AS CHAR) AND OLD.`_account_Id` <=> NEW.`_account_Id` AND OLD.`_holding_Id` <=> NEW.`_holding_Id` AND OLD.`_descCurrency_v` <=> NEW.`_descCurrency_v` AND OLD.`_descCurrency_t` <=> NEW.`_descCurrency_t` AND OLD.`_statementImport_Id` <=> NEW.`_statementImport_Id`), 1, NEW.`allocatedExpenseCacheDirty`);
 
 SET FOREIGN_KEY_CHECKS=1;

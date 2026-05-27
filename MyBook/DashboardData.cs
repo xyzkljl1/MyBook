@@ -75,6 +75,24 @@ namespace MyBook
         public decimal? RmbAmount { get; set; }
     }
 
+    public class AllocatedExpenseDailyData
+    {
+        public DateTime Date { get; set; }
+        public string Reason { get; set; } = "";
+        public CurrencyType Currency { get; set; }
+        public decimal Amount { get; set; }
+        public decimal? RmbAmount { get; set; }
+    }
+
+    public class AllocatedExpenseMonthlyData
+    {
+        public DateTime Month { get; set; }
+        public string Reason { get; set; } = "";
+        public CurrencyType Currency { get; set; }
+        public decimal Amount { get; set; }
+        public decimal? RmbAmount { get; set; }
+    }
+
     public class MonthlyFlowPoint
     {
         public DateTime Month { get; set; }
@@ -150,6 +168,7 @@ namespace MyBook
         public string MatchedRecordReason { get; set; } = "";
         public bool IsRefundMatched { get; set; }
         public int HoldingQuantity { get; set; }
+        public int? ExpenseAllocationDays { get; set; }
         public string Source { get; set; } = "";
         public string Reason { get; set; } = "";
         public StatementImportProvider StatementProvider { get; set; }
@@ -168,6 +187,7 @@ namespace MyBook
         public bool IsInternal { get; set; }
         public bool IsRefundMatched { get; set; }
         public int HoldingQuantity { get; set; }
+        public int? ExpenseAllocationDays { get; set; }
         public string Source { get; set; } = "";
         public string Reason { get; set; } = "";
     }

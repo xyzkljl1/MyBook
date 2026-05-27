@@ -682,6 +682,7 @@
                             <DataGridTextColumn Header="匹配" Binding="{Binding MatchedRecordId}" Width="70" IsReadOnly="True"/>
                             <DataGridTextColumn Header="匹配原因" Binding="{Binding MatchedRecordReason}" Width="140" IsReadOnly="True"/>
                             <DataGridCheckBoxColumn Header="已抵消" Binding="{Binding IsRefundMatched, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="74"/>
+                            <DataGridTextColumn Header="均摊天数" Binding="{Binding ExpenseAllocationDays, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, TargetNullValue=''}" Width="86"/>
                             <DataGridTextColumn Header="来源" Binding="{Binding Source, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="220"/>
                             <DataGridTextColumn Header="导入" Binding="{Binding StatementProviderText}" Width="126" IsReadOnly="True"/>
                             <DataGridTextColumn Header="键" Binding="{Binding StatementKey}" Width="130" IsReadOnly="True"/>

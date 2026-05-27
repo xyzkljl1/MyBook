@@ -777,6 +777,7 @@ namespace MyBook
         public string MatchedRecordReason { get; set; } = "";
         public bool IsRefundMatched { get; set; }
         public string Source { get; set; } = "";
+        public int? ExpenseAllocationDays { get; set; }
         public StatementImportProvider StatementProvider { get; set; }
         public string StatementProviderText { get; set; } = "";
         public string StatementKey { get; set; } = "";
@@ -802,6 +803,7 @@ namespace MyBook
                 MatchedRecordReason = data.MatchedRecordReason,
                 IsRefundMatched = data.IsRefundMatched,
                 Source = data.Source,
+                ExpenseAllocationDays = data.ExpenseAllocationDays,
                 StatementProvider = data.StatementProvider,
                 StatementProviderText = data.StatementProvider.ToString(),
                 StatementKey = data.StatementKey,
@@ -849,6 +851,7 @@ namespace MyBook
                 HoldingQuantity = HoldingQuantity,
                 IsInternal = IsInternal,
                 IsRefundMatched = IsRefundMatched,
+                ExpenseAllocationDays = ExpenseAllocationDays,
                 Source = Source ?? ""
             };
         }
@@ -865,6 +868,7 @@ namespace MyBook
                 HoldingQuantity,
                 IsInternal,
                 IsRefundMatched,
+                ExpenseAllocationDays,
                 Source ?? "");
         }
 
@@ -886,8 +890,14 @@ namespace MyBook
             AddChange(changes, "数量", original.HoldingQuantity.ToString(CultureInfo.InvariantCulture), current.HoldingQuantity.ToString(CultureInfo.InvariantCulture));
             AddChange(changes, "内部", original.IsInternal ? "是" : "否", current.IsInternal ? "是" : "否");
             AddChange(changes, "已抵消", original.IsRefundMatched ? "是" : "否", current.IsRefundMatched ? "是" : "否");
+            AddChange(changes, "均摊天数", FormatNullableInt(original.ExpenseAllocationDays), FormatNullableInt(current.ExpenseAllocationDays));
             AddChange(changes, "来源", original.Source, current.Source);
             return String.Join("；", changes);
+        }
+
+        private static string FormatNullableInt(int? value)
+        {
+            return value.HasValue ? value.Value.ToString(CultureInfo.InvariantCulture) : "";
         }
 
         private static void AddChange(List<string> changes, string name, string oldValue, string newValue)
@@ -956,6 +966,7 @@ namespace MyBook
         int HoldingQuantity,
         bool IsInternal,
         bool IsRefundMatched,
+        int? ExpenseAllocationDays,
         string Source);
 
     public class CurrencySummaryViewModel

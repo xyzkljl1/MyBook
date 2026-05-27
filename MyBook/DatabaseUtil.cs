@@ -28,8 +28,8 @@ namespace MyBook
         private static readonly Regex BootstrapBackupFileRegex = new(
             @"^(?<prefix>bootstrap-\d{8}-\d{6}-\d{6}-(?<hash>[0-9a-f]{12}))\.(?<kind>schema|fixed-data)\.sql$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(Record), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
-        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(Snapshot), typeof(SnapshotItem)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(AllocatedExpenseItem), typeof(Snapshot), typeof(SnapshotItem)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -40,15 +40,42 @@ namespace MyBook
             new("fk_Records_holding", "Records", "_holding_Id", "Holdings", "Id"),
             new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id"),
             new("fk_Records_matchedRecord", "Records", "matchedRecordId", "Records", "Id"),
+            new("fk_AllocatedExpenseItems_record", "AllocatedExpenseItems", "_record_Id", "Records", "Id"),
             new("fk_SnapshotItems_snapshot", "SnapshotItems", "_snapshot_Id", "Snapshots", "Id"),
             new("fk_SnapshotItems_account", "SnapshotItems", "_account_Id", "Accounts", "Id")
         ];
+        private static readonly string[] AllocatedExpenseDirtyTriggerColumns =
+        [
+            "Id",
+            "_Currency_v",
+            "_Currency_t",
+            "DestAccount",
+            "isInternal",
+            "matchedRecordId",
+            "matchedRecordReason",
+            "isRefundMatched",
+            "HoldingQuantity",
+            "expenseAllocationDays",
+            "date",
+            "postingDate",
+            "updateTime",
+            "Source",
+            "Reason",
+            "backup",
+            "_account_Id",
+            "_holding_Id",
+            "_descCurrency_v",
+            "_descCurrency_t",
+            "_statementImport_Id"
+        ];
+        private static readonly TriggerDefinition[] Triggers = BuildTriggerDefinitions();
 
         public DatabaseUtil(IConfigurationRoot config)
         {
             db = CreateDatabaseClient(GetDatabaseConnectionString(config));
             DbValidateSchema();
             DbValidateForeignKeys();
+            DbValidateTriggers();
             ValidateAccountPrimaryRelations();
             DbValidateAccountBalancesViewDefinition();
             ValidateAllAccountBalancesFromHoldings();
@@ -96,6 +123,27 @@ namespace MyBook
                 InitKeyType = InitKeyType.Attribute,
                 IsAutoCloseConnection = true
             });
+        }
+
+        private static TriggerDefinition[] BuildTriggerDefinitions()
+        {
+            var nonDirtyColumnComparisons = String.Join(
+                " AND ",
+                AllocatedExpenseDirtyTriggerColumns.Select(BuildNullSafeRecordColumnComparison));
+            return
+            [
+                new("trg_Records_alloc_exp_ins", "Records", "INSERT", "BEFORE",
+                    "SET NEW.`allocatedExpenseCacheDirty` = 1"),
+                new("trg_Records_alloc_exp_upd", "Records", "UPDATE", "BEFORE",
+                    $"SET NEW.`allocatedExpenseCacheDirty` = IF(NOT ({nonDirtyColumnComparisons}), 1, NEW.`allocatedExpenseCacheDirty`)")
+            ];
+        }
+
+        private static string BuildNullSafeRecordColumnComparison(string columnName)
+        {
+            if (String.Equals(columnName, "backup", StringComparison.OrdinalIgnoreCase))
+                return $"CAST(OLD.`{columnName}` AS CHAR) <=> CAST(NEW.`{columnName}` AS CHAR)";
+            return $"OLD.`{columnName}` <=> NEW.`{columnName}`";
         }
 
         private T ExecuteLockedTransaction<T>(Func<T> action)
@@ -206,6 +254,7 @@ namespace MyBook
         {
             DbValidateSchema();
             DbValidateForeignKeys();
+            DbValidateTriggers();
             ValidateAccountPrimaryRelations();
             DbValidateAccountBalancesViewDefinition();
             ValidateAllAccountBalancesFromHoldings();
@@ -225,6 +274,12 @@ namespace MyBook
 
             builder.AppendLine(NormalizeCreateViewSql(GetViewCreateSql("AccountBalances")));
             builder.AppendLine();
+
+            foreach (var trigger in Triggers)
+            {
+                builder.AppendLine(trigger.CreateSql);
+                builder.AppendLine();
+            }
 
             builder.AppendLine("SET FOREIGN_KEY_CHECKS=1;");
 
@@ -781,6 +836,7 @@ namespace MyBook
 
                     MatchKnownInternalTransfersForStatements([statementImportId.Value]);
                     MatchInternalTransfersAroundStatement(statementImportId.Value);
+                    ProcessAllocatedExpenseDirtyRecordsCore();
                     return true;
                 });
             }
@@ -862,6 +918,7 @@ namespace MyBook
                 foreach (var statementImportId in savedStatementImportIds)
                     MatchInternalTransfersAroundStatement(statementImportId);
 
+                ProcessAllocatedExpenseDirtyRecordsCore();
                 return saved;
             });
         }
@@ -1137,6 +1194,7 @@ namespace MyBook
                         MatchedRecordReason = record.matchedRecordReason,
                         IsRefundMatched = record.isRefundMatched,
                         HoldingQuantity = record.HoldingQuantity,
+                        ExpenseAllocationDays = record.expenseAllocationDays,
                         Source = record.Source,
                         Reason = record.Reason,
                         StatementProvider = statementImport?.provider ?? StatementImportProvider.Manual,
@@ -1199,6 +1257,8 @@ namespace MyBook
 
                     UpdateRecordDetail(edit, account, now, ref manualStatementImportId);
                 }
+
+                ProcessAllocatedExpenseDirtyRecordsCore();
             });
         }
 
@@ -1237,6 +1297,7 @@ namespace MyBook
                 isInternal = edit.IsInternal,
                 isRefundMatched = edit.IsRefundMatched,
                 HoldingQuantity = edit.HoldingQuantity,
+                expenseAllocationDays = NormalizeExpenseAllocationDays(edit.ExpenseAllocationDays),
                 Source = CleanRecordText(edit.Source),
                 Reason = CleanRecordText(edit.Reason),
                 _account_Id = account.Id,
@@ -1269,6 +1330,7 @@ namespace MyBook
             var normalizedDestAccount = CleanRecordText(edit.DestAccount);
             var normalizedSource = CleanRecordText(edit.Source);
             var normalizedReason = CleanRecordText(edit.Reason);
+            var normalizedExpenseAllocationDays = NormalizeExpenseAllocationDays(edit.ExpenseAllocationDays);
             if (existing._account_Id != account.Id)
                 throw new InvalidOperationException($"Record account is fixed and cannot be edited: {existing.Id}");
             if (statementImport.provider != StatementImportProvider.Manual && existing.date != normalizedDate)
@@ -1286,6 +1348,7 @@ namespace MyBook
                 || existing.isInternal != edit.IsInternal
                 || existing.isRefundMatched != edit.IsRefundMatched
                 || existing.HoldingQuantity != edit.HoldingQuantity
+                || existing.expenseAllocationDays != normalizedExpenseAllocationDays
                 || existing.Source != normalizedSource
                 || existing.Reason != normalizedReason;
             if (!changed)
@@ -1306,6 +1369,7 @@ namespace MyBook
             existing.isInternal = edit.IsInternal;
             existing.isRefundMatched = edit.IsRefundMatched;
             existing.HoldingQuantity = edit.HoldingQuantity;
+            existing.expenseAllocationDays = normalizedExpenseAllocationDays;
             existing.Source = normalizedSource;
             existing.Reason = normalizedReason;
             if (statementImport.provider == StatementImportProvider.Manual)
@@ -1313,6 +1377,273 @@ namespace MyBook
             ValidateRecordHolding(existing, account);
             db.Updateable(existing).ExecuteCommand();
             ApplyRecordDeltaToHolding(existing, 1);
+        }
+
+        private static int? NormalizeExpenseAllocationDays(int? value)
+        {
+            return value.HasValue && value.Value > 1 ? value.Value : null;
+        }
+
+        public List<AllocatedExpenseDailyData> GetAllocatedExpenseDaily(DateTime date)
+        {
+            return GetAllocatedExpenseDaily(date.Date, date.Date.AddDays(1));
+        }
+
+        public List<AllocatedExpenseDailyData> GetAllocatedExpenseDaily(DateTime startInclusive, DateTime endExclusive)
+        {
+            var startDate = startInclusive.Date;
+            var endDate = endExclusive.Date;
+            if (endDate <= startDate)
+                throw new ArgumentException("Allocated expense end date must be after start date.", nameof(endExclusive));
+
+            EnsureAllocatedExpenseCacheClean();
+            return ReadAllocatedExpenseDailyFromCache(startDate, endDate, GetCurrencyToRmbRates());
+        }
+
+        public List<AllocatedExpenseMonthlyData> GetAllocatedExpenseMonthly(DateTime month)
+        {
+            var firstMonth = new DateTime(month.Year, month.Month, 1);
+            return GetAllocatedExpenseMonthly(firstMonth, firstMonth.AddMonths(1));
+        }
+
+        public List<AllocatedExpenseMonthlyData> GetAllocatedExpenseMonthly(DateTime firstMonthInclusive, DateTime endMonthExclusive)
+        {
+            var firstMonth = new DateTime(firstMonthInclusive.Year, firstMonthInclusive.Month, 1);
+            var endMonth = new DateTime(endMonthExclusive.Year, endMonthExclusive.Month, 1);
+            if (endMonth <= firstMonth)
+                throw new ArgumentException("Allocated expense end month must be after first month.", nameof(endMonthExclusive));
+
+            var daily = GetAllocatedExpenseDaily(firstMonth, endMonth);
+            return daily
+                .GroupBy(item => (Month: new DateTime(item.Date.Year, item.Date.Month, 1), item.Reason, item.Currency))
+                .Select(group =>
+                {
+                    var amount = Currency.RoundMoney(group.Sum(item => item.Amount));
+                    var rmbValues = group.Select(item => item.RmbAmount).ToList();
+                    return new AllocatedExpenseMonthlyData
+                    {
+                        Month = group.Key.Month,
+                        Reason = group.Key.Reason,
+                        Currency = group.Key.Currency,
+                        Amount = amount,
+                        RmbAmount = rmbValues.Any(value => !value.HasValue)
+                            ? null
+                            : Currency.RoundMoney(rmbValues.Sum(value => value!.Value))
+                    };
+                })
+                .Where(item => item.Amount != 0)
+                .OrderBy(item => item.Month)
+                .ThenBy(item => item.Reason)
+                .ThenBy(item => item.Currency)
+                .ToList();
+        }
+
+        public void ProcessAllocatedExpenseDirtyRecords()
+        {
+            ExecuteLockedTransaction(ProcessAllocatedExpenseDirtyRecordsCore);
+        }
+
+        public void RebuildAllocatedExpenseCache()
+        {
+            ExecuteLockedTransaction(() =>
+            {
+                db.Deleteable<AllocatedExpenseItem>().ExecuteCommand();
+                MarkAllocatedExpenseDirtyForAllRecordsCore();
+                ProcessAllocatedExpenseDirtyRecordsCore();
+                ValidateAllocatedExpenseCacheCore();
+            });
+        }
+
+        public void ValidateAllocatedExpenseCache()
+        {
+            ExecuteLockedTransaction(ValidateAllocatedExpenseCacheCore);
+        }
+
+        private void ProcessAllocatedExpenseDirtyRecordsCore()
+        {
+            var records = db.Queryable<Record>()
+                .Where(record => record.allocatedExpenseCacheDirty)
+                .ToList();
+            if (records.Count == 0)
+                return;
+
+            var dirtyRecordIds = records.Select(record => record.Id).Distinct().ToList();
+            db.Deleteable<AllocatedExpenseItem>()
+                .Where(item => dirtyRecordIds.Contains(item._record_Id))
+                .ExecuteCommand();
+
+            var cacheItems = records
+                .SelectMany(BuildAllocatedExpenseCacheItems)
+                .ToList();
+            if (cacheItems.Count > 0)
+                db.Insertable(cacheItems).ExecuteCommand();
+
+            db.Ado.ExecuteCommand("""
+                update `Records`
+                set `allocatedExpenseCacheDirty` = 0
+                where `allocatedExpenseCacheDirty` <> 0
+                """);
+        }
+
+        private void MarkAllocatedExpenseDirtyForAllRecordsCore()
+        {
+            db.Ado.ExecuteCommand("""
+                update `Records`
+                set `allocatedExpenseCacheDirty` = 1
+                """);
+        }
+
+        private void EnsureAllocatedExpenseCacheClean()
+        {
+            var dirtyCount = db.Queryable<Record>()
+                .Where(record => record.allocatedExpenseCacheDirty)
+                .Count();
+            if (dirtyCount > 0)
+                throw new InvalidOperationException($"Allocated expense cache is dirty for {dirtyCount} record(s). Run ProcessAllocatedExpenseDirtyRecords first.");
+        }
+
+        private void ValidateAllocatedExpenseCacheCore()
+        {
+            EnsureAllocatedExpenseCacheClean();
+
+            var records = db.Queryable<Record>().ToList();
+            var expected = records
+                .SelectMany(BuildAllocatedExpenseCacheItems)
+                .OrderBy(item => item._record_Id)
+                .ThenBy(item => item.date)
+                .ToList();
+            var actual = db.Queryable<AllocatedExpenseItem>()
+                .ToList()
+                .OrderBy(item => item._record_Id)
+                .ThenBy(item => item.date)
+                .ToList();
+            if (expected.Count != actual.Count)
+                throw new InvalidOperationException($"Allocated expense cache mismatch: expected {expected.Count} item(s), actual {actual.Count} item(s).");
+
+            for (var i = 0; i < expected.Count; i++)
+            {
+                var left = expected[i];
+                var right = actual[i];
+                if (left._record_Id != right._record_Id
+                    || left.date.Date != right.date.Date
+                    || left.amount != right.amount)
+                {
+                    throw new InvalidOperationException(
+                        $"Allocated expense cache mismatch at {i}: expected record={left._record_Id}, date={left.date:yyyy-MM-dd}, amount={left.amount}; actual record={right._record_Id}, date={right.date:yyyy-MM-dd}, amount={right.amount}.");
+                }
+            }
+        }
+
+        private List<AllocatedExpenseDailyData> ReadAllocatedExpenseDailyFromCache(
+            DateTime startDate,
+            DateTime endDate,
+            Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var cacheItems = db.Queryable<AllocatedExpenseItem>()
+                .Where(item => item.date >= startDate && item.date < endDate)
+                .ToList();
+            if (cacheItems.Count == 0)
+                return [];
+
+            var recordIds = cacheItems.Select(item => item._record_Id).Distinct().ToList();
+            var records = db.Queryable<Record>()
+                .Where(record => recordIds.Contains(record.Id))
+                .ToList()
+                .ToDictionary(record => record.Id);
+
+            return cacheItems
+                .Select(item =>
+                {
+                    if (!records.TryGetValue(item._record_Id, out var record))
+                        throw new InvalidOperationException($"Allocated expense cache points to missing record: {item._record_Id}");
+
+                    return new AllocatedExpenseDailyData
+                    {
+                        Date = item.date.Date,
+                        Reason = GetRecordReasonDisplay(record),
+                        Currency = record.t,
+                        Amount = item.amount,
+                        RmbAmount = TryConvertToRmb(item.amount, record.t, exchangeRates)
+                    };
+                })
+                .GroupBy(item => (item.Date, item.Reason, item.Currency))
+                .Select(group =>
+                {
+                    var amount = Currency.RoundMoney(group.Sum(item => item.Amount));
+                    var rmbValues = group.Select(item => item.RmbAmount).ToList();
+                    return new AllocatedExpenseDailyData
+                    {
+                        Date = group.Key.Date,
+                        Reason = group.Key.Reason,
+                        Currency = group.Key.Currency,
+                        Amount = amount,
+                        RmbAmount = rmbValues.Any(value => !value.HasValue)
+                            ? null
+                            : Currency.RoundMoney(rmbValues.Sum(value => value!.Value))
+                    };
+                })
+                .Where(item => item.Amount != 0)
+                .OrderBy(item => item.Date)
+                .ThenBy(item => item.Reason)
+                .ThenBy(item => item.Currency)
+                .ToList();
+        }
+
+        private static IEnumerable<AllocatedExpenseItem> BuildAllocatedExpenseCacheItems(
+            Record record)
+        {
+            if (!ShouldRecordContributeToAllocatedExpense(record))
+                yield break;
+
+            var days = NormalizeExpenseAllocationDays(record.expenseAllocationDays)!.Value;
+            var allocationStart = GetExpenseAllocationStartDate(record);
+            var allocationEnd = record.date.Date.AddDays(1);
+            for (var date = allocationStart; date < allocationEnd; date = date.AddDays(1))
+            {
+                var amount = GetAllocatedExpenseAmountForDay(record, date, days);
+                if (amount == 0)
+                    continue;
+
+                yield return new AllocatedExpenseItem
+                {
+                    _record_Id = record.Id,
+                    date = date,
+                    amount = amount
+                };
+            }
+        }
+
+        private static bool ShouldRecordContributeToAllocatedExpense(Record record)
+        {
+            return !record.isInternal
+                && record.matchedRecordId is null
+                && !record.isRefundMatched
+                && record.v < 0
+                && NormalizeExpenseAllocationDays(record.expenseAllocationDays).HasValue;
+        }
+
+        private static string GetRecordReasonDisplay(Record record)
+        {
+            return String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason;
+        }
+
+        private static DateTime GetExpenseAllocationStartDate(Record record)
+        {
+            var days = NormalizeExpenseAllocationDays(record.expenseAllocationDays) ?? 1;
+            return record.date.Date.AddDays(1 - days);
+        }
+
+        private static decimal GetAllocatedExpenseAmountForDay(Record record, DateTime date, int days)
+        {
+            var total = Currency.RoundMoney(-record.v);
+            if (days <= 1)
+                return total;
+
+            var baseAmount = Currency.RoundMoney(total / days);
+            if (date.Date != record.date.Date)
+                return baseAmount;
+
+            return Currency.RoundMoney(total - baseAmount * (days - 1));
         }
 
         private void MatchInternalTransfersAroundStatement(int statementImportId)
@@ -1598,6 +1929,7 @@ namespace MyBook
                     record.matchedRecordReason,
                     record.isRefundMatched,
                     record.HoldingQuantity,
+                    record.expenseAllocationDays,
                     record.Source,
                     record.Reason,
                     record._descCurrency_v,
@@ -3589,6 +3921,7 @@ namespace MyBook
                 else
                     CleanToStartSnapshotCore();
                 ValidateFinancePreserved(preservedFinance);
+                ProcessAllocatedExpenseDirtyRecordsCore();
             });
 
             return new DatabaseCleanupResult(
@@ -3939,6 +4272,8 @@ namespace MyBook
                         .UpdateColumns(account => new { account.relativeBalance })
                         .ExecuteCommand();
                 }
+
+                ProcessAllocatedExpenseDirtyRecordsCore();
             });
         }
 
@@ -4150,16 +4485,20 @@ namespace MyBook
             if (updates.Count == 0)
                 return;
 
-            var now = DateTime.Now;
-            foreach (var record in updates)
+            ExecuteLockedTransaction(() =>
             {
-                record.isRefundMatched = true;
-                record.updateTime = now;
-            }
+                var now = DateTime.Now;
+                foreach (var record in updates)
+                {
+                    record.isRefundMatched = true;
+                    record.updateTime = now;
+                }
 
-            db.Updateable(updates)
-                .UpdateColumns(record => new { record.isRefundMatched, record.updateTime })
-                .ExecuteCommand();
+                db.Updateable(updates)
+                    .UpdateColumns(record => new { record.isRefundMatched, record.updateTime })
+                    .ExecuteCommand();
+                ProcessAllocatedExpenseDirtyRecordsCore();
+            });
         }
 
         public static DateTime NormalizeStatementImportTime(DateTime time)
@@ -4322,6 +4661,31 @@ namespace MyBook
             }
         }
 
+        private void DbValidateTriggers()
+        {
+            foreach (var trigger in Triggers)
+            {
+                var exists = db.Ado.GetInt("""
+                    select count(*)
+                    from information_schema.triggers
+                    where trigger_schema = database()
+                        and trigger_name = @triggerName
+                        and event_object_table = @tableName
+                        and event_manipulation = @event
+                        and action_timing = @timing
+                    """,
+                    new SugarParameter("@triggerName", trigger.Name),
+                    new SugarParameter("@tableName", trigger.TableName),
+                    new SugarParameter("@event", trigger.EventName),
+                    new SugarParameter("@timing", trigger.Timing)) > 0;
+                if (!exists)
+                {
+                    throw new InvalidOperationException(
+                        $"Database schema mismatch: missing trigger {trigger.Name} on {trigger.TableName}");
+                }
+            }
+        }
+
         private void ValidateAccountPrimaryRelations()
         {
             var accounts = db.Queryable<Account>().ToList();
@@ -4352,6 +4716,8 @@ namespace MyBook
                 return "OAuthTokens";
             if (type == typeof(Record))
                 return "Records";
+            if (type == typeof(AllocatedExpenseItem))
+                return "AllocatedExpenseItems";
             if (type == typeof(Holding))
                 return "Holdings";
             if (type == typeof(Finance))
@@ -4603,6 +4969,7 @@ namespace MyBook
             string MatchedRecordReason,
             bool IsRefundMatched,
             int HoldingQuantity,
+            int? ExpenseAllocationDays,
             string Source,
             string Reason,
             decimal? DescCurrencyAmount,
@@ -4638,6 +5005,20 @@ namespace MyBook
             string ColumnName,
             string ReferencedTableName,
             string ReferencedColumnName);
+
+        private sealed record TriggerDefinition(
+            string Name,
+            string TableName,
+            string EventName,
+            string Timing,
+            string ActionStatement)
+        {
+            public string CreateSql => $"""
+                CREATE TRIGGER `{Name}`
+                {Timing} {EventName} ON `{TableName}`
+                FOR EACH ROW {ActionStatement};
+                """;
+        }
 
         private sealed record FinancePreservationItem(
             int Id,
