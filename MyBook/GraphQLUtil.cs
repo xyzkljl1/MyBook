@@ -12,7 +12,10 @@ namespace MyBook
     partial class GraphQLUtil
     {
         private const string NexusGraphQLEndpoint = "https://api.nexusmods.com/v2/graphql";
+        private const string NexusApplicationName = "MyBook";
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
+        private static readonly string NexusApplicationVersion =
+            typeof(GraphQLUtil).Assembly.GetName().Version?.ToString() ?? "0.0.0";
 
         private readonly IConfigurationRoot config;
         private readonly DatabaseUtil? database;
@@ -29,7 +32,7 @@ namespace MyBook
         {
             using HttpClient client = new();
             client.Timeout = RequestTimeout;
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0");
+            ApplyNexusApplicationHeaders(client);
             var accessToken = await GetNexusOAuthAccessToken();
             if (!String.IsNullOrWhiteSpace(accessToken))
             {
@@ -79,6 +82,13 @@ namespace MyBook
         {
             var value = config[key];
             return String.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        }
+
+        private static void ApplyNexusApplicationHeaders(HttpClient client)
+        {
+            client.DefaultRequestHeaders.UserAgent.ParseAdd($"{NexusApplicationName}/{NexusApplicationVersion}");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Application-Name", NexusApplicationName);
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Application-Version", NexusApplicationVersion);
         }
     }
 }
