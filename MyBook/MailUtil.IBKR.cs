@@ -259,44 +259,6 @@ namespace MyBook
             ["TQQQ"] = HoldingType.NASDAQ,
         };
 
-        public void DebugFetchLocalIBKRReports()
-        {
-            var files = Directory.GetFiles(Directory.GetCurrentDirectory(), "*.csv")
-                .Where(file => TryParseIBKRReportAttachmentName(Path.GetFileName(file), out var attachmentInfo)
-                    && IsDailyMyBookReportType(attachmentInfo.ReportType))
-                .OrderBy(file =>
-                {
-                    TryParseIBKRReportAttachmentName(Path.GetFileName(file), out var attachmentInfo);
-                    return attachmentInfo.ReportDate;
-                })
-                .ToList();
-            if (files.Count == 0)
-                throw new FileNotFoundException("No local IBKR csv report found.");
-
-            var reports = files
-                .Select(file =>
-                {
-                    TryParseIBKRReportAttachmentName(Path.GetFileName(file), out var attachmentInfo);
-                    var csv = ReadIBKRLocalCsv(file);
-                    return ParseIBKRReportCsv(csv, attachmentInfo.ReportDate, file);
-                })
-                .ToList();
-            SaveIBKRParsedReports(reports);
-        }
-
-        public bool DebugFetchLocalIBKRReport(string path)
-        {
-            if (!TryParseIBKRReportAttachmentName(Path.GetFileName(path), out var attachmentInfo)
-                || !IsDailyMyBookReportType(attachmentInfo.ReportType)
-                || !IsIBKRCsvAttachment(path))
-            {
-                throw new ArgumentException($"Invalid IBKR csv report file name: {path}");
-            }
-
-            var csv = ReadIBKRLocalCsv(path);
-            return SaveIBKRParsedReports([ParseIBKRReportCsv(csv, attachmentInfo.ReportDate, path)])[0];
-        }
-
         private static string ReadIBKRLocalCsv(string path)
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);

@@ -33,93 +33,6 @@ namespace MyBook
             @"下单时间[:：]\s*(?<time>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})",
             RegexOptions.CultureInvariant);
 
-        public async Task<int> DebugDownloadICBCHistoryDetails(DateTime mailDate, string? directory)
-        {
-            var targetDirectory = GetICBCHistoryDetailDirectory(directory);
-            Directory.CreateDirectory(targetDirectory);
-            var messages = await SearchICBCHistoryDetailMessages(mailDate.Date);
-            var savedCount = 0;
-            foreach (var message in messages)
-            {
-                savedCount += SaveOpenableICBCHistoryDetailAttachments(message, targetDirectory, null).Count;
-            }
-
-            Console.WriteLine($"Saved ICBC history PDFs: {savedCount}");
-            return savedCount;
-        }
-
-        public async Task<string> DebugDownloadLatestICBCHistoryDetail(string? directory)
-        {
-            var targetDirectory = GetICBCHistoryDetailDirectory(directory);
-            Directory.CreateDirectory(targetDirectory);
-            var mailbox = CreateYahooMailbox();
-            using ImapClient client = new();
-            client.Timeout = 120000;
-            client.CheckCertificateRevocation = false;
-            client.ProxyClient = null;
-
-            Console.WriteLine($"mail connect direct {mailbox.Label} latest ICBC history detail");
-            await RunMailOperation(token => client.ConnectAsync(mailbox.Host, mailbox.Port, mailbox.UseSsl, token));
-            Console.WriteLine("mail connected");
-            await RunMailOperation(token => client.AuthenticateAsync(mailbox.Username, mailbox.Password, token));
-            Console.WriteLine("mail authenticated");
-            var folder = await GetMailSearchFolder(client, mailbox);
-            await RunMailOperation(token => folder.OpenAsync(FolderAccess.ReadOnly, token));
-            Console.WriteLine($"mail folder opened {folder.FullName}");
-
-            var query = SearchQuery.FromContains(ICBCHistoryDetailSender)
-                .And(SearchQuery.SubjectContains(ICBCHistoryDetailSubjectKeyword))
-                .And(SearchQuery.SentSince(DateTime.Today.AddYears(-2)));
-            var uids = await RunMailOperation(token => folder.SearchAsync(query, token));
-            Console.WriteLine($"mail search latest ICBC history detail found {uids.Count}");
-            if (uids.Count == 0)
-                throw new InvalidOperationException("No ICBC history detail mail found.");
-
-            var summaries = await RunMailOperation(token => folder.FetchAsync(
-                uids,
-                MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId,
-                token));
-            var candidates = summaries
-                .Where(IsICBCHistoryDetailSummary)
-                .OrderByDescending(GetMessageSummaryDate)
-                .ThenByDescending(summary => summary.UniqueId.Id)
-                .ToList();
-            foreach (var summary in candidates)
-            {
-                var message = await RunMailOperation(token => folder.GetMessageAsync(summary.UniqueId, token));
-                var savedFiles = SaveOpenableICBCHistoryDetailAttachments(message, targetDirectory, 1);
-                if (savedFiles.Count == 0)
-                    continue;
-
-                Console.WriteLine($"Saved latest ICBC history PDF: {savedFiles[0]}");
-                return savedFiles[0];
-            }
-
-            throw new InvalidOperationException("No openable ICBC history detail PDF found.");
-        }
-
-        public int DebugFetchLocalICBCHistoryDetails(string? directory)
-        {
-            var targetDirectory = GetICBCHistoryDetailDirectory(directory);
-            var files = Directory.GetFiles(targetDirectory, "*.pdf")
-                .Where(IsLikelyLocalICBCHistoryDetailPdf)
-                .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            if (files.Count == 0)
-                throw new FileNotFoundException($"No ICBC history detail PDF found in {targetDirectory}");
-
-            var importedCount = 0;
-            foreach (var file in files)
-            {
-                var parsed = ParseICBCHistoryDetailPdfFile(file);
-                if (ImportICBCHistoryDetail(parsed))
-                    importedCount++;
-            }
-
-            Console.WriteLine($"Imported ICBC history detail statements: {importedCount}");
-            return importedCount;
-        }
-
         public async Task<int> FetchICBCHistoryDetails(DateTime since)
         {
             var mailbox = CreateYahooMailbox();
@@ -267,28 +180,6 @@ namespace MyBook
                 || Regex.IsMatch(fileName, @"^\d{18,}-\d{8}\.pdf$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
-        private async Task<List<MimeMessage>> SearchICBCHistoryDetailMessages(DateTime mailDate)
-        {
-            var query = SearchQuery.FromContains(ICBCHistoryDetailSender)
-                .And(SearchQuery.SubjectContains(ICBCHistoryDetailSubjectKeyword))
-                .And(SearchQuery.SentSince(mailDate.Date))
-                .And(SearchQuery.SentBefore(mailDate.Date.AddDays(1)));
-            return await SearchMessages(
-                $"ICBC history details {mailDate:yyyy-MM-dd}",
-                query,
-                IsICBCHistoryDetailMessage,
-                GetMailDateTime);
-        }
-
-        private static bool IsICBCHistoryDetailMessage(MimeMessage message)
-        {
-            return IsFrom(message, ICBCHistoryDetailSender)
-                && TryParseICBCHistoryDetailApplicationNo(message.Subject ?? "", out _)
-                && HasMatchingAttachment(
-                    message,
-                    (_, fileName) => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
-        }
-
         private static bool TryParseICBCHistoryDetailApplicationNo(string subject, out string applicationNo)
         {
             applicationNo = "";
@@ -298,15 +189,6 @@ namespace MyBook
 
             applicationNo = match.Groups["applicationNo"].Value;
             return true;
-        }
-
-        private ICBCHistoryDetailParsedStatement ParseICBCHistoryDetailPdfFile(string file)
-        {
-            var bytes = File.ReadAllBytes(file);
-            if (!TryReadICBCHistoryDetailPdfText(bytes, out var text, out var error))
-                throw new MailParseException($"Parse ICBC history detail PDF fail: {file}; {error}");
-
-            return ParseICBCHistoryDetailPdfText(text, Path.GetFileName(file), ComputeSha256(bytes));
         }
 
         private static bool TryReadICBCHistoryDetailPdfText(byte[] pdfBytes, out string text, out string error)

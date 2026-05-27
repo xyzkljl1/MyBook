@@ -120,7 +120,7 @@ During scheduled fetches:
 - Exchange rates are refreshed every cycle.
 - A daily snapshot is created after the fetch cycle.
 
-Debug builds do not run scheduled fetch tasks. The app prints `skip scheduled fetch in DEBUG` and only performs fetches when an explicit command-line fetch/debug command is used.
+Debug builds do not run scheduled fetch tasks. The app prints `skip scheduled fetch in DEBUG` and only performs fetches when an explicit command-line fetch command is used.
 
 ## Nexus OAuth
 

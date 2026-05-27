@@ -49,20 +49,6 @@ namespace MyBook
             await FetchWiseReport(date);
         }
 
-        public void DebugFetchLocalWiseReports(string? directory = null)
-        {
-            var files = FindLocalWiseStatementXmlFiles(directory);
-            var parsed = ParseWiseStatementFiles(files)
-                .OrderBy(statement => statement.StatementStartDate)
-                .ThenBy(statement => statement.StatementEndDate)
-                .ToList();
-            if (parsed.Count != 1)
-                throw new MailParseException($"Local Wise XML test expects exactly one statement group, actual={parsed.Count}");
-
-            var saved = SaveWiseParsedStatement(parsed[0]);
-            PrintWiseParsedStatementSummary("Local Wise XML", parsed[0], saved);
-        }
-
         private bool ImportWiseInitialReportsIfNeeded()
         {
             var account = database.GetAccountByName(WiseAccountName);
@@ -171,20 +157,6 @@ namespace MyBook
         {
             var directory = FindInitialReportsDirectory();
             return directory is null ? [] : FindWiseStatementXmlFilesInDirectories([directory]);
-        }
-
-        private List<string> FindLocalWiseStatementXmlFiles(string? directory)
-        {
-            List<string> directories = String.IsNullOrWhiteSpace(directory)
-                ? FindInitialReportsDirectory() is { } initialDirectory
-                    ? [initialDirectory]
-                    : []
-                : [Path.GetFullPath(directory)];
-            var files = FindWiseStatementXmlFilesInDirectories(directories);
-            if (files.Count == 0)
-                throw new FileNotFoundException("No local Wise XML statement found.");
-
-            return files;
         }
 
         private static List<string> FindWiseStatementXmlFilesInDirectories(IEnumerable<string> directories)
