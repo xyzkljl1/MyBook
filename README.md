@@ -95,6 +95,19 @@ dotnet build MyBook\MyBook.csproj -v minimal /p:UseSharedCompilation=false
 
 The project currently builds with a known MailKit NU1902 advisory warning.
 
+## Fetch Behavior
+
+When the desktop app starts in a non-debug build, `Fetcher.RunSchedule()` starts scheduled background fetches. It runs one fetch cycle immediately, then schedules another cycle once per day.
+
+During scheduled fetches:
+
+- IBKR reports are checked every cycle.
+- ICBC monthly bills, Wise reports, OCBC statements, and Nexus DP monthly reports are checked only when the latest import is more than 27 days old.
+- Exchange rates are refreshed every cycle.
+- A daily snapshot is created after the fetch cycle.
+
+Debug builds do not run scheduled fetch tasks. The app prints `skip scheduled fetch in DEBUG` and only performs fetches when an explicit command-line fetch/debug command is used.
+
 ## Common Import Commands
 
 ```powershell
@@ -114,8 +127,6 @@ dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-wise-reports
 dotnet run --project MyBook\MyBook.csproj -- --debug-fetch-local-icbc-history-details
 dotnet run --project MyBook\MyBook.csproj -- --debug-sql "SHOW TABLES"
 ```
-
-Debug builds do not run scheduled fetch tasks.
 
 ## Nexus OAuth
 
