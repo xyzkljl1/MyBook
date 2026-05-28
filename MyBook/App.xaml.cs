@@ -59,13 +59,6 @@ namespace MyBook
                 return;
             }
 
-            if (LocalDebugEntrypoint.TryRun(e.Args, out var localDebugExitCode))
-            {
-                Shutdown(localDebugExitCode);
-                Environment.Exit(localDebugExitCode);
-                return;
-            }
-
             var startupConfig = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
             new DatabaseUtil(startupConfig).EnsureBootstrapSqlBackupIfChanged("startup");
 
