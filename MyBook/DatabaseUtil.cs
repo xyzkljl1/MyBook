@@ -836,6 +836,7 @@ namespace MyBook
 
                     MatchKnownInternalTransfersForStatements([statementImportId.Value]);
                     MatchInternalTransfersAroundStatement(statementImportId.Value);
+                    ApplyAutomaticExpenseAllocationForStatements([statementImportId.Value]);
                     ProcessAllocatedExpenseDirtyRecordsCore();
                     return true;
                 });
@@ -918,6 +919,7 @@ namespace MyBook
                 foreach (var statementImportId in savedStatementImportIds)
                     MatchInternalTransfersAroundStatement(statementImportId);
 
+                ApplyAutomaticExpenseAllocationForStatements(savedStatementImportIds);
                 ProcessAllocatedExpenseDirtyRecordsCore();
                 return saved;
             });
@@ -2437,6 +2439,73 @@ namespace MyBook
                         $"Statement import without external balances is only allowed for relative-balance accounts: provider={provider}, account={account.name}");
                 }
             }
+        }
+
+        private void ApplyAutomaticExpenseAllocationForStatements(IEnumerable<int> statementImportIds)
+        {
+            var statementImportIdList = statementImportIds.Where(id => id > 0).Distinct().ToList();
+            if (statementImportIdList.Count == 0)
+                return;
+
+            var importsById = db.Queryable<StatementImport>()
+                .Where(import => statementImportIdList.Contains(import.Id))
+                .ToList()
+                .ToDictionary(import => import.Id);
+            if (importsById.Count == 0)
+                return;
+
+            var records = db.Queryable<Record>()
+                .Where(record => statementImportIdList.Contains(record._statementImport_Id))
+                .ToList();
+            if (records.Count == 0)
+                return;
+
+            var accountIds = records.Select(record => record._account_Id).Distinct().ToList();
+            var accountsById = db.Queryable<Account>()
+                .Where(account => accountIds.Contains(account.Id))
+                .ToList()
+                .ToDictionary(account => account.Id);
+
+            var recordsToUpdate = new List<Record>();
+            foreach (var record in records)
+            {
+                if (!importsById.TryGetValue(record._statementImport_Id, out var statementImport))
+                    throw new InvalidOperationException($"Record statement import not found: {record._statementImport_Id}");
+                if (!accountsById.TryGetValue(record._account_Id, out var account))
+                    throw new InvalidOperationException($"Record account not found: {record._account_Id}");
+
+                var expenseAllocationDays = NormalizeExpenseAllocationDays(
+                    TryGetAutomaticExpenseAllocationDays(statementImport.provider, record));
+                if (!expenseAllocationDays.HasValue)
+                    continue;
+                if (record.expenseAllocationDays.HasValue)
+                    continue;
+
+                ValidateRecordExpenseAllocation(
+                    record.Id,
+                    expenseAllocationDays,
+                    account.usage,
+                    record.isInternal,
+                    record.matchedRecordId,
+                    record.isRefundMatched,
+                    record.v);
+
+                record.expenseAllocationDays = expenseAllocationDays;
+                record.allocatedExpenseCacheDirty = true;
+                recordsToUpdate.Add(record);
+            }
+
+            if (recordsToUpdate.Count == 0)
+                return;
+
+            db.Updateable(recordsToUpdate)
+                .UpdateColumns(record => new { record.expenseAllocationDays, record.allocatedExpenseCacheDirty })
+                .ExecuteCommand();
+        }
+
+        private static int? TryGetAutomaticExpenseAllocationDays(StatementImportProvider provider, Record record)
+        {
+            return null;
         }
 
         private bool ShouldValidateBeginningAccountBalances(StatementImportProvider provider)

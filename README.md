@@ -118,6 +118,7 @@ During scheduled fetches:
 - Nexus DP imports use the monthly summary API first and fall back to per-month reports only for missing months or summary failures.
 - IBKR, Wise, and OCBC attachment imports search the missing date/month range in batches, then group downloaded attachments by statement date or month.
 - Attachment-based mail imports first filter IMAP summaries and body structures, then download only matching attachment body parts instead of full messages.
+- Imported records pass through one shared automatic expense-allocation judgment function after internal-transfer matching and before allocated-expense cache generation.
 - Exchange rates are refreshed every cycle.
 - A daily snapshot is created after the fetch cycle.
 
