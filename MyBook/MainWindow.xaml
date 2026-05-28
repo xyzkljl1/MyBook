@@ -488,6 +488,7 @@
                                                      VisibleStartDate="{Binding AllocatedExpenseStartDate}"
                                                      VisibleEndDate="{Binding AllocatedExpenseEndDate}"
                                                      WindowShiftRequested="AllocatedExpenseChart_WindowShiftRequested"
+                                                     PeriodDoubleClicked="AllocatedExpenseChart_PeriodDoubleClicked"
                                                      Cursor="Hand"/>
                     </Border>
                     <Border Grid.Row="2" Style="{StaticResource Card}" Padding="0">
@@ -623,7 +624,7 @@
                 </Grid>
             </TabItem>
 
-            <TabItem Header="详情">
+            <TabItem x:Name="DetailTab" Header="详情">
                 <Grid Margin="0,16,0,0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>

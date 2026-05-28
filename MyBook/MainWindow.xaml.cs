@@ -27,6 +27,7 @@ namespace MyBook
         Drawing.Icon? trayIconImage;
         bool isExitRequested;
         bool isLoadingRecordDetails;
+        bool isAdjustingDetailRange;
         bool isLoadingAllocatedExpenses;
         bool isAdjustingAllocatedExpenseRange;
 
@@ -59,7 +60,7 @@ namespace MyBook
 
         private async void DetailDate_SelectedDateChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (isLoadingRecordDetails)
+            if (isLoadingRecordDetails || isAdjustingDetailRange)
                 return;
             if (DataContext is not DashboardViewModel viewModel)
                 return;
@@ -133,6 +134,26 @@ namespace MyBook
             }
             if (!movedWithinLoadedWindow)
                 await LoadAllocatedExpensesAsync(viewModel);
+        }
+
+        private async void AllocatedExpenseChart_PeriodDoubleClicked(object sender, AllocatedExpensePeriodDoubleClickEventArgs e)
+        {
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            isAdjustingDetailRange = true;
+            try
+            {
+                viewModel.DetailStartDate = e.StartDate;
+                viewModel.DetailEndDate = e.EndDate;
+            }
+            finally
+            {
+                isAdjustingDetailRange = false;
+            }
+
+            DetailTab.IsSelected = true;
+            await LoadRecordDetailsAsync(viewModel);
         }
 
         private async void DiscardRecordDetails_Click(object sender, RoutedEventArgs e)
@@ -1716,6 +1737,27 @@ namespace MyBook
         public int UnitOffset { get; set; }
     }
 
+    public class AllocatedExpensePeriodDoubleClickEventArgs : EventArgs
+    {
+        public DateTime StartDate { get; set; }
+        public DateTime EndDate { get; set; }
+
+        public static AllocatedExpensePeriodDoubleClickEventArgs From(DateTime periodStart, bool isMonthly)
+        {
+            var start = isMonthly
+                ? new DateTime(periodStart.Year, periodStart.Month, 1)
+                : periodStart.Date;
+            var end = isMonthly
+                ? start.AddMonths(1).AddDays(-1)
+                : start;
+            return new AllocatedExpensePeriodDoubleClickEventArgs
+            {
+                StartDate = start,
+                EndDate = end
+            };
+        }
+    }
+
     public class MonthlyFlowAccountStatisticsViewModel
     {
         public string DisplayName { get; set; } = "";
@@ -1981,6 +2023,7 @@ namespace MyBook
         Point dragCurrentPoint;
 
         public event EventHandler<AllocatedExpenseWindowShiftEventArgs>? WindowShiftRequested;
+        public event EventHandler<AllocatedExpensePeriodDoubleClickEventArgs>? PeriodDoubleClicked;
 
         public IEnumerable? Items
         {
@@ -2030,6 +2073,18 @@ namespace MyBook
         protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
         {
             base.OnMouseLeftButtonDown(e);
+            if (e.ClickCount >= 2)
+            {
+                if (TryGetBucketAtPoint(e.GetPosition(this), out var bucket))
+                {
+                    PeriodDoubleClicked?.Invoke(
+                        this,
+                        AllocatedExpensePeriodDoubleClickEventArgs.From(bucket.PeriodStart, IsMonthly));
+                    e.Handled = true;
+                }
+                return;
+            }
+
             isDraggingWindow = true;
             dragStartPoint = e.GetPosition(this);
             dragCurrentPoint = dragStartPoint;
@@ -2150,6 +2205,30 @@ namespace MyBook
                 })
                 .Where(placement => placement.CenterX + placement.GroupWidth >= left && placement.CenterX - placement.GroupWidth <= left + chartWidth)
                 .ToList();
+        }
+
+        private bool TryGetBucketAtPoint(Point point, out AllocatedExpenseBucketViewModel bucket)
+        {
+            var left = 64.0;
+            var right = 36.0;
+            var chartWidth = Math.Max(1, ActualWidth - left - right);
+            var loadedBuckets = Items?.Cast<AllocatedExpenseBucketViewModel>().ToList() ?? [];
+            var placements = BuildBucketPlacements(loadedBuckets, left, chartWidth);
+            var placement = placements
+                .Where(placement => IsInViewport(placement, left, chartWidth))
+                .Where(placement =>
+                    point.X >= placement.CenterX - placement.GroupWidth / 2 &&
+                    point.X <= placement.CenterX + placement.GroupWidth / 2)
+                .OrderBy(placement => Math.Abs(point.X - placement.CenterX))
+                .FirstOrDefault();
+            if (placement.Bucket is null)
+            {
+                bucket = new AllocatedExpenseBucketViewModel();
+                return false;
+            }
+
+            bucket = placement.Bucket;
+            return true;
         }
 
         private int GetVisibleUnitCount()
