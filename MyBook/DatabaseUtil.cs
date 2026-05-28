@@ -4794,8 +4794,9 @@ namespace MyBook
             {
                 "view accountbalances as select",
                 "row_number() over",
-                "from holdings",
+                "holdings join accounts",
                 "group by",
+                "accountname",
                 "_account_id",
                 "_currentprice_t",
                 "holdingtype = 'ust'",

@@ -310,6 +310,9 @@ namespace MyBook
         [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(MyBook.Account.Id))]
         public Account? Account { get; set; }
 
+        [SugarColumn(DefaultValue = "")]
+        public string accountName { get; set; } = "";
+
         public AccountBalance()
         {
         }

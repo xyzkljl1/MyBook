@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MailKit;
 using MailKit.Net.Imap;
+using MailKit.Net.Proxy;
 using MailKit.Search;
 using MailKit.Security;
 using Microsoft.Extensions.Configuration;
@@ -24,10 +25,15 @@ namespace MyBook
         private readonly string apppasswd;
         private readonly DatabaseUtil database;
         private readonly IConfigurationRoot config;
+        private readonly MailProxyConfig? mailProxy;
         private readonly AsyncLocal<MailSessionScope?> currentMailSessionScope = new();
         private const int MailClientTimeoutMilliseconds = 300000;
         private static readonly TimeSpan MailClientTimeout = TimeSpan.FromMilliseconds(MailClientTimeoutMilliseconds);
-        private sealed record ImapMailbox(string Label, string Host, int Port, bool UseSsl, string Username, string Password, bool UseAllMail);
+        private sealed record ImapMailbox(string Label, string Host, int Port, bool UseSsl, string Username, string Password, bool UseAllMail, MailProxyConfig? Proxy);
+        private sealed record MailProxyConfig(string Scheme, string Host, int Port)
+        {
+            public string DisplayText => $"{Scheme}://{Host}:{Port}";
+        }
 
         public MailUtil(IConfigurationRoot config, DatabaseUtil database)
         {
@@ -37,6 +43,7 @@ namespace MyBook
             apppasswd = config["yahoo_pass"]!;
             this.database = database;
             this.config = config;
+            mailProxy = ParseMailProxyConfig(config["mail_proxy"]);
         }
 
         public async Task RunWithMailSessionScope(Func<Task> action)
@@ -704,7 +711,7 @@ namespace MyBook
 
         private ImapMailbox CreateYahooMailbox()
         {
-            return new ImapMailbox("Yahoo", "imap.mail.yahoo.com", 993, true, username, apppasswd, false);
+            return new ImapMailbox("Yahoo", "imap.mail.yahoo.com", 993, true, username, apppasswd, false, mailProxy);
         }
 
         private ImapMailbox CreateMailboxForEmail(string label, string email)
@@ -713,7 +720,7 @@ namespace MyBook
                 return CreateGmailMailbox(label, email);
 
             if (IsConfiguredMailboxEmail(config["yahoo_user"], email, "yahoo.com"))
-                return new ImapMailbox($"Yahoo {MaskEmail(email)}", "imap.mail.yahoo.com", 993, true, username, apppasswd, false);
+                return new ImapMailbox($"Yahoo {MaskEmail(email)}", "imap.mail.yahoo.com", 993, true, username, apppasswd, false, mailProxy);
 
             throw new InvalidOperationException($"Configured mail account mismatch for {label}: account email={MaskEmail(email)}");
         }
@@ -727,7 +734,7 @@ namespace MyBook
             if (!IsConfiguredMailboxEmail(gmailUser, email, "gmail.com"))
                 throw new InvalidOperationException($"Configured Gmail account mismatch for {label}: account email={MaskEmail(email)}, gmail_user={MaskEmail(gmailUser)}");
 
-            return new ImapMailbox($"Gmail {MaskEmail(email)}", "imap.gmail.com", 993, true, gmailUser, gmailPassword, true);
+            return new ImapMailbox($"Gmail {MaskEmail(email)}", "imap.gmail.com", 993, true, gmailUser, gmailPassword, true, mailProxy);
         }
 
         private static bool IsConfiguredMailboxEmail(string? configuredUser, string email, string defaultDomain)
@@ -794,6 +801,46 @@ namespace MyBook
                 return "***";
 
             return $"{email[0]}***{email[(at - 1)..]}";
+        }
+
+        private static MailProxyConfig? ParseMailProxyConfig(string? value)
+        {
+            if (String.IsNullOrWhiteSpace(value))
+                return null;
+
+            if (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri)
+                || String.IsNullOrWhiteSpace(uri.Host)
+                || uri.Port <= 0)
+            {
+                throw new InvalidOperationException("Invalid mail_proxy config. Expected http://host:port or socks5://host:port.");
+            }
+
+            var scheme = uri.Scheme.ToLowerInvariant();
+            if (scheme is not "http" and not "socks5" and not "socks")
+                throw new InvalidOperationException("Invalid mail_proxy config. Supported schemes: http, socks5.");
+
+            if (!String.IsNullOrWhiteSpace(uri.UserInfo)
+                || !String.IsNullOrWhiteSpace(uri.AbsolutePath.Trim('/'))
+                || !String.IsNullOrWhiteSpace(uri.Query)
+                || !String.IsNullOrWhiteSpace(uri.Fragment))
+            {
+                throw new InvalidOperationException("Invalid mail_proxy config. Proxy credentials, path, query, and fragment are not supported.");
+            }
+
+            return new MailProxyConfig(scheme == "socks" ? "socks5" : scheme, uri.Host, uri.Port);
+        }
+
+        private static IProxyClient? CreateProxyClient(MailProxyConfig? proxy)
+        {
+            if (proxy is null)
+                return null;
+
+            return proxy.Scheme switch
+            {
+                "http" => new HttpProxyClient(proxy.Host, proxy.Port),
+                "socks5" => new Socks5Client(proxy.Host, proxy.Port),
+                _ => throw new InvalidOperationException($"Unsupported mail proxy scheme: {proxy.Scheme}")
+            };
         }
 
         private static async Task RunMailOperation(Func<CancellationToken, Task> operation)
@@ -868,12 +915,15 @@ namespace MyBook
                 {
                     Timeout = MailClientTimeoutMilliseconds,
                     CheckCertificateRevocation = false,
-                    ProxyClient = null
+                    ProxyClient = CreateProxyClient(mailbox.Proxy)
                 };
 
                 try
                 {
-                    Console.WriteLine($"mail connect direct {mailbox.Label} {label}");
+                    var proxyText = mailbox.Proxy is null
+                        ? "direct"
+                        : mailbox.Proxy.DisplayText;
+                    Console.WriteLine($"mail connect {proxyText} {mailbox.Label} {label}");
                     await RunMailOperation(token => client.ConnectAsync(mailbox.Host, mailbox.Port, mailbox.UseSsl, token))
                         .ConfigureAwait(false);
                     Console.WriteLine("mail connected");
