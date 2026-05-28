@@ -1,74 +1,17 @@
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
-using System.Security.Cryptography;
-using System.Text;
 
 namespace MyBook
 {
-    // TODO: Nexus OAuth flow is implemented but not remotely verified until a valid client id is available.
+    // TODO: Nexus OAuth token refresh is implemented but not remotely verified until a valid client id is available.
     partial class GraphQLUtil
     {
-        // Do not change this URI unless the Nexus OAuth app redirect URI is changed too.
-        private const int NexusOAuthCallbackPort = 4700;
-        private const string NexusOAuthAuthorizeEndpoint = "https://users.nexusmods.com/oauth/authorize";
         private const string NexusOAuthTokenEndpoint = "https://users.nexusmods.com/oauth/token";
         private const int NexusOAuthTokenRefreshSkewSeconds = 60;
 
         private NexusOAuthTokenSet? cachedNexusOAuthTokens;
-
-        public async Task<NexusOAuthTokenSet> AuthorizeNexusOAuthToken()
-        {
-            var clientId = GetRequiredNexusOAuthClientId();
-            var clientSecret = OptionalConfig("nexus_oauth_client_secret");
-            var codeVerifier = String.IsNullOrWhiteSpace(clientSecret) ? CreatePkceCodeVerifier() : null;
-            var codeChallenge = codeVerifier is null ? null : CreatePkceCodeChallenge(codeVerifier);
-            var state = Guid.NewGuid().ToString("N");
-            var authorizeUrl = BuildNexusOAuthAuthorizeUrl(clientId, state, codeChallenge);
-
-            using var listener = new HttpListener();
-            listener.Prefixes.Add($"{GetNexusOAuthRedirectBaseUri()}/");
-            listener.Start();
-
-            Console.WriteLine($"Open Nexus OAuth authorization URL: {authorizeUrl}");
-            TryOpenNexusOAuthAuthorizeUrl(authorizeUrl);
-
-            var context = await listener.GetContextAsync();
-            var request = context.Request;
-            var error = request.QueryString["error"];
-            var code = request.QueryString["code"];
-            var actualState = request.QueryString["state"];
-            var success = String.IsNullOrWhiteSpace(error)
-                && !String.IsNullOrWhiteSpace(code)
-                && String.Equals(actualState, state, StringComparison.Ordinal);
-            await WriteNexusOAuthCallbackResponse(context.Response, success);
-
-            if (!String.IsNullOrWhiteSpace(error))
-                throw new InvalidOperationException($"Nexus OAuth authorization failed: {error}");
-            if (String.IsNullOrWhiteSpace(code))
-                throw new InvalidOperationException("Nexus OAuth callback did not include a code.");
-            if (!String.Equals(actualState, state, StringComparison.Ordinal))
-                throw new InvalidOperationException("Nexus OAuth callback state mismatch.");
-
-            var form = new Dictionary<string, string>
-            {
-                ["grant_type"] = "authorization_code",
-                ["redirect_uri"] = GetNexusOAuthRedirectUri(),
-                ["scope"] = GetNexusOAuthScope(),
-                ["client_id"] = clientId,
-                ["code"] = code
-            };
-            if (codeVerifier is not null)
-                form["code_verifier"] = codeVerifier;
-            if (!String.IsNullOrWhiteSpace(clientSecret))
-                form["client_secret"] = clientSecret;
-
-            var tokens = await RequestNexusOAuthTokens(form);
-            SaveNexusOAuthTokens(tokens);
-            return tokens;
-        }
 
         private async Task<string?> GetNexusOAuthAccessToken()
         {
@@ -187,93 +130,12 @@ namespace MyBook
             };
         }
 
-        private string BuildNexusOAuthAuthorizeUrl(string clientId, string state, string? codeChallenge)
-        {
-            var query = new Dictionary<string, string>
-            {
-                ["client_id"] = clientId,
-                ["response_type"] = "code",
-                ["scope"] = GetNexusOAuthScope(),
-                ["redirect_uri"] = GetNexusOAuthRedirectUri(),
-                ["state"] = state
-            };
-            if (!String.IsNullOrWhiteSpace(codeChallenge))
-            {
-                query["code_challenge_method"] = "S256";
-                query["code_challenge"] = codeChallenge;
-            }
-
-            return $"{NexusOAuthAuthorizeEndpoint}?{BuildUrlEncodedForm(query)}";
-        }
-
         private string GetRequiredNexusOAuthClientId()
         {
             return OptionalConfig("nexus_oauth_client_id")
                 ?? throw new InvalidOperationException("Missing nexus_oauth_client_id in config.json.");
         }
 
-        private string GetNexusOAuthRedirectBaseUri()
-        {
-            return $"http://127.0.0.1:{NexusOAuthCallbackPort}";
-        }
-
-        private string GetNexusOAuthRedirectUri()
-        {
-            return $"{GetNexusOAuthRedirectBaseUri()}/callback";
-        }
-
-        private string GetNexusOAuthScope()
-        {
-            return OptionalConfig("nexus_oauth_scope") ?? "";
-        }
-
-        private static string CreatePkceCodeVerifier()
-        {
-            return Base64UrlEncode(RandomNumberGenerator.GetBytes(64));
-        }
-
-        private static string CreatePkceCodeChallenge(string codeVerifier)
-        {
-            return Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(codeVerifier)));
-        }
-
-        private static string Base64UrlEncode(byte[] bytes)
-        {
-            return Convert.ToBase64String(bytes)
-                .TrimEnd('=')
-                .Replace('+', '-')
-                .Replace('/', '_');
-        }
-
-        private static string BuildUrlEncodedForm(Dictionary<string, string> values)
-        {
-            return String.Join("&", values.Select(pair =>
-                $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
-        }
-
-        private static void TryOpenNexusOAuthAuthorizeUrl(string authorizeUrl)
-        {
-            try
-            {
-                Process.Start(new ProcessStartInfo(authorizeUrl) { UseShellExecute = true });
-            }
-            catch (Exception exception)
-            {
-                Console.WriteLine($"Unable to open browser automatically: {exception.Message}");
-            }
-        }
-
-        private static async Task WriteNexusOAuthCallbackResponse(HttpListenerResponse response, bool success)
-        {
-            var html = success
-                ? "<html><body>Nexus OAuth authorization completed. You can close this window.</body></html>"
-                : "<html><body>Nexus OAuth authorization failed. Return to MyBook for details.</body></html>";
-            var bytes = Encoding.UTF8.GetBytes(html);
-            response.ContentType = "text/html; charset=utf-8";
-            response.ContentLength64 = bytes.Length;
-            await response.OutputStream.WriteAsync(bytes);
-            response.Close();
-        }
     }
 
     public sealed record NexusOAuthTokenSet

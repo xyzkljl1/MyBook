@@ -93,6 +93,17 @@ namespace MyBook
         public decimal? RmbAmount { get; set; }
     }
 
+    public class AllocatedExpenseRecordData
+    {
+        public int RecordId { get; set; }
+        public DateTime Date { get; set; }
+        public DateTime AllocationStart { get; set; }
+        public DateTime AllocationEnd { get; set; }
+        public string Reason { get; set; } = "";
+        public CurrencyType Currency { get; set; }
+        public decimal Amount { get; set; }
+    }
+
     public class MonthlyFlowPoint
     {
         public DateTime Month { get; set; }

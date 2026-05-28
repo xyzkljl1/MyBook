@@ -7,6 +7,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using Drawing = System.Drawing;
 using Forms = System.Windows.Forms;
@@ -110,6 +111,19 @@ namespace MyBook
             if (DataContext is not DashboardViewModel viewModel)
                 return;
 
+            await LoadAllocatedExpensesAsync(viewModel);
+        }
+
+        private async void AllocatedExpenseChart_WindowShiftRequested(object sender, AllocatedExpenseWindowShiftEventArgs e)
+        {
+            if (e.UnitOffset == 0 || isLoadingAllocatedExpenses)
+                return;
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            isAdjustingAllocatedExpenseRange = true;
+            viewModel.MoveAllocatedExpenseWindow(e.UnitOffset);
+            isAdjustingAllocatedExpenseRange = false;
             await LoadAllocatedExpensesAsync(viewModel);
         }
 
@@ -331,7 +345,8 @@ namespace MyBook
                         viewModel.AllocatedExpenseEndDate.Month,
                         1).AddMonths(1);
                     var items = database.GetAllocatedExpenseMonthly(firstMonth, endMonthExclusive);
-                    viewModel.SetAllocatedExpenseBuckets(AllocatedExpenseBucketViewModel.FromMonthly(items, firstMonth, endMonthExclusive));
+                    var details = database.GetAllocatedExpenseRecordDetails(firstMonth, endMonthExclusive);
+                    viewModel.SetAllocatedExpenseBuckets(AllocatedExpenseBucketViewModel.FromMonthly(items, details, firstMonth, endMonthExclusive));
                     viewModel.SetAllocatedExpenseStatus($"共 {viewModel.AllocatedExpenseBuckets.Count} 个月");
                 }
                 else
@@ -339,8 +354,12 @@ namespace MyBook
                     var items = database.GetAllocatedExpenseDaily(
                         viewModel.AllocatedExpenseStartDate,
                         viewModel.AllocatedExpenseEndDate.AddDays(1));
+                    var details = database.GetAllocatedExpenseRecordDetails(
+                        viewModel.AllocatedExpenseStartDate,
+                        viewModel.AllocatedExpenseEndDate.AddDays(1));
                     viewModel.SetAllocatedExpenseBuckets(AllocatedExpenseBucketViewModel.FromDaily(
                         items,
+                        details,
                         viewModel.AllocatedExpenseStartDate,
                         viewModel.AllocatedExpenseEndDate));
                     viewModel.SetAllocatedExpenseStatus($"共 {viewModel.AllocatedExpenseBuckets.Count} 天");
@@ -813,6 +832,26 @@ namespace MyBook
             {
                 allocatedExpenseStartDate = DateTime.Today.AddDays(-14);
                 allocatedExpenseEndDate = DateTime.Today;
+            }
+
+            OnPropertyChanged(nameof(AllocatedExpenseStartDate));
+            OnPropertyChanged(nameof(AllocatedExpenseEndDate));
+        }
+
+        public void MoveAllocatedExpenseWindow(int unitOffset)
+        {
+            if (unitOffset == 0)
+                return;
+
+            if (ShowAllocatedExpenseMonthly)
+            {
+                allocatedExpenseStartDate = allocatedExpenseStartDate.AddMonths(unitOffset);
+                allocatedExpenseEndDate = allocatedExpenseEndDate.AddMonths(unitOffset);
+            }
+            else
+            {
+                allocatedExpenseStartDate = allocatedExpenseStartDate.AddDays(unitOffset);
+                allocatedExpenseEndDate = allocatedExpenseEndDate.AddDays(unitOffset);
             }
 
             OnPropertyChanged(nameof(AllocatedExpenseStartDate));
@@ -1320,17 +1359,22 @@ namespace MyBook
 
         public static List<AllocatedExpenseBucketViewModel> FromDaily(
             IEnumerable<AllocatedExpenseDailyData> items,
+            IEnumerable<AllocatedExpenseRecordData> details,
             DateTime startInclusive,
             DateTime endInclusive)
         {
             var groups = items
                 .GroupBy(item => item.Date.Date)
                 .ToDictionary(group => group.Key, group => group.ToList());
+            var detailList = details.ToList();
             var result = new List<AllocatedExpenseBucketViewModel>();
             for (var date = startInclusive.Date; date <= endInclusive.Date; date = date.AddDays(1))
             {
                 groups.TryGetValue(date, out var dayItems);
-                result.Add(FromItems(date, date.ToString("MM-dd", CultureInfo.InvariantCulture), dayItems ?? []));
+                var periodDetails = detailList
+                    .Where(detail => detail.AllocationStart <= date && detail.AllocationEnd >= date)
+                    .ToList();
+                result.Add(FromItems(date, date.ToString("MM-dd", CultureInfo.InvariantCulture), dayItems ?? [], periodDetails));
             }
 
             return result;
@@ -1338,17 +1382,23 @@ namespace MyBook
 
         public static List<AllocatedExpenseBucketViewModel> FromMonthly(
             IEnumerable<AllocatedExpenseMonthlyData> items,
+            IEnumerable<AllocatedExpenseRecordData> details,
             DateTime firstMonthInclusive,
             DateTime endMonthExclusive)
         {
             var groups = items
                 .GroupBy(item => new DateTime(item.Month.Year, item.Month.Month, 1))
                 .ToDictionary(group => group.Key, group => group.ToList());
+            var detailList = details.ToList();
             var result = new List<AllocatedExpenseBucketViewModel>();
             for (var month = firstMonthInclusive.Date; month < endMonthExclusive.Date; month = month.AddMonths(1))
             {
                 groups.TryGetValue(month, out var monthItems);
-                result.Add(FromItems(month, month.ToString("yy-MM", CultureInfo.InvariantCulture), monthItems ?? []));
+                var nextMonth = month.AddMonths(1);
+                var periodDetails = detailList
+                    .Where(detail => detail.AllocationStart < nextMonth && detail.AllocationEnd >= month)
+                    .ToList();
+                result.Add(FromItems(month, month.ToString("yy-MM", CultureInfo.InvariantCulture), monthItems ?? [], periodDetails));
             }
 
             return result;
@@ -1357,7 +1407,8 @@ namespace MyBook
         private static AllocatedExpenseBucketViewModel FromItems<T>(
             DateTime periodStart,
             string label,
-            List<T> items)
+            List<T> items,
+            List<AllocatedExpenseRecordData> detailRecords)
             where T : class
         {
             var segments = items
@@ -1379,24 +1430,29 @@ namespace MyBook
                 PeriodLabel = label,
                 TotalRmb = total,
                 TotalText = $"¥{total:N2}",
-                DetailsText = BuildDetailsText(segments),
+                DetailsText = BuildDetailsText(detailRecords),
                 Segments = segments
             };
         }
 
-        private static string BuildDetailsText(List<AllocatedExpenseSegmentViewModel> segments)
+        private static string BuildDetailsText(List<AllocatedExpenseRecordData> records)
         {
-            if (segments.Count == 0)
+            if (records.Count == 0)
                 return "";
 
-            return String.Join("; ", segments.Select(segment =>
-            {
-                var symbol = CurrencySummaryViewModel.FormatCurrencySymbol(segment.Currency);
-                var original = $"{segment.Reason} {symbol}{MoneyText.FormatAmount(segment.Amount)}";
-                return segment.RmbAmount.HasValue
-                    ? $"{original} / ¥{MoneyText.FormatAmount(segment.RmbAmount.Value)}"
-                    : $"{original} / 未折算";
-            }));
+            return String.Join("; ", records
+                .OrderBy(record => record.Date)
+                .ThenBy(record => record.AllocationStart)
+                .ThenBy(record => record.Reason, StringComparer.Ordinal)
+                .ThenBy(record => record.Currency)
+                .ThenBy(record => record.RecordId)
+                .Select(record =>
+                {
+                    var symbol = CurrencySummaryViewModel.FormatCurrencySymbol(record.Currency);
+                    var period = $"{record.AllocationStart:yyyy-MM-dd}~{record.AllocationEnd:yyyy-MM-dd}";
+                    var amount = $"{symbol}{MoneyText.FormatAmount(record.Amount)}";
+                    return $"{record.Date:yyyy-MM-dd} {period} {amount} {record.Reason}";
+                }));
         }
     }
 
@@ -1422,6 +1478,11 @@ namespace MyBook
                 RmbAmount = rmbAmount
             };
         }
+    }
+
+    public class AllocatedExpenseWindowShiftEventArgs : EventArgs
+    {
+        public int UnitOffset { get; set; }
     }
 
     public class MonthlyFlowAccountStatisticsViewModel
@@ -1640,6 +1701,10 @@ namespace MyBook
 
     public class AllocatedExpenseChart : FrameworkElement
     {
+        const double DragUnitMinimumPixels = 32;
+        const double ChartLeftPadding = 64;
+        const double ChartRightPadding = 36;
+
         public static readonly DependencyProperty ItemsProperty = DependencyProperty.Register(
             nameof(Items),
             typeof(IEnumerable),
@@ -1663,6 +1728,11 @@ namespace MyBook
             "#DC2626",
             "#4F46E5"
         ];
+
+        bool isDraggingWindow;
+        Point dragStartPoint;
+
+        public event EventHandler<AllocatedExpenseWindowShiftEventArgs>? WindowShiftRequested;
 
         public IEnumerable? Items
         {
@@ -1689,6 +1759,50 @@ namespace MyBook
         private void Items_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {
             InvalidateVisual();
+        }
+
+        protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
+        {
+            base.OnMouseLeftButtonDown(e);
+            isDraggingWindow = true;
+            dragStartPoint = e.GetPosition(this);
+            CaptureMouse();
+            e.Handled = true;
+        }
+
+        protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
+        {
+            base.OnMouseLeftButtonUp(e);
+            if (!isDraggingWindow)
+                return;
+
+            isDraggingWindow = false;
+            ReleaseMouseCapture();
+            var unitOffset = CalculateDragUnitOffset(e.GetPosition(this));
+            if (unitOffset != 0)
+                WindowShiftRequested?.Invoke(this, new AllocatedExpenseWindowShiftEventArgs { UnitOffset = unitOffset });
+            e.Handled = true;
+        }
+
+        protected override void OnLostMouseCapture(MouseEventArgs e)
+        {
+            base.OnLostMouseCapture(e);
+            isDraggingWindow = false;
+        }
+
+        private int CalculateDragUnitOffset(Point endPoint)
+        {
+            var deltaX = endPoint.X - dragStartPoint.X;
+            var buckets = Items?.Cast<AllocatedExpenseBucketViewModel>().ToList() ?? [];
+            if (buckets.Count == 0)
+                return 0;
+
+            var chartWidth = Math.Max(1, ActualWidth - ChartLeftPadding - ChartRightPadding);
+            var pixelsPerUnit = Math.Max(DragUnitMinimumPixels, chartWidth / buckets.Count);
+            if (Math.Abs(deltaX) < pixelsPerUnit * 0.5)
+                return 0;
+
+            return (int)Math.Round(-deltaX / pixelsPerUnit, MidpointRounding.AwayFromZero);
         }
 
         protected override void OnRender(DrawingContext dc)

@@ -1473,6 +1473,53 @@ namespace MyBook
                 .ToList();
         }
 
+        public List<AllocatedExpenseRecordData> GetAllocatedExpenseRecordDetails(DateTime startInclusive, DateTime endExclusive)
+        {
+            var startDate = startInclusive.Date;
+            var endDate = endExclusive.Date;
+            if (endDate <= startDate)
+                throw new ArgumentException("Allocated expense detail end date must be after start date.", nameof(endExclusive));
+
+            var allocatedExpenseAccountIds = GetAllocatedExpenseAccountIds();
+            return db.Queryable<Record>()
+                .Where(record => !record.isInternal
+                    && record.matchedRecordId == null
+                    && !record.isRefundMatched
+                    && record.v < 0
+                    && record.expenseAllocationDays != null)
+                .ToList()
+                .Where(record => ShouldRecordContributeToAllocatedExpense(record, allocatedExpenseAccountIds))
+                .Select(record =>
+                {
+                    var days = NormalizeExpenseAllocationDays(record.expenseAllocationDays)!.Value;
+                    var allocationStart = GetExpenseAllocationStartDate(record, days);
+                    var allocationEndExclusive = GetExpenseAllocationEndDate(record, days);
+                    return new
+                    {
+                        Record = record,
+                        AllocationStart = allocationStart,
+                        AllocationEndExclusive = allocationEndExclusive
+                    };
+                })
+                .Where(item => item.AllocationStart < endDate && item.AllocationEndExclusive > startDate)
+                .Select(item => new AllocatedExpenseRecordData
+                {
+                    RecordId = item.Record.Id,
+                    Date = item.Record.date.Date,
+                    AllocationStart = item.AllocationStart,
+                    AllocationEnd = item.AllocationEndExclusive.AddDays(-1),
+                    Reason = GetRecordReasonDisplay(item.Record),
+                    Currency = item.Record.t,
+                    Amount = Currency.RoundMoney(-item.Record.v)
+                })
+                .OrderBy(item => item.Date)
+                .ThenBy(item => item.AllocationStart)
+                .ThenBy(item => item.Reason)
+                .ThenBy(item => item.Currency)
+                .ThenBy(item => item.RecordId)
+                .ToList();
+        }
+
         public void ProcessAllocatedExpenseDirtyRecords()
         {
             ExecuteLockedTransaction(ProcessAllocatedExpenseDirtyRecordsCore);
