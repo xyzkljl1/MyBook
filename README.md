@@ -159,3 +159,4 @@ The following modules are kept in the codebase but are not part of the current a
 - External imports should update records and holdings/balances as one atomic operation.
 - Account balances are derived from holdings through the `AccountBalances` view.
 - Snapshots represent database state at an import progress point, not natural-date account state.
+- `Records.expenseAllocationDays` controls allocated-expense periods. When `expenseAllocationSkipDays` is empty, the original day-count behavior is used. When both values are present, they must have the same sign and `abs(expenseAllocationSkipDays) < abs(expenseAllocationDays)`; the two values then define the relative allocation boundaries around the record date.

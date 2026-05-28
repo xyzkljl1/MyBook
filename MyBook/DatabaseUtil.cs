@@ -56,6 +56,7 @@ namespace MyBook
             "isRefundMatched",
             "HoldingQuantity",
             "expenseAllocationDays",
+            "expenseAllocationSkipDays",
             "date",
             "postingDate",
             "updateTime",
@@ -1197,6 +1198,7 @@ namespace MyBook
                         IsRefundMatched = record.isRefundMatched,
                         HoldingQuantity = record.HoldingQuantity,
                         ExpenseAllocationDays = record.expenseAllocationDays,
+                        ExpenseAllocationSkipDays = record.expenseAllocationSkipDays,
                         Source = record.Source,
                         Reason = record.Reason,
                         StatementProvider = statementImport?.provider ?? StatementImportProvider.Manual,
@@ -1290,9 +1292,11 @@ namespace MyBook
             DateTime now)
         {
             var normalizedExpenseAllocationDays = NormalizeExpenseAllocationDays(edit.ExpenseAllocationDays);
+            var normalizedExpenseAllocationSkipDays = NormalizeExpenseAllocationSkipDays(edit.ExpenseAllocationSkipDays);
             ValidateRecordExpenseAllocation(
                 null,
                 normalizedExpenseAllocationDays,
+                normalizedExpenseAllocationSkipDays,
                 account.usage,
                 edit.IsInternal,
                 null,
@@ -1309,6 +1313,7 @@ namespace MyBook
                 isRefundMatched = edit.IsRefundMatched,
                 HoldingQuantity = edit.HoldingQuantity,
                 expenseAllocationDays = normalizedExpenseAllocationDays,
+                expenseAllocationSkipDays = normalizedExpenseAllocationSkipDays,
                 Source = CleanRecordText(edit.Source),
                 Reason = CleanRecordText(edit.Reason),
                 _account_Id = account.Id,
@@ -1342,6 +1347,7 @@ namespace MyBook
             var normalizedSource = CleanRecordText(edit.Source);
             var normalizedReason = CleanRecordText(edit.Reason);
             var normalizedExpenseAllocationDays = NormalizeExpenseAllocationDays(edit.ExpenseAllocationDays);
+            var normalizedExpenseAllocationSkipDays = NormalizeExpenseAllocationSkipDays(edit.ExpenseAllocationSkipDays);
             if (existing._account_Id != account.Id)
                 throw new InvalidOperationException($"Record account is fixed and cannot be edited: {existing.Id}");
             if (statementImport.provider != StatementImportProvider.Manual && existing.date != normalizedDate)
@@ -1353,6 +1359,7 @@ namespace MyBook
             ValidateRecordExpenseAllocation(
                 existing.Id,
                 normalizedExpenseAllocationDays,
+                normalizedExpenseAllocationSkipDays,
                 account.usage,
                 edit.IsInternal,
                 existing.matchedRecordId,
@@ -1368,6 +1375,7 @@ namespace MyBook
                 || existing.isRefundMatched != edit.IsRefundMatched
                 || existing.HoldingQuantity != edit.HoldingQuantity
                 || existing.expenseAllocationDays != normalizedExpenseAllocationDays
+                || existing.expenseAllocationSkipDays != normalizedExpenseAllocationSkipDays
                 || existing.Source != normalizedSource
                 || existing.Reason != normalizedReason;
             if (!changed)
@@ -1389,6 +1397,7 @@ namespace MyBook
             existing.isRefundMatched = edit.IsRefundMatched;
             existing.HoldingQuantity = edit.HoldingQuantity;
             existing.expenseAllocationDays = normalizedExpenseAllocationDays;
+            existing.expenseAllocationSkipDays = normalizedExpenseAllocationSkipDays;
             existing.Source = normalizedSource;
             existing.Reason = normalizedReason;
             if (statementImport.provider == StatementImportProvider.Manual)
@@ -1403,9 +1412,15 @@ namespace MyBook
             return value.HasValue && Math.Abs(value.Value) > 1 ? value.Value : null;
         }
 
+        private static int? NormalizeExpenseAllocationSkipDays(int? value)
+        {
+            return value;
+        }
+
         private static void ValidateRecordExpenseAllocation(
             int? recordId,
             int? expenseAllocationDays,
+            int? expenseAllocationSkipDays,
             AccountUsage accountUsage,
             bool isInternal,
             int? matchedRecordId,
@@ -1413,12 +1428,32 @@ namespace MyBook
             decimal amount)
         {
             if (!expenseAllocationDays.HasValue)
+            {
+                if (expenseAllocationSkipDays.HasValue)
+                    throw new InvalidOperationException("Expense allocation skip days requires expense allocation days.");
                 return;
+            }
+
+            ValidateExpenseAllocationRelativeRange(expenseAllocationDays.Value, expenseAllocationSkipDays);
             if (CanRecordHaveExpenseAllocation(accountUsage, isInternal, matchedRecordId, isRefundMatched, amount))
                 return;
 
             var recordText = recordId.HasValue ? $"Record {recordId.Value}" : "New record";
             throw new InvalidOperationException($"{recordText} cannot have expense allocation days unless it belongs to a Life or Transit account and is a non-internal, non-refund-matched expense record.");
+        }
+
+        private static void ValidateExpenseAllocationRelativeRange(int expenseAllocationDays, int? expenseAllocationSkipDays)
+        {
+            if (!expenseAllocationSkipDays.HasValue)
+                return;
+
+            var skipDays = expenseAllocationSkipDays.Value;
+            if (skipDays == 0)
+                throw new InvalidOperationException("Expense allocation skip days cannot be 0. Leave it empty to use the default allocation period.");
+            if (Math.Sign(expenseAllocationDays) != Math.Sign(skipDays))
+                throw new InvalidOperationException("Expense allocation days and skip days must have the same sign.");
+            if (Math.Abs(skipDays) >= Math.Abs(expenseAllocationDays))
+                throw new InvalidOperationException("Expense allocation skip days absolute value must be smaller than expense allocation days absolute value.");
         }
 
         public List<AllocatedExpenseDailyData> GetAllocatedExpenseDaily(DateTime date)
@@ -1493,14 +1528,12 @@ namespace MyBook
                 .Where(record => ShouldRecordContributeToAllocatedExpense(record, allocatedExpenseAccountIds))
                 .Select(record =>
                 {
-                    var days = NormalizeExpenseAllocationDays(record.expenseAllocationDays)!.Value;
-                    var allocationStart = GetExpenseAllocationStartDate(record, days);
-                    var allocationEndExclusive = GetExpenseAllocationEndDate(record, days);
+                    var period = GetExpenseAllocationPeriod(record)!.Value;
                     return new
                     {
                         Record = record,
-                        AllocationStart = allocationStart,
-                        AllocationEndExclusive = allocationEndExclusive
+                        AllocationStart = period.StartDate,
+                        AllocationEndExclusive = period.EndExclusive
                     };
                 })
                 .Where(item => item.AllocationStart < endDate && item.AllocationEndExclusive > startDate)
@@ -1736,12 +1769,10 @@ namespace MyBook
             if (!ShouldRecordContributeToAllocatedExpense(record, allocatedExpenseAccountIds))
                 yield break;
 
-            var days = NormalizeExpenseAllocationDays(record.expenseAllocationDays)!.Value;
-            var allocationStart = GetExpenseAllocationStartDate(record, days);
-            var allocationEnd = GetExpenseAllocationEndDate(record, days);
-            for (var date = allocationStart; date < allocationEnd; date = date.AddDays(1))
+            var period = GetExpenseAllocationPeriod(record)!.Value;
+            for (var date = period.StartDate; date < period.EndExclusive; date = date.AddDays(1))
             {
-                var amount = GetAllocatedExpenseAmountForDay(record, date, days);
+                var amount = GetAllocatedExpenseAmountForDay(record, date, period);
                 if (amount == 0)
                     continue;
 
@@ -1759,7 +1790,7 @@ namespace MyBook
             HashSet<int> allocatedExpenseAccountIds)
         {
             return ShouldRecordContributeToExpenseStatistics(record, allocatedExpenseAccountIds)
-                && NormalizeExpenseAllocationDays(record.expenseAllocationDays).HasValue;
+                && GetExpenseAllocationPeriod(record).HasValue;
         }
 
         private static bool ShouldRecordContributeToDirectExpenseStatistics(
@@ -1767,7 +1798,7 @@ namespace MyBook
             HashSet<int> allocatedExpenseAccountIds)
         {
             return ShouldRecordContributeToExpenseStatistics(record, allocatedExpenseAccountIds)
-                && !NormalizeExpenseAllocationDays(record.expenseAllocationDays).HasValue;
+                && !GetExpenseAllocationPeriod(record).HasValue;
         }
 
         private static bool ShouldRecordContributeToExpenseStatistics(
@@ -1824,29 +1855,48 @@ namespace MyBook
             return String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason;
         }
 
-        private static DateTime GetExpenseAllocationStartDate(Record record, int days)
+        private static ExpenseAllocationPeriod? GetExpenseAllocationPeriod(Record record)
         {
-            return days > 0
-                ? record.date.Date
-                : record.date.Date.AddDays(1 + days);
+            var days = NormalizeExpenseAllocationDays(record.expenseAllocationDays);
+            if (!days.HasValue)
+                return null;
+
+            ValidateExpenseAllocationRelativeRange(days.Value, record.expenseAllocationSkipDays);
+
+            if (record.expenseAllocationSkipDays.HasValue)
+            {
+                var skipDays = record.expenseAllocationSkipDays.Value;
+                return days.Value > 0
+                    ? new ExpenseAllocationPeriod(
+                        record.date.Date.AddDays(skipDays),
+                        record.date.Date.AddDays(days.Value))
+                    : new ExpenseAllocationPeriod(
+                        record.date.Date.AddDays(days.Value),
+                        record.date.Date.AddDays(skipDays));
+            }
+
+            return days.Value > 0
+                ? new ExpenseAllocationPeriod(record.date.Date, record.date.Date.AddDays(days.Value))
+                : new ExpenseAllocationPeriod(record.date.Date.AddDays(1 + days.Value), record.date.Date.AddDays(1));
         }
 
-        private static DateTime GetExpenseAllocationEndDate(Record record, int days)
+        private readonly record struct ExpenseAllocationPeriod(DateTime StartDate, DateTime EndExclusive)
         {
-            return days > 0
-                ? record.date.Date.AddDays(days)
-                : record.date.Date.AddDays(1);
+            public int DayCount => (EndExclusive - StartDate).Days;
         }
 
-        private static decimal GetAllocatedExpenseAmountForDay(Record record, DateTime date, int days)
+        private static decimal GetAllocatedExpenseAmountForDay(
+            Record record,
+            DateTime date,
+            ExpenseAllocationPeriod period)
         {
             var total = Currency.RoundMoney(-record.v);
-            var dayCount = Math.Abs(days);
+            var dayCount = period.DayCount;
             if (dayCount <= 1)
                 return total;
 
             var baseAmount = Currency.RoundMoney(total / dayCount);
-            if (date.Date != record.date.Date)
+            if (date.Date != period.StartDate)
                 return baseAmount;
 
             return Currency.RoundMoney(total - baseAmount * (dayCount - 1));
@@ -2136,6 +2186,7 @@ namespace MyBook
                     record.isRefundMatched,
                     record.HoldingQuantity,
                     record.expenseAllocationDays,
+                    record.expenseAllocationSkipDays,
                     record.Source,
                     record.Reason,
                     record._descCurrency_v,
@@ -2474,16 +2525,21 @@ namespace MyBook
                 if (!accountsById.TryGetValue(record._account_Id, out var account))
                     throw new InvalidOperationException($"Record account not found: {record._account_Id}");
 
-                var expenseAllocationDays = NormalizeExpenseAllocationDays(
-                    TryGetAutomaticExpenseAllocationDays(statementImport.provider, record));
-                if (!expenseAllocationDays.HasValue)
+                var allocation = TryGetAutomaticExpenseAllocation(statementImport.provider, record);
+                if (!allocation.HasValue)
                     continue;
-                if (record.expenseAllocationDays.HasValue)
+                if (record.expenseAllocationDays.HasValue || record.expenseAllocationSkipDays.HasValue)
+                    continue;
+
+                var expenseAllocationDays = NormalizeExpenseAllocationDays(allocation.Value.Days);
+                var expenseAllocationSkipDays = NormalizeExpenseAllocationSkipDays(allocation.Value.SkipDays);
+                if (!expenseAllocationDays.HasValue)
                     continue;
 
                 ValidateRecordExpenseAllocation(
                     record.Id,
                     expenseAllocationDays,
+                    expenseAllocationSkipDays,
                     account.usage,
                     record.isInternal,
                     record.matchedRecordId,
@@ -2491,6 +2547,7 @@ namespace MyBook
                     record.v);
 
                 record.expenseAllocationDays = expenseAllocationDays;
+                record.expenseAllocationSkipDays = expenseAllocationSkipDays;
                 record.allocatedExpenseCacheDirty = true;
                 recordsToUpdate.Add(record);
             }
@@ -2499,14 +2556,16 @@ namespace MyBook
                 return;
 
             db.Updateable(recordsToUpdate)
-                .UpdateColumns(record => new { record.expenseAllocationDays, record.allocatedExpenseCacheDirty })
+                .UpdateColumns(record => new { record.expenseAllocationDays, record.expenseAllocationSkipDays, record.allocatedExpenseCacheDirty })
                 .ExecuteCommand();
         }
 
-        private static int? TryGetAutomaticExpenseAllocationDays(StatementImportProvider provider, Record record)
+        private static ExpenseAllocationSetting? TryGetAutomaticExpenseAllocation(StatementImportProvider provider, Record record)
         {
             return null;
         }
+
+        private readonly record struct ExpenseAllocationSetting(int Days, int? SkipDays);
 
         private bool ShouldValidateBeginningAccountBalances(StatementImportProvider provider)
         {
@@ -5244,6 +5303,7 @@ namespace MyBook
             bool IsRefundMatched,
             int HoldingQuantity,
             int? ExpenseAllocationDays,
+            int? ExpenseAllocationSkipDays,
             string Source,
             string Reason,
             decimal? DescCurrencyAmount,

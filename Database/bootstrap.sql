@@ -85,6 +85,7 @@ CREATE TABLE `records` (
   `matchedRecordReason` varchar(1024) NOT NULL DEFAULT '',
   `isRefundMatched` tinyint(1) NOT NULL DEFAULT '0',
   `expenseAllocationDays` int DEFAULT NULL,
+  `expenseAllocationSkipDays` int DEFAULT NULL,
   `allocatedExpenseCacheDirty` tinyint(1) NOT NULL DEFAULT '1',
   `date` datetime NOT NULL,
   `updateTime` datetime NOT NULL,
@@ -163,6 +164,6 @@ FOR EACH ROW SET NEW.`allocatedExpenseCacheDirty` = 1;
 
 CREATE TRIGGER `trg_Records_alloc_exp_upd`
 BEFORE UPDATE ON `Records`
-FOR EACH ROW SET NEW.`allocatedExpenseCacheDirty` = IF(NOT (OLD.`Id` <=> NEW.`Id` AND OLD.`_Currency_v` <=> NEW.`_Currency_v` AND OLD.`_Currency_t` <=> NEW.`_Currency_t` AND OLD.`DestAccount` <=> NEW.`DestAccount` AND OLD.`isInternal` <=> NEW.`isInternal` AND OLD.`matchedRecordId` <=> NEW.`matchedRecordId` AND OLD.`matchedRecordReason` <=> NEW.`matchedRecordReason` AND OLD.`isRefundMatched` <=> NEW.`isRefundMatched` AND OLD.`HoldingQuantity` <=> NEW.`HoldingQuantity` AND OLD.`expenseAllocationDays` <=> NEW.`expenseAllocationDays` AND OLD.`date` <=> NEW.`date` AND OLD.`postingDate` <=> NEW.`postingDate` AND OLD.`updateTime` <=> NEW.`updateTime` AND OLD.`Source` <=> NEW.`Source` AND OLD.`Reason` <=> NEW.`Reason` AND CAST(OLD.`backup` AS CHAR) <=> CAST(NEW.`backup` AS CHAR) AND OLD.`_account_Id` <=> NEW.`_account_Id` AND OLD.`_holding_Id` <=> NEW.`_holding_Id` AND OLD.`_descCurrency_v` <=> NEW.`_descCurrency_v` AND OLD.`_descCurrency_t` <=> NEW.`_descCurrency_t` AND OLD.`_statementImport_Id` <=> NEW.`_statementImport_Id`), 1, NEW.`allocatedExpenseCacheDirty`);
+FOR EACH ROW SET NEW.`allocatedExpenseCacheDirty` = IF(NOT (OLD.`Id` <=> NEW.`Id` AND OLD.`_Currency_v` <=> NEW.`_Currency_v` AND OLD.`_Currency_t` <=> NEW.`_Currency_t` AND OLD.`DestAccount` <=> NEW.`DestAccount` AND OLD.`isInternal` <=> NEW.`isInternal` AND OLD.`matchedRecordId` <=> NEW.`matchedRecordId` AND OLD.`matchedRecordReason` <=> NEW.`matchedRecordReason` AND OLD.`isRefundMatched` <=> NEW.`isRefundMatched` AND OLD.`HoldingQuantity` <=> NEW.`HoldingQuantity` AND OLD.`expenseAllocationDays` <=> NEW.`expenseAllocationDays` AND OLD.`expenseAllocationSkipDays` <=> NEW.`expenseAllocationSkipDays` AND OLD.`date` <=> NEW.`date` AND OLD.`postingDate` <=> NEW.`postingDate` AND OLD.`updateTime` <=> NEW.`updateTime` AND OLD.`Source` <=> NEW.`Source` AND OLD.`Reason` <=> NEW.`Reason` AND CAST(OLD.`backup` AS CHAR) <=> CAST(NEW.`backup` AS CHAR) AND OLD.`_account_Id` <=> NEW.`_account_Id` AND OLD.`_holding_Id` <=> NEW.`_holding_Id` AND OLD.`_descCurrency_v` <=> NEW.`_descCurrency_v` AND OLD.`_descCurrency_t` <=> NEW.`_descCurrency_t` AND OLD.`_statementImport_Id` <=> NEW.`_statementImport_Id`), 1, NEW.`allocatedExpenseCacheDirty`);
 
 SET FOREIGN_KEY_CHECKS=1;

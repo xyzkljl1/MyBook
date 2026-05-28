@@ -386,6 +386,9 @@ namespace MyBook
         [SugarColumn(IsNullable = true)]
         public int? expenseAllocationDays { get; set; } = null; // UI 支出统计均摊天数，正数向交易日后均摊，负数向交易日前均摊。
 
+        [SugarColumn(IsNullable = true)]
+        public int? expenseAllocationSkipDays { get; set; } = null; // UI 支出统计均摊跳过天数，和均摊天数同符号时表示靠近交易日的相对边界。
+
         [SugarColumn(DefaultValue = "1")]
         public bool allocatedExpenseCacheDirty { get; set; } = true; // 均摊支出缓存维护状态，不属于业务数据。
 

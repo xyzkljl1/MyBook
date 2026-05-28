@@ -1018,6 +1018,7 @@ namespace MyBook
         public bool IsRefundMatched { get; set; }
         public string Source { get; set; } = "";
         public int? ExpenseAllocationDays { get; set; }
+        public int? ExpenseAllocationSkipDays { get; set; }
         public StatementImportProvider StatementProvider { get; set; }
         public string StatementProviderText { get; set; } = "";
         public string StatementKey { get; set; } = "";
@@ -1044,6 +1045,7 @@ namespace MyBook
                 IsRefundMatched = data.IsRefundMatched,
                 Source = data.Source,
                 ExpenseAllocationDays = data.ExpenseAllocationDays,
+                ExpenseAllocationSkipDays = data.ExpenseAllocationSkipDays,
                 StatementProvider = data.StatementProvider,
                 StatementProviderText = data.StatementProvider.ToString(),
                 StatementKey = data.StatementKey,
@@ -1092,6 +1094,7 @@ namespace MyBook
                 IsInternal = IsInternal,
                 IsRefundMatched = IsRefundMatched,
                 ExpenseAllocationDays = ExpenseAllocationDays,
+                ExpenseAllocationSkipDays = ExpenseAllocationSkipDays,
                 Source = Source ?? ""
             };
         }
@@ -1109,6 +1112,7 @@ namespace MyBook
                 IsInternal,
                 IsRefundMatched,
                 ExpenseAllocationDays,
+                ExpenseAllocationSkipDays,
                 Source ?? "");
         }
 
@@ -1131,6 +1135,7 @@ namespace MyBook
             AddChange(changes, "内部", original.IsInternal ? "是" : "否", current.IsInternal ? "是" : "否");
             AddChange(changes, "已抵消", original.IsRefundMatched ? "是" : "否", current.IsRefundMatched ? "是" : "否");
             AddChange(changes, "均摊天数", FormatNullableInt(original.ExpenseAllocationDays), FormatNullableInt(current.ExpenseAllocationDays));
+            AddChange(changes, "均摊跳过", FormatNullableInt(original.ExpenseAllocationSkipDays), FormatNullableInt(current.ExpenseAllocationSkipDays));
             AddChange(changes, "来源", original.Source, current.Source);
             return String.Join("；", changes);
         }
@@ -1207,6 +1212,7 @@ namespace MyBook
         bool IsInternal,
         bool IsRefundMatched,
         int? ExpenseAllocationDays,
+        int? ExpenseAllocationSkipDays,
         string Source);
 
     public class CurrencySummaryViewModel

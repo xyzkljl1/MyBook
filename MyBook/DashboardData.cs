@@ -180,6 +180,7 @@ namespace MyBook
         public bool IsRefundMatched { get; set; }
         public int HoldingQuantity { get; set; }
         public int? ExpenseAllocationDays { get; set; }
+        public int? ExpenseAllocationSkipDays { get; set; }
         public string Source { get; set; } = "";
         public string Reason { get; set; } = "";
         public StatementImportProvider StatementProvider { get; set; }
@@ -199,6 +200,7 @@ namespace MyBook
         public bool IsRefundMatched { get; set; }
         public int HoldingQuantity { get; set; }
         public int? ExpenseAllocationDays { get; set; }
+        public int? ExpenseAllocationSkipDays { get; set; }
         public string Source { get; set; } = "";
         public string Reason { get; set; } = "";
     }
