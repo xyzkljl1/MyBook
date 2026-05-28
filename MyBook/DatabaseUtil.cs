@@ -1159,14 +1159,29 @@ namespace MyBook
 
         public List<RecordDetailData> GetRecordDetails(DateTime start, DateTime end, string? accountName)
         {
+            return GetRecordDetails(
+                start,
+                end,
+                String.IsNullOrWhiteSpace(accountName) ? null : [accountName]);
+        }
+
+        public List<RecordDetailData> GetRecordDetails(DateTime start, DateTime end, IReadOnlyCollection<string>? accountNames)
+        {
             var startDate = start.Date;
             var endDate = end.Date.AddDays(1);
             var query = db.Queryable<Record>()
                 .Where(record => record.date >= startDate && record.date < endDate);
-            if (!String.IsNullOrWhiteSpace(accountName))
+            if (accountNames is not null)
             {
-                var account = GetPostingAccount(GetAccountByName(accountName));
-                query = query.Where(record => record._account_Id == account.Id);
+                var accountIds = accountNames
+                    .Where(accountName => !String.IsNullOrWhiteSpace(accountName))
+                    .Select(accountName => GetPostingAccount(GetAccountByName(accountName)).Id)
+                    .Distinct()
+                    .ToList();
+                if (accountIds.Count == 0)
+                    return [];
+
+                query = query.Where(record => accountIds.Contains(record._account_Id));
             }
 
             var records = query.ToList()

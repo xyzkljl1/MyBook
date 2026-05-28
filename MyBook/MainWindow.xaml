@@ -488,7 +488,7 @@
                                                      VisibleStartDate="{Binding AllocatedExpenseStartDate}"
                                                      VisibleEndDate="{Binding AllocatedExpenseEndDate}"
                                                      WindowShiftRequested="AllocatedExpenseChart_WindowShiftRequested"
-                                                     Cursor="SizeWE"/>
+                                                     Cursor="Hand"/>
                     </Border>
                     <Border Grid.Row="2" Style="{StaticResource Card}" Padding="0">
                         <DataGrid ItemsSource="{Binding AllocatedExpenseBuckets}"
@@ -663,9 +663,10 @@
                                        Foreground="#334155"
                                        VerticalAlignment="Center"
                                        Margin="16,0,8,0"/>
-                            <ComboBox ItemsSource="{Binding DetailAccountNames}"
+                            <ComboBox ItemsSource="{Binding DetailAccountFilters}"
                                       Style="{StaticResource FilterComboBox}"
-                                      SelectedItem="{Binding SelectedDetailAccountName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      DisplayMemberPath="DisplayName"
+                                      SelectedItem="{Binding SelectedDetailAccountFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                       SelectionChanged="DetailAccount_SelectionChanged"
                                       Width="168"
                                       Height="32"/>

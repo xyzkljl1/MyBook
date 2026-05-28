@@ -44,7 +44,7 @@ namespace MyBook
         private async void Refresh_Click(object sender, RoutedEventArgs e)
         {
             var viewModel = DataContext as DashboardViewModel;
-            await LoadDashboardAsync(viewModel?.DetailStartDate, viewModel?.DetailEndDate, viewModel?.SelectedDetailAccountName);
+            await LoadDashboardAsync(viewModel?.DetailStartDate, viewModel?.DetailEndDate, viewModel?.SelectedDetailAccountFilterKey);
         }
 
         private void AddRecordDetail_Click(object sender, RoutedEventArgs e)
@@ -52,9 +52,7 @@ namespace MyBook
             if (DataContext is not DashboardViewModel viewModel)
                 return;
 
-            var accountName = viewModel.SelectedDetailAccountName
-                ?? viewModel.DetailAccountNames.FirstOrDefault()
-                ?? "";
+            var accountName = viewModel.GetDefaultNewRecordAccountName();
             viewModel.RecordDetails.Insert(0, RecordDetailRowViewModel.CreateNew(accountName));
             viewModel.SetDetailStatus("新增记录尚未保存");
         }
@@ -171,7 +169,7 @@ namespace MyBook
                 var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
                 var database = new DatabaseUtil(config);
                 database.SaveRecordDetails(changes.Select(change => change.Edit));
-                await LoadDashboardAsync(viewModel.DetailStartDate, viewModel.DetailEndDate, viewModel.SelectedDetailAccountName);
+                await LoadDashboardAsync(viewModel.DetailStartDate, viewModel.DetailEndDate, viewModel.SelectedDetailAccountFilterKey);
             }
             catch (Exception ex)
             {
@@ -250,7 +248,7 @@ namespace MyBook
             return confirmed;
         }
 
-        private async Task LoadDashboardAsync(DateTime? detailStartDate = null, DateTime? detailEndDate = null, string? detailAccountName = null)
+        private async Task LoadDashboardAsync(DateTime? detailStartDate = null, DateTime? detailEndDate = null, string? detailAccountFilterKey = null)
         {
             try
             {
@@ -277,9 +275,8 @@ namespace MyBook
                     viewModel.DetailStartDate = detailStartDate.Value;
                 if (detailEndDate.HasValue)
                     viewModel.DetailEndDate = detailEndDate.Value;
-                viewModel.SelectedDetailAccountName = detailAccountName;
                 DataContext = viewModel;
-                await LoadRecordDetailsAsync(viewModel);
+                await LoadRecordDetailsAsync(viewModel, detailAccountFilterKey);
                 await LoadAllocatedExpensesAsync(viewModel);
             }
             catch (Exception e)
@@ -288,7 +285,7 @@ namespace MyBook
             }
         }
 
-        private async Task LoadRecordDetailsAsync(DashboardViewModel? viewModel = null)
+        private async Task LoadRecordDetailsAsync(DashboardViewModel? viewModel = null, string? preferredDetailAccountFilterKey = null)
         {
             viewModel ??= DataContext as DashboardViewModel;
             if (viewModel is null)
@@ -303,19 +300,21 @@ namespace MyBook
                 var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
                 var database = new DatabaseUtil(config);
                 var accounts = database.GetAllAccounts();
-                var accountNames = accounts
-                    .Select(account => account.name)
-                    .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
                 var defaultDetailAccountName = accounts
                     .Where(account => account.usage != AccountUsage.Undetermined)
                     .OrderBy(account => account.Id)
                     .Select(account => account.name)
                     .FirstOrDefault()
-                    ?? accountNames.FirstOrDefault()
+                    ?? accounts
+                        .OrderBy(account => account.name, StringComparer.OrdinalIgnoreCase)
+                        .Select(account => account.name)
+                        .FirstOrDefault()
                     ?? "";
-                viewModel.SetDetailAccountNames(accountNames, defaultDetailAccountName);
-                var details = database.GetRecordDetails(viewModel.DetailStartDate, viewModel.DetailEndDate, viewModel.SelectedDetailAccountName)
+                viewModel.SetDetailAccountFilters(
+                    accounts,
+                    preferredDetailAccountFilterKey ?? viewModel.SelectedDetailAccountFilterKey,
+                    defaultDetailAccountName);
+                var details = database.GetRecordDetails(viewModel.DetailStartDate, viewModel.DetailEndDate, viewModel.SelectedDetailAccountNames)
                     .Select(RecordDetailRowViewModel.From)
                     .ToList();
                 LoadDetailAccountBalances(viewModel, database);
@@ -492,7 +491,7 @@ namespace MyBook
         DateTime allocatedExpenseStartDate = DateTime.Today.AddDays(-14);
         DateTime allocatedExpenseEndDate = DateTime.Today;
         bool showInvestmentByHolding;
-        string? selectedDetailAccountName;
+        DetailAccountFilterViewModel? selectedDetailAccountFilter;
         MonthlyFlowAccountStatisticsViewModel? selectedMonthlyAccount;
         InvestmentAccountStatisticsViewModel? selectedInvestmentAccount;
 
@@ -514,7 +513,7 @@ namespace MyBook
         public ObservableCollection<AccountBalanceRowViewModel> DetailAccountBalances { get; } = [];
         public ObservableCollection<AllocatedExpenseBucketViewModel> AllocatedExpenseBuckets { get; } = [];
         public ObservableCollection<AllocatedExpenseBucketViewModel> LoadedAllocatedExpenseBuckets { get; } = [];
-        public List<string> DetailAccountNames { get; private set; } = [];
+        public List<DetailAccountFilterViewModel> DetailAccountFilters { get; private set; } = [];
         public List<CurrencyType> DetailCurrencyTypes { get; } = Enum.GetValues<CurrencyType>().ToList();
         public string DetailStatusText { get; private set; } = "";
         public string AllocatedExpenseStatusText { get; private set; } = "";
@@ -636,18 +635,31 @@ namespace MyBook
             }
         }
 
-        public string? SelectedDetailAccountName
+        public DetailAccountFilterViewModel? SelectedDetailAccountFilter
         {
-            get => selectedDetailAccountName;
+            get => selectedDetailAccountFilter;
             set
             {
-                if (selectedDetailAccountName == value)
+                if (ReferenceEquals(selectedDetailAccountFilter, value))
                     return;
 
-                selectedDetailAccountName = value;
+                selectedDetailAccountFilter = value;
+                OnPropertyChanged(nameof(SelectedDetailAccountFilter));
                 OnPropertyChanged(nameof(SelectedDetailAccountName));
+                OnPropertyChanged(nameof(SelectedDetailAccountNames));
+                OnPropertyChanged(nameof(SelectedDetailAccountFilterKey));
             }
         }
+
+        public string? SelectedDetailAccountName => SelectedDetailAccountFilter?.Kind == DetailAccountFilterKind.Account
+            ? SelectedDetailAccountFilter.AccountNames.FirstOrDefault()
+            : null;
+
+        public IReadOnlyList<string>? SelectedDetailAccountNames => SelectedDetailAccountFilter?.Kind == DetailAccountFilterKind.All
+            ? null
+            : SelectedDetailAccountFilter?.AccountNames;
+
+        public string? SelectedDetailAccountFilterKey => SelectedDetailAccountFilter?.Key;
 
         public bool ShowSingleCurrencyMonthly
         {
@@ -927,18 +939,51 @@ namespace MyBook
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
 
-        public void SetDetailAccountNames(IEnumerable<string> accountNames, string defaultAccountName)
+        public void SetDetailAccountFilters(IEnumerable<Account> accounts, string? preferredFilterKey, string defaultAccountName)
         {
-            DetailAccountNames = accountNames.ToList();
-            if (String.IsNullOrWhiteSpace(SelectedDetailAccountName) ||
-                !DetailAccountNames.Contains(SelectedDetailAccountName, StringComparer.OrdinalIgnoreCase))
-            {
-                SelectedDetailAccountName = DetailAccountNames.Contains(defaultAccountName, StringComparer.OrdinalIgnoreCase)
-                    ? defaultAccountName
-                    : DetailAccountNames.FirstOrDefault();
-            }
+            var accountList = accounts
+                .OrderBy(account => account.name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var filters = new List<DetailAccountFilterViewModel>();
+            if (accountList.Count > 0)
+                filters.Add(DetailAccountFilterViewModel.All(accountList.Select(account => account.name)));
+            filters.AddRange(accountList
+                .GroupBy(account => GetAccountType(account.name), StringComparer.OrdinalIgnoreCase)
+                .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(group => DetailAccountFilterViewModel.AccountType(
+                    group.Key,
+                    group.Select(account => account.name).OrderBy(name => name, StringComparer.OrdinalIgnoreCase))));
+            filters.AddRange(accountList
+                .Select(account => DetailAccountFilterViewModel.Account(account.name)));
 
-            OnPropertyChanged(nameof(DetailAccountNames));
+            DetailAccountFilters = filters;
+            OnPropertyChanged(nameof(DetailAccountFilters));
+            SelectedDetailAccountFilter =
+                filters.FirstOrDefault(filter => String.Equals(filter.Key, preferredFilterKey, StringComparison.Ordinal)) ??
+                filters.FirstOrDefault(filter => filter.Kind == DetailAccountFilterKind.Account &&
+                    String.Equals(filter.AccountNames.FirstOrDefault(), defaultAccountName, StringComparison.OrdinalIgnoreCase)) ??
+                filters.FirstOrDefault();
+        }
+
+        public string GetDefaultNewRecordAccountName()
+        {
+            if (SelectedDetailAccountFilter?.Kind == DetailAccountFilterKind.Account)
+                return SelectedDetailAccountFilter.AccountNames.FirstOrDefault() ?? "";
+            if (SelectedDetailAccountFilter?.Kind == DetailAccountFilterKind.AccountType)
+                return SelectedDetailAccountFilter.AccountNames.FirstOrDefault() ?? "";
+
+            return DetailAccountFilters
+                .Where(filter => filter.Kind == DetailAccountFilterKind.Account)
+                .Select(filter => filter.AccountNames.FirstOrDefault())
+                .FirstOrDefault(accountName => !String.IsNullOrWhiteSpace(accountName))
+                ?? "";
+        }
+
+        private static string GetAccountType(string accountName)
+        {
+            var normalized = accountName.Trim();
+            var separatorIndex = normalized.IndexOf('_');
+            return separatorIndex > 0 ? normalized[..separatorIndex] : normalized;
         }
 
         public void SetRecordDetails(IEnumerable<RecordDetailRowViewModel> records)
@@ -1051,11 +1096,69 @@ namespace MyBook
 
         public List<RecordDetailPendingChange> GetPendingBalanceCorrections()
         {
+            if (String.IsNullOrWhiteSpace(SelectedDetailAccountName))
+                return [];
+
             return DetailAccountBalances
                 .Select(balance => balance.GetPendingCorrection(SelectedDetailAccountName))
                 .Where(change => change is not null)
                 .Select(change => change!)
                 .ToList();
+        }
+    }
+
+    public enum DetailAccountFilterKind
+    {
+        All,
+        AccountType,
+        Account
+    }
+
+    public class DetailAccountFilterViewModel
+    {
+        public DetailAccountFilterKind Kind { get; init; }
+        public string Key { get; init; } = "";
+        public string DisplayName { get; init; } = "";
+        public IReadOnlyList<string> AccountNames { get; init; } = [];
+
+        public static DetailAccountFilterViewModel All(IEnumerable<string> accountNames)
+        {
+            return new DetailAccountFilterViewModel
+            {
+                Kind = DetailAccountFilterKind.All,
+                Key = "all",
+                DisplayName = "所有账户",
+                AccountNames = accountNames.ToList()
+            };
+        }
+
+        public static DetailAccountFilterViewModel AccountType(string accountType, IEnumerable<string> accountNames)
+        {
+            return new DetailAccountFilterViewModel
+            {
+                Kind = DetailAccountFilterKind.AccountType,
+                Key = $"type:{accountType}",
+                DisplayName = $"类型：{BuildAccountTypeDisplayName(accountType)}",
+                AccountNames = accountNames.ToList()
+            };
+        }
+
+        public static DetailAccountFilterViewModel Account(string accountName)
+        {
+            return new DetailAccountFilterViewModel
+            {
+                Kind = DetailAccountFilterKind.Account,
+                Key = $"account:{accountName}",
+                DisplayName = accountName,
+                AccountNames = [accountName]
+            };
+        }
+
+        private static string BuildAccountTypeDisplayName(string accountType)
+        {
+            return String.IsNullOrWhiteSpace(accountType)
+                ? "未分类账户"
+                : $"{accountType} 账户";
         }
     }
 
@@ -1832,6 +1935,7 @@ namespace MyBook
         const double DragUnitMinimumPixels = 32;
         const double ChartLeftPadding = 64;
         const double ChartRightPadding = 36;
+        const decimal FixedAxisMax = 1000m;
 
         public static readonly DependencyProperty ItemsProperty = DependencyProperty.Register(
             nameof(Items),
@@ -2007,7 +2111,7 @@ namespace MyBook
                 return;
             }
 
-            var axisMax = CalculateAxisMax(viewportPlacements.Max(placement => placement.Bucket.TotalRmb));
+            var axisMax = FixedAxisMax;
             DrawAxes(dc, left, top, chartWidth, chartHeight, axisMax);
             DrawLegend(dc, viewportPlacements.Select(placement => placement.Bucket).ToList(), width);
 
@@ -2223,17 +2327,6 @@ namespace MyBook
                 4,
                 4);
             dc.DrawText(text, new Point(x, y));
-        }
-
-        private static decimal CalculateAxisMax(decimal maxValue)
-        {
-            if (maxValue <= 0)
-                return 1;
-
-            var rawStep = (double)maxValue / 4.0;
-            var magnitude = Math.Pow(10, Math.Floor(Math.Log10(Math.Max(1, rawStep))));
-            var step = (decimal)(Math.Ceiling(rawStep / magnitude) * magnitude);
-            return Math.Max(1, step * 4);
         }
 
         private static Brush GetReasonBrush(string reason)
