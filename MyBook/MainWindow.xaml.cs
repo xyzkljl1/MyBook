@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using System.Collections;
+using System.Collections.Specialized;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
@@ -25,6 +26,8 @@ namespace MyBook
         Drawing.Icon? trayIconImage;
         bool isExitRequested;
         bool isLoadingRecordDetails;
+        bool isLoadingAllocatedExpenses;
+        bool isAdjustingAllocatedExpenseRange;
 
         public MainWindow()
         {
@@ -73,6 +76,41 @@ namespace MyBook
                 return;
 
             await LoadRecordDetailsAsync(viewModel);
+        }
+
+        private async void AllocatedExpenseDate_SelectedDateChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (isLoadingAllocatedExpenses || isAdjustingAllocatedExpenseRange)
+                return;
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            await LoadAllocatedExpensesAsync(viewModel);
+        }
+
+        private async void AllocatedExpenseUnit_Changed(object sender, RoutedEventArgs e)
+        {
+            if (isLoadingAllocatedExpenses || isAdjustingAllocatedExpenseRange)
+                return;
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            isAdjustingAllocatedExpenseRange = true;
+            viewModel.ResetAllocatedExpenseRange();
+            isAdjustingAllocatedExpenseRange = false;
+            await LoadAllocatedExpensesAsync(viewModel);
+        }
+
+        private async void DashboardTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!ReferenceEquals(sender, e.OriginalSource) || isLoadingAllocatedExpenses)
+                return;
+            if (sender is not TabControl tabControl || !ReferenceEquals(tabControl.SelectedItem, AllocatedExpenseTab))
+                return;
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+
+            await LoadAllocatedExpensesAsync(viewModel);
         }
 
         private async void DiscardRecordDetails_Click(object sender, RoutedEventArgs e)
@@ -192,6 +230,7 @@ namespace MyBook
         {
             try
             {
+                var previousViewModel = DataContext as DashboardViewModel;
                 var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
                 var database = new DatabaseUtil(config);
                 var data = database.GetDashboardData(DateTime.Today);
@@ -208,6 +247,8 @@ namespace MyBook
                 }
 
                 var viewModel = DashboardViewModel.From(data);
+                if (previousViewModel is not null)
+                    viewModel.CopyAllocatedExpenseSettingsFrom(previousViewModel);
                 if (detailStartDate.HasValue)
                     viewModel.DetailStartDate = detailStartDate.Value;
                 if (detailEndDate.HasValue)
@@ -215,6 +256,7 @@ namespace MyBook
                 viewModel.SelectedDetailAccountName = detailAccountName;
                 DataContext = viewModel;
                 await LoadRecordDetailsAsync(viewModel);
+                await LoadAllocatedExpensesAsync(viewModel);
             }
             catch (Exception e)
             {
@@ -263,6 +305,55 @@ namespace MyBook
             finally
             {
                 isLoadingRecordDetails = false;
+            }
+        }
+
+        private async Task LoadAllocatedExpensesAsync(DashboardViewModel? viewModel = null)
+        {
+            viewModel ??= DataContext as DashboardViewModel;
+            if (viewModel is null || isLoadingAllocatedExpenses)
+                return;
+
+            isLoadingAllocatedExpenses = true;
+            try
+            {
+                var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                var database = new DatabaseUtil(config);
+                database.ProcessAllocatedExpenseDirtyRecords();
+                if (viewModel.ShowAllocatedExpenseMonthly)
+                {
+                    var firstMonth = new DateTime(
+                        viewModel.AllocatedExpenseStartDate.Year,
+                        viewModel.AllocatedExpenseStartDate.Month,
+                        1);
+                    var endMonthExclusive = new DateTime(
+                        viewModel.AllocatedExpenseEndDate.Year,
+                        viewModel.AllocatedExpenseEndDate.Month,
+                        1).AddMonths(1);
+                    var items = database.GetAllocatedExpenseMonthly(firstMonth, endMonthExclusive);
+                    viewModel.SetAllocatedExpenseBuckets(AllocatedExpenseBucketViewModel.FromMonthly(items, firstMonth, endMonthExclusive));
+                    viewModel.SetAllocatedExpenseStatus($"共 {viewModel.AllocatedExpenseBuckets.Count} 个月");
+                }
+                else
+                {
+                    var items = database.GetAllocatedExpenseDaily(
+                        viewModel.AllocatedExpenseStartDate,
+                        viewModel.AllocatedExpenseEndDate.AddDays(1));
+                    viewModel.SetAllocatedExpenseBuckets(AllocatedExpenseBucketViewModel.FromDaily(
+                        items,
+                        viewModel.AllocatedExpenseStartDate,
+                        viewModel.AllocatedExpenseEndDate));
+                    viewModel.SetAllocatedExpenseStatus($"共 {viewModel.AllocatedExpenseBuckets.Count} 天");
+                }
+            }
+            catch (Exception e)
+            {
+                viewModel.SetAllocatedExpenseBuckets([]);
+                viewModel.SetAllocatedExpenseStatus($"均摊支出读取失败：{e.Message}");
+            }
+            finally
+            {
+                isLoadingAllocatedExpenses = false;
             }
         }
 
@@ -348,10 +439,14 @@ namespace MyBook
     public class DashboardViewModel : INotifyPropertyChanged
     {
         bool showSingleCurrencyMonthly;
+        bool showAllocatedExpenseLineChart;
+        bool showAllocatedExpenseMonthly;
         double selectedAssetSummaryOffset = -1;
         double selectedReasonMonthIndex;
         DateTime detailStartDate = DateTime.Today.AddDays(-30);
         DateTime detailEndDate = DateTime.Today;
+        DateTime allocatedExpenseStartDate = DateTime.Today.AddDays(-14);
+        DateTime allocatedExpenseEndDate = DateTime.Today;
         bool showInvestmentByHolding;
         string? selectedDetailAccountName;
         MonthlyFlowAccountStatisticsViewModel? selectedMonthlyAccount;
@@ -373,9 +468,12 @@ namespace MyBook
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
         public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
         public ObservableCollection<AccountBalanceRowViewModel> DetailAccountBalances { get; } = [];
+        public ObservableCollection<AllocatedExpenseBucketViewModel> AllocatedExpenseBuckets { get; } = [];
         public List<string> DetailAccountNames { get; private set; } = [];
         public List<CurrencyType> DetailCurrencyTypes { get; } = Enum.GetValues<CurrencyType>().ToList();
         public string DetailStatusText { get; private set; } = "";
+        public string AllocatedExpenseStatusText { get; private set; } = "";
+        public string AllocatedExpenseTotalText => $"¥{AllocatedExpenseBuckets.Sum(bucket => bucket.TotalRmb):N2}";
         public IEnumerable<MonthlyFlowSeriesViewModel> VisibleMonthlySeries
         {
             get
@@ -400,6 +498,65 @@ namespace MyBook
             ? new ReasonFlowSeriesViewModel()
             : ReasonMonthSeries[Math.Clamp((int)Math.Round(selectedReasonMonthIndex), 0, ReasonMonthSeries.Count - 1)];
         public string SelectedReasonMonthLabel => SelectedReasonSeries.MonthLabel;
+
+        public DateTime AllocatedExpenseStartDate
+        {
+            get => allocatedExpenseStartDate;
+            set
+            {
+                value = value.Date;
+                if (allocatedExpenseStartDate == value)
+                    return;
+
+                allocatedExpenseStartDate = value;
+                OnPropertyChanged(nameof(AllocatedExpenseStartDate));
+                if (allocatedExpenseEndDate < allocatedExpenseStartDate)
+                {
+                    allocatedExpenseEndDate = allocatedExpenseStartDate;
+                    OnPropertyChanged(nameof(AllocatedExpenseEndDate));
+                }
+            }
+        }
+
+        public DateTime AllocatedExpenseEndDate
+        {
+            get => allocatedExpenseEndDate;
+            set
+            {
+                value = value.Date < allocatedExpenseStartDate ? allocatedExpenseStartDate : value.Date;
+                if (allocatedExpenseEndDate == value)
+                    return;
+
+                allocatedExpenseEndDate = value;
+                OnPropertyChanged(nameof(AllocatedExpenseEndDate));
+            }
+        }
+
+        public bool ShowAllocatedExpenseLineChart
+        {
+            get => showAllocatedExpenseLineChart;
+            set
+            {
+                if (showAllocatedExpenseLineChart == value)
+                    return;
+
+                showAllocatedExpenseLineChart = value;
+                OnPropertyChanged(nameof(ShowAllocatedExpenseLineChart));
+            }
+        }
+
+        public bool ShowAllocatedExpenseMonthly
+        {
+            get => showAllocatedExpenseMonthly;
+            set
+            {
+                if (showAllocatedExpenseMonthly == value)
+                    return;
+
+                showAllocatedExpenseMonthly = value;
+                OnPropertyChanged(nameof(ShowAllocatedExpenseMonthly));
+            }
+        }
 
         public DateTime DetailStartDate
         {
@@ -633,6 +790,35 @@ namespace MyBook
             };
         }
 
+        public void CopyAllocatedExpenseSettingsFrom(DashboardViewModel source)
+        {
+            showAllocatedExpenseLineChart = source.ShowAllocatedExpenseLineChart;
+            showAllocatedExpenseMonthly = source.ShowAllocatedExpenseMonthly;
+            allocatedExpenseStartDate = source.AllocatedExpenseStartDate;
+            allocatedExpenseEndDate = source.AllocatedExpenseEndDate;
+            OnPropertyChanged(nameof(ShowAllocatedExpenseLineChart));
+            OnPropertyChanged(nameof(ShowAllocatedExpenseMonthly));
+            OnPropertyChanged(nameof(AllocatedExpenseStartDate));
+            OnPropertyChanged(nameof(AllocatedExpenseEndDate));
+        }
+
+        public void ResetAllocatedExpenseRange()
+        {
+            if (ShowAllocatedExpenseMonthly)
+            {
+                allocatedExpenseStartDate = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1).AddMonths(-14);
+                allocatedExpenseEndDate = DateTime.Today;
+            }
+            else
+            {
+                allocatedExpenseStartDate = DateTime.Today.AddDays(-14);
+                allocatedExpenseEndDate = DateTime.Today;
+            }
+
+            OnPropertyChanged(nameof(AllocatedExpenseStartDate));
+            OnPropertyChanged(nameof(AllocatedExpenseEndDate));
+        }
+
         private void ApplySelectedAssetSummary()
         {
             if (AssetSummaries.Count == 0)
@@ -682,6 +868,21 @@ namespace MyBook
         {
             DetailStatusText = status;
             OnPropertyChanged(nameof(DetailStatusText));
+        }
+
+        public void SetAllocatedExpenseBuckets(IEnumerable<AllocatedExpenseBucketViewModel> buckets)
+        {
+            AllocatedExpenseBuckets.Clear();
+            foreach (var bucket in buckets)
+                AllocatedExpenseBuckets.Add(bucket);
+            OnPropertyChanged(nameof(AllocatedExpenseBuckets));
+            OnPropertyChanged(nameof(AllocatedExpenseTotalText));
+        }
+
+        public void SetAllocatedExpenseStatus(string status)
+        {
+            AllocatedExpenseStatusText = status;
+            OnPropertyChanged(nameof(AllocatedExpenseStatusText));
         }
 
         public void SetDetailAccountBalances(IEnumerable<AccountBalanceRowViewModel> balances)
@@ -1108,6 +1309,122 @@ namespace MyBook
         }
     }
 
+    public class AllocatedExpenseBucketViewModel
+    {
+        public DateTime PeriodStart { get; set; }
+        public string PeriodLabel { get; set; } = "";
+        public decimal TotalRmb { get; set; }
+        public string TotalText { get; set; } = "";
+        public string DetailsText { get; set; } = "";
+        public List<AllocatedExpenseSegmentViewModel> Segments { get; set; } = [];
+
+        public static List<AllocatedExpenseBucketViewModel> FromDaily(
+            IEnumerable<AllocatedExpenseDailyData> items,
+            DateTime startInclusive,
+            DateTime endInclusive)
+        {
+            var groups = items
+                .GroupBy(item => item.Date.Date)
+                .ToDictionary(group => group.Key, group => group.ToList());
+            var result = new List<AllocatedExpenseBucketViewModel>();
+            for (var date = startInclusive.Date; date <= endInclusive.Date; date = date.AddDays(1))
+            {
+                groups.TryGetValue(date, out var dayItems);
+                result.Add(FromItems(date, date.ToString("MM-dd", CultureInfo.InvariantCulture), dayItems ?? []));
+            }
+
+            return result;
+        }
+
+        public static List<AllocatedExpenseBucketViewModel> FromMonthly(
+            IEnumerable<AllocatedExpenseMonthlyData> items,
+            DateTime firstMonthInclusive,
+            DateTime endMonthExclusive)
+        {
+            var groups = items
+                .GroupBy(item => new DateTime(item.Month.Year, item.Month.Month, 1))
+                .ToDictionary(group => group.Key, group => group.ToList());
+            var result = new List<AllocatedExpenseBucketViewModel>();
+            for (var month = firstMonthInclusive.Date; month < endMonthExclusive.Date; month = month.AddMonths(1))
+            {
+                groups.TryGetValue(month, out var monthItems);
+                result.Add(FromItems(month, month.ToString("yy-MM", CultureInfo.InvariantCulture), monthItems ?? []));
+            }
+
+            return result;
+        }
+
+        private static AllocatedExpenseBucketViewModel FromItems<T>(
+            DateTime periodStart,
+            string label,
+            List<T> items)
+            where T : class
+        {
+            var segments = items
+                .Select(item => item switch
+                {
+                    AllocatedExpenseDailyData daily => AllocatedExpenseSegmentViewModel.From(daily.Reason, daily.Currency, daily.Amount, daily.RmbAmount),
+                    AllocatedExpenseMonthlyData monthly => AllocatedExpenseSegmentViewModel.From(monthly.Reason, monthly.Currency, monthly.Amount, monthly.RmbAmount),
+                    _ => null
+                })
+                .Where(segment => segment is not null)
+                .Select(segment => segment!)
+                .OrderByDescending(segment => segment.RmbAmount ?? 0)
+                .ThenBy(segment => segment.Reason)
+                .ThenBy(segment => segment.Currency)
+                .ToList();
+            var total = Currency.RoundMoney(segments.Sum(segment => segment.RmbAmount ?? 0));
+            return new AllocatedExpenseBucketViewModel
+            {
+                PeriodStart = periodStart,
+                PeriodLabel = label,
+                TotalRmb = total,
+                TotalText = $"¥{total:N2}",
+                DetailsText = BuildDetailsText(segments),
+                Segments = segments
+            };
+        }
+
+        private static string BuildDetailsText(List<AllocatedExpenseSegmentViewModel> segments)
+        {
+            if (segments.Count == 0)
+                return "";
+
+            return String.Join("; ", segments.Select(segment =>
+            {
+                var symbol = CurrencySummaryViewModel.FormatCurrencySymbol(segment.Currency);
+                var original = $"{segment.Reason} {symbol}{MoneyText.FormatAmount(segment.Amount)}";
+                return segment.RmbAmount.HasValue
+                    ? $"{original} / ¥{MoneyText.FormatAmount(segment.RmbAmount.Value)}"
+                    : $"{original} / 未折算";
+            }));
+        }
+    }
+
+    public class AllocatedExpenseSegmentViewModel
+    {
+        public string Reason { get; set; } = "";
+        public CurrencyType Currency { get; set; }
+        public decimal Amount { get; set; }
+        public decimal? RmbAmount { get; set; }
+        public decimal ChartValue => RmbAmount ?? 0;
+
+        public static AllocatedExpenseSegmentViewModel From(
+            string reason,
+            CurrencyType currency,
+            decimal amount,
+            decimal? rmbAmount)
+        {
+            return new AllocatedExpenseSegmentViewModel
+            {
+                Reason = reason,
+                Currency = currency,
+                Amount = amount,
+                RmbAmount = rmbAmount
+            };
+        }
+    }
+
     public class MonthlyFlowAccountStatisticsViewModel
     {
         public string DisplayName { get; set; } = "";
@@ -1319,6 +1636,282 @@ namespace MyBook
                 Name = item.Name,
                 TotalText = $"¥{item.Total:N2}"
             };
+        }
+    }
+
+    public class AllocatedExpenseChart : FrameworkElement
+    {
+        public static readonly DependencyProperty ItemsProperty = DependencyProperty.Register(
+            nameof(Items),
+            typeof(IEnumerable),
+            typeof(AllocatedExpenseChart),
+            new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender, OnItemsChanged));
+        public static readonly DependencyProperty IsLineChartProperty = DependencyProperty.Register(
+            nameof(IsLineChart),
+            typeof(bool),
+            typeof(AllocatedExpenseChart),
+            new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender));
+
+        static readonly string[] SegmentColors =
+        [
+            "#0F766E",
+            "#2563EB",
+            "#7C3AED",
+            "#DB2777",
+            "#F59E0B",
+            "#0891B2",
+            "#65A30D",
+            "#DC2626",
+            "#4F46E5"
+        ];
+
+        public IEnumerable? Items
+        {
+            get => (IEnumerable?)GetValue(ItemsProperty);
+            set => SetValue(ItemsProperty, value);
+        }
+
+        public bool IsLineChart
+        {
+            get => (bool)GetValue(IsLineChartProperty);
+            set => SetValue(IsLineChartProperty, value);
+        }
+
+        private static void OnItemsChanged(DependencyObject dependencyObject, DependencyPropertyChangedEventArgs e)
+        {
+            var chart = (AllocatedExpenseChart)dependencyObject;
+            if (e.OldValue is INotifyCollectionChanged oldCollection)
+                oldCollection.CollectionChanged -= chart.Items_CollectionChanged;
+            if (e.NewValue is INotifyCollectionChanged newCollection)
+                newCollection.CollectionChanged += chart.Items_CollectionChanged;
+            chart.InvalidateVisual();
+        }
+
+        private void Items_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        {
+            InvalidateVisual();
+        }
+
+        protected override void OnRender(DrawingContext dc)
+        {
+            base.OnRender(dc);
+            var buckets = Items?.Cast<AllocatedExpenseBucketViewModel>().ToList() ?? [];
+            if (buckets.Count == 0 || buckets.All(bucket => bucket.TotalRmb == 0))
+            {
+                DrawText(dc, "暂无均摊支出", 14, "#94A3B8", ActualWidth / 2 - 42, ActualHeight / 2 - 10);
+                return;
+            }
+
+            var width = ActualWidth;
+            var height = ActualHeight;
+            var left = 64.0;
+            var top = 44.0;
+            var right = 36.0;
+            var bottom = 34.0;
+            var chartWidth = Math.Max(1, width - left - right);
+            var chartHeight = Math.Max(1, height - top - bottom);
+            var axisMax = CalculateAxisMax(buckets.Max(bucket => bucket.TotalRmb));
+            DrawAxes(dc, left, top, chartWidth, chartHeight, axisMax);
+            DrawLegend(dc, buckets, width);
+
+            if (IsLineChart)
+                DrawLineChart(dc, buckets, left, top, chartWidth, chartHeight, axisMax);
+            else
+                DrawStackedBars(dc, buckets, left, top, chartWidth, chartHeight, axisMax);
+
+            DrawLabels(dc, buckets, left, top + chartHeight, chartWidth);
+        }
+
+        private static void DrawAxes(
+            DrawingContext dc,
+            double left,
+            double top,
+            double chartWidth,
+            double chartHeight,
+            decimal axisMax)
+        {
+            var gridPen = new Pen(ParseBrush("#E2E8F0"), 1);
+            var chartRight = left + chartWidth;
+            var axisStep = axisMax / 4;
+            for (var i = 0; i <= 4; i++)
+            {
+                var value = axisStep * i;
+                var y = top + chartHeight - chartHeight * i / 4.0;
+                dc.DrawLine(gridPen, new Point(left, y), new Point(chartRight, y));
+                DrawRightAlignedText(dc, value.ToString("N0", CultureInfo.InvariantCulture), 11, "#94A3B8", left - 8, y - 8);
+            }
+
+            dc.DrawLine(gridPen, new Point(left, top), new Point(left, top + chartHeight));
+            dc.DrawLine(gridPen, new Point(left, top + chartHeight), new Point(chartRight, top + chartHeight));
+        }
+
+        private static void DrawStackedBars(
+            DrawingContext dc,
+            List<AllocatedExpenseBucketViewModel> buckets,
+            double left,
+            double top,
+            double chartWidth,
+            double chartHeight,
+            decimal axisMax)
+        {
+            var groupWidth = chartWidth / buckets.Count;
+            var barWidth = Math.Min(28, Math.Max(8, groupWidth * 0.42));
+            for (var i = 0; i < buckets.Count; i++)
+            {
+                var x = left + groupWidth * i + (groupWidth - barWidth) / 2;
+                var y = top + chartHeight;
+                foreach (var segment in buckets[i].Segments.Where(segment => segment.ChartValue > 0))
+                {
+                    var height = Math.Max(1, chartHeight * (double)(segment.ChartValue / axisMax));
+                    y -= height;
+                    dc.DrawRoundedRectangle(
+                        GetReasonBrush(segment.Reason),
+                        null,
+                        new Rect(x, y, barWidth, height),
+                        2,
+                        2);
+                }
+
+                DrawValueLabel(dc, buckets[i].TotalRmb, left + groupWidth * i + groupWidth / 2, y - 17);
+            }
+        }
+
+        private static void DrawLineChart(
+            DrawingContext dc,
+            List<AllocatedExpenseBucketViewModel> buckets,
+            double left,
+            double top,
+            double chartWidth,
+            double chartHeight,
+            decimal axisMax)
+        {
+            var pen = new Pen(ParseBrush("#0F766E"), 2);
+            var fill = ParseBrush("#0F766E");
+            var points = buckets.Select((bucket, index) =>
+            {
+                var x = buckets.Count == 1
+                    ? left + chartWidth / 2
+                    : left + chartWidth * index / (buckets.Count - 1);
+                var y = top + chartHeight - chartHeight * (double)(bucket.TotalRmb / axisMax);
+                return new Point(x, y);
+            }).ToList();
+
+            for (var i = 1; i < points.Count; i++)
+                dc.DrawLine(pen, points[i - 1], points[i]);
+
+            for (var i = 0; i < points.Count; i++)
+            {
+                dc.DrawEllipse(fill, null, points[i], 3.5, 3.5);
+                if (buckets[i].TotalRmb > 0)
+                    DrawValueLabel(dc, buckets[i].TotalRmb, points[i].X, points[i].Y - 20);
+            }
+        }
+
+        private static void DrawLabels(
+            DrawingContext dc,
+            List<AllocatedExpenseBucketViewModel> buckets,
+            double left,
+            double baselineY,
+            double chartWidth)
+        {
+            var groupWidth = chartWidth / buckets.Count;
+            for (var i = 0; i < buckets.Count; i++)
+            {
+                if (buckets.Count > 18 && i % 2 == 1)
+                    continue;
+
+                var x = left + groupWidth * i + groupWidth / 2;
+                var text = CreateText(buckets[i].PeriodLabel, 11, ParseBrush("#64748B"));
+                dc.DrawText(text, new Point(x - text.Width / 2, baselineY + 12));
+            }
+        }
+
+        private static void DrawLegend(DrawingContext dc, List<AllocatedExpenseBucketViewModel> buckets, double width)
+        {
+            var reasons = buckets
+                .SelectMany(bucket => bucket.Segments)
+                .GroupBy(segment => segment.Reason)
+                .Select(group => new { Reason = group.Key, Total = group.Sum(segment => segment.ChartValue) })
+                .Where(item => item.Total > 0)
+                .OrderByDescending(item => item.Total)
+                .Take(5)
+                .ToList();
+            var x = Math.Max(70, width - 520);
+            foreach (var item in reasons)
+            {
+                dc.DrawEllipse(GetReasonBrush(item.Reason), null, new Point(x, 13), 4, 4);
+                DrawText(dc, TrimText(item.Reason, 10), 12, "#334155", x + 10, 5);
+                x += 96;
+            }
+        }
+
+        private static void DrawValueLabel(DrawingContext dc, decimal value, double centerX, double y)
+        {
+            if (value <= 0)
+                return;
+
+            var text = CreateText(value.ToString("N0", CultureInfo.InvariantCulture), 10, ParseBrush("#0F172A"));
+            var x = centerX - text.Width / 2;
+            dc.DrawRoundedRectangle(
+                new SolidColorBrush(Color.FromArgb(230, 255, 255, 255)),
+                null,
+                new Rect(x - 3, y - 1, text.Width + 6, text.Height + 2),
+                4,
+                4);
+            dc.DrawText(text, new Point(x, y));
+        }
+
+        private static decimal CalculateAxisMax(decimal maxValue)
+        {
+            if (maxValue <= 0)
+                return 1;
+
+            var rawStep = (double)maxValue / 4.0;
+            var magnitude = Math.Pow(10, Math.Floor(Math.Log10(Math.Max(1, rawStep))));
+            var step = (decimal)(Math.Ceiling(rawStep / magnitude) * magnitude);
+            return Math.Max(1, step * 4);
+        }
+
+        private static Brush GetReasonBrush(string reason)
+        {
+            var hash = 0;
+            foreach (var c in reason)
+                hash = unchecked(hash * 31 + c);
+            var index = Math.Abs(hash) % SegmentColors.Length;
+            return ParseBrush(SegmentColors[index]);
+        }
+
+        private static string TrimText(string text, int maxLength)
+        {
+            return text.Length <= maxLength ? text : text[..Math.Max(1, maxLength - 1)] + "…";
+        }
+
+        private static void DrawText(DrawingContext dc, string text, double size, string color, double x, double y)
+        {
+            dc.DrawText(CreateText(text, size, ParseBrush(color)), new Point(x, y));
+        }
+
+        private static void DrawRightAlignedText(DrawingContext dc, string text, double size, string color, double rightX, double y)
+        {
+            var formatted = CreateText(text, size, ParseBrush(color));
+            dc.DrawText(formatted, new Point(rightX - formatted.Width, y));
+        }
+
+        private static FormattedText CreateText(string text, double size, Brush brush)
+        {
+            return new FormattedText(
+                text,
+                CultureInfo.CurrentCulture,
+                FlowDirection.LeftToRight,
+                new Typeface("Microsoft YaHei UI"),
+                size,
+                brush,
+                1.25);
+        }
+
+        private static SolidColorBrush ParseBrush(string color)
+        {
+            return (SolidColorBrush)new BrushConverter().ConvertFromString(color)!;
         }
     }
 

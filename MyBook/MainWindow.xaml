@@ -190,7 +190,7 @@
             </ItemsControl>
         </StackPanel>
 
-        <TabControl Grid.Row="2">
+        <TabControl Grid.Row="2" SelectionChanged="DashboardTabs_SelectionChanged">
             <TabItem Header="12个月收支">
                 <Grid>
                     <Grid.RowDefinitions>
@@ -415,6 +415,121 @@
                         </ScrollViewer>
                     </Grid>
                 </Border>
+            </TabItem>
+
+            <TabItem x:Name="AllocatedExpenseTab" Header="均摊支出">
+                <Grid Margin="0,16,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="300"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <DockPanel Margin="0,0,0,12">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                            <CheckBox Content="曲线图"
+                                      IsChecked="{Binding ShowAllocatedExpenseLineChart, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      FontSize="13"
+                                      Foreground="#334155"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,14,0"/>
+                            <CheckBox Content="按月"
+                                      IsChecked="{Binding ShowAllocatedExpenseMonthly, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      Checked="AllocatedExpenseUnit_Changed"
+                                      Unchecked="AllocatedExpenseUnit_Changed"
+                                      FontSize="13"
+                                      Foreground="#334155"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,18,0"/>
+                            <TextBlock Text="时间"
+                                       FontSize="13"
+                                       Foreground="#334155"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,8,0"/>
+                            <DatePicker SelectedDate="{Binding AllocatedExpenseStartDate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Width="128"
+                                        Height="30"
+                                        FontSize="13"
+                                        SelectedDateChanged="AllocatedExpenseDate_SelectedDateChanged"/>
+                            <TextBlock Text="-"
+                                       FontSize="13"
+                                       Foreground="#64748B"
+                                       VerticalAlignment="Center"
+                                       Margin="8,0"/>
+                            <DatePicker SelectedDate="{Binding AllocatedExpenseEndDate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        DisplayDateStart="{Binding AllocatedExpenseStartDate}"
+                                        Width="128"
+                                        Height="30"
+                                        FontSize="13"
+                                        SelectedDateChanged="AllocatedExpenseDate_SelectedDateChanged"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="均摊支出"
+                                       FontSize="15"
+                                       FontWeight="SemiBold"
+                                       Foreground="#334155"
+                                       VerticalAlignment="Center"/>
+                            <TextBox Style="{StaticResource SelectableText}"
+                                     Text="{Binding AllocatedExpenseTotalText, Mode=OneWay}"
+                                     FontSize="14"
+                                     FontWeight="SemiBold"
+                                     Foreground="#BE123C"
+                                     Margin="14,0,0,0"/>
+                            <TextBlock Text="{Binding AllocatedExpenseStatusText}"
+                                       FontSize="12"
+                                       Foreground="#64748B"
+                                       VerticalAlignment="Center"
+                                       Margin="14,1,0,0"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <Border Grid.Row="1" Style="{StaticResource Card}" Padding="12" Margin="0,0,0,12">
+                        <local:AllocatedExpenseChart Items="{Binding AllocatedExpenseBuckets}"
+                                                     IsLineChart="{Binding ShowAllocatedExpenseLineChart}"/>
+                    </Border>
+                    <Border Grid.Row="2" Style="{StaticResource Card}" Padding="0">
+                        <DataGrid ItemsSource="{Binding AllocatedExpenseBuckets}"
+                                  AutoGenerateColumns="False"
+                                  IsReadOnly="True"
+                                  CanUserAddRows="False"
+                                  HeadersVisibility="Column"
+                                  GridLinesVisibility="None"
+                                  SelectionUnit="CellOrRowHeader">
+                            <DataGrid.Columns>
+                                <DataGridTemplateColumn Header="时间" Width="120">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}"
+                                                     Text="{Binding PeriodLabel}"
+                                                     FontSize="13"
+                                                     Foreground="#334155"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="折算支出" Width="150">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}"
+                                                     Text="{Binding TotalText}"
+                                                     FontSize="13"
+                                                     FontWeight="SemiBold"
+                                                     Foreground="#BE123C"
+                                                     TextAlignment="Right"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="明细" Width="*">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}"
+                                                     Text="{Binding DetailsText}"
+                                                     FontSize="13"
+                                                     Foreground="#64748B"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Border>
+                </Grid>
             </TabItem>
 
             <TabItem Header="投资统计">

@@ -1287,6 +1287,15 @@ namespace MyBook
             int statementImportId,
             DateTime now)
         {
+            var normalizedExpenseAllocationDays = NormalizeExpenseAllocationDays(edit.ExpenseAllocationDays);
+            ValidateRecordExpenseAllocation(
+                null,
+                normalizedExpenseAllocationDays,
+                account.usage,
+                edit.IsInternal,
+                null,
+                edit.IsRefundMatched,
+                edit.Amount);
             var record = new Record
             {
                 v = edit.Amount,
@@ -1297,7 +1306,7 @@ namespace MyBook
                 isInternal = edit.IsInternal,
                 isRefundMatched = edit.IsRefundMatched,
                 HoldingQuantity = edit.HoldingQuantity,
-                expenseAllocationDays = NormalizeExpenseAllocationDays(edit.ExpenseAllocationDays),
+                expenseAllocationDays = normalizedExpenseAllocationDays,
                 Source = CleanRecordText(edit.Source),
                 Reason = CleanRecordText(edit.Reason),
                 _account_Id = account.Id,
@@ -1339,6 +1348,14 @@ namespace MyBook
                 throw new InvalidOperationException($"Imported record currency is fixed and cannot be edited: {existing.Id}");
             if (existing.HoldingQuantity == 0 && edit.HoldingQuantity != 0)
                 throw new InvalidOperationException($"Record holding quantity is not applicable and cannot be edited: {existing.Id}");
+            ValidateRecordExpenseAllocation(
+                existing.Id,
+                normalizedExpenseAllocationDays,
+                account.usage,
+                edit.IsInternal,
+                existing.matchedRecordId,
+                edit.IsRefundMatched,
+                edit.Amount);
 
             var changed = existing._account_Id != account.Id
                 || existing.v != edit.Amount
@@ -1381,7 +1398,25 @@ namespace MyBook
 
         private static int? NormalizeExpenseAllocationDays(int? value)
         {
-            return value.HasValue && value.Value > 1 ? value.Value : null;
+            return value.HasValue && Math.Abs(value.Value) > 1 ? value.Value : null;
+        }
+
+        private static void ValidateRecordExpenseAllocation(
+            int? recordId,
+            int? expenseAllocationDays,
+            AccountUsage accountUsage,
+            bool isInternal,
+            int? matchedRecordId,
+            bool isRefundMatched,
+            decimal amount)
+        {
+            if (!expenseAllocationDays.HasValue)
+                return;
+            if (CanRecordHaveExpenseAllocation(accountUsage, isInternal, matchedRecordId, isRefundMatched, amount))
+                return;
+
+            var recordText = recordId.HasValue ? $"Record {recordId.Value}" : "New record";
+            throw new InvalidOperationException($"{recordText} cannot have expense allocation days unless it belongs to a Life or Transit account and is a non-internal, non-refund-matched expense record.");
         }
 
         public List<AllocatedExpenseDailyData> GetAllocatedExpenseDaily(DateTime date)
@@ -1397,7 +1432,7 @@ namespace MyBook
                 throw new ArgumentException("Allocated expense end date must be after start date.", nameof(endExclusive));
 
             EnsureAllocatedExpenseCacheClean();
-            return ReadAllocatedExpenseDailyFromCache(startDate, endDate, GetCurrencyToRmbRates());
+            return ReadAllocatedExpenseDaily(startDate, endDate, GetCurrencyToRmbRates());
         }
 
         public List<AllocatedExpenseMonthlyData> GetAllocatedExpenseMonthly(DateTime month)
@@ -1472,8 +1507,9 @@ namespace MyBook
                 .Where(item => dirtyRecordIds.Contains(item._record_Id))
                 .ExecuteCommand();
 
+            var allocatedExpenseAccountIds = GetAllocatedExpenseAccountIds();
             var cacheItems = records
-                .SelectMany(BuildAllocatedExpenseCacheItems)
+                .SelectMany(record => BuildAllocatedExpenseCacheItems(record, allocatedExpenseAccountIds))
                 .ToList();
             if (cacheItems.Count > 0)
                 db.Insertable(cacheItems).ExecuteCommand();
@@ -1507,8 +1543,9 @@ namespace MyBook
             EnsureAllocatedExpenseCacheClean();
 
             var records = db.Queryable<Record>().ToList();
+            var allocatedExpenseAccountIds = GetAllocatedExpenseAccountIds();
             var expected = records
-                .SelectMany(BuildAllocatedExpenseCacheItems)
+                .SelectMany(record => BuildAllocatedExpenseCacheItems(record, allocatedExpenseAccountIds))
                 .OrderBy(item => item._record_Id)
                 .ThenBy(item => item.date)
                 .ToList();
@@ -1534,10 +1571,22 @@ namespace MyBook
             }
         }
 
-        private List<AllocatedExpenseDailyData> ReadAllocatedExpenseDailyFromCache(
+        private List<AllocatedExpenseDailyData> ReadAllocatedExpenseDaily(
             DateTime startDate,
             DateTime endDate,
             Dictionary<CurrencyType, decimal> exchangeRates)
+        {
+            var allocatedExpenseAccountIds = GetAllocatedExpenseAccountIds();
+            var items = ReadAllocatedExpenseDailyFromCache(startDate, endDate, exchangeRates, allocatedExpenseAccountIds);
+            items.AddRange(ReadNonAllocatedExpenseDailyFromRecords(startDate, endDate, exchangeRates, allocatedExpenseAccountIds));
+            return GroupAllocatedExpenseDailyItems(items);
+        }
+
+        private List<AllocatedExpenseDailyData> ReadAllocatedExpenseDailyFromCache(
+            DateTime startDate,
+            DateTime endDate,
+            Dictionary<CurrencyType, decimal> exchangeRates,
+            HashSet<int> allocatedExpenseAccountIds)
         {
             var cacheItems = db.Queryable<AllocatedExpenseItem>()
                 .Where(item => item.date >= startDate && item.date < endDate)
@@ -1551,21 +1600,63 @@ namespace MyBook
                 .ToList()
                 .ToDictionary(record => record.Id);
 
-            return cacheItems
-                .Select(item =>
-                {
-                    if (!records.TryGetValue(item._record_Id, out var record))
-                        throw new InvalidOperationException($"Allocated expense cache points to missing record: {item._record_Id}");
+            var result = new List<AllocatedExpenseDailyData>();
+            foreach (var item in cacheItems)
+            {
+                if (!records.TryGetValue(item._record_Id, out var record))
+                    throw new InvalidOperationException($"Allocated expense cache points to missing record: {item._record_Id}");
+                if (!ShouldRecordContributeToAllocatedExpense(record, allocatedExpenseAccountIds))
+                    continue;
 
+                result.Add(new AllocatedExpenseDailyData
+                {
+                    Date = item.date.Date,
+                    Reason = GetRecordReasonDisplay(record),
+                    Currency = record.t,
+                    Amount = item.amount,
+                    RmbAmount = TryConvertToRmb(item.amount, record.t, exchangeRates)
+                });
+            }
+
+            return result;
+        }
+
+        private List<AllocatedExpenseDailyData> ReadNonAllocatedExpenseDailyFromRecords(
+            DateTime startDate,
+            DateTime endDate,
+            Dictionary<CurrencyType, decimal> exchangeRates,
+            HashSet<int> allocatedExpenseAccountIds)
+        {
+            var records = db.Queryable<Record>()
+                .Where(record => !record.isInternal
+                    && record.matchedRecordId == null
+                    && !record.isRefundMatched
+                    && record.v < 0
+                    && record.date >= startDate
+                    && record.date < endDate)
+                .ToList();
+
+            return records
+                .Where(record => ShouldRecordContributeToDirectExpenseStatistics(record, allocatedExpenseAccountIds))
+                .Select(record =>
+                {
+                    var amount = Currency.RoundMoney(-record.v);
                     return new AllocatedExpenseDailyData
                     {
-                        Date = item.date.Date,
+                        Date = record.date.Date,
                         Reason = GetRecordReasonDisplay(record),
                         Currency = record.t,
-                        Amount = item.amount,
-                        RmbAmount = TryConvertToRmb(item.amount, record.t, exchangeRates)
+                        Amount = amount,
+                        RmbAmount = TryConvertToRmb(amount, record.t, exchangeRates)
                     };
                 })
+                .ToList();
+        }
+
+        private static List<AllocatedExpenseDailyData> GroupAllocatedExpenseDailyItems(
+            IEnumerable<AllocatedExpenseDailyData> items)
+        {
+            return items
                 .GroupBy(item => (item.Date, item.Reason, item.Currency))
                 .Select(group =>
                 {
@@ -1590,14 +1681,15 @@ namespace MyBook
         }
 
         private static IEnumerable<AllocatedExpenseItem> BuildAllocatedExpenseCacheItems(
-            Record record)
+            Record record,
+            HashSet<int> allocatedExpenseAccountIds)
         {
-            if (!ShouldRecordContributeToAllocatedExpense(record))
+            if (!ShouldRecordContributeToAllocatedExpense(record, allocatedExpenseAccountIds))
                 yield break;
 
             var days = NormalizeExpenseAllocationDays(record.expenseAllocationDays)!.Value;
-            var allocationStart = GetExpenseAllocationStartDate(record);
-            var allocationEnd = record.date.Date.AddDays(1);
+            var allocationStart = GetExpenseAllocationStartDate(record, days);
+            var allocationEnd = GetExpenseAllocationEndDate(record, days);
             for (var date = allocationStart; date < allocationEnd; date = date.AddDays(1))
             {
                 var amount = GetAllocatedExpenseAmountForDay(record, date, days);
@@ -1613,13 +1705,69 @@ namespace MyBook
             }
         }
 
-        private static bool ShouldRecordContributeToAllocatedExpense(Record record)
+        private static bool ShouldRecordContributeToAllocatedExpense(
+            Record record,
+            HashSet<int> allocatedExpenseAccountIds)
         {
-            return !record.isInternal
-                && record.matchedRecordId is null
-                && !record.isRefundMatched
-                && record.v < 0
+            return ShouldRecordContributeToExpenseStatistics(record, allocatedExpenseAccountIds)
                 && NormalizeExpenseAllocationDays(record.expenseAllocationDays).HasValue;
+        }
+
+        private static bool ShouldRecordContributeToDirectExpenseStatistics(
+            Record record,
+            HashSet<int> allocatedExpenseAccountIds)
+        {
+            return ShouldRecordContributeToExpenseStatistics(record, allocatedExpenseAccountIds)
+                && !NormalizeExpenseAllocationDays(record.expenseAllocationDays).HasValue;
+        }
+
+        private static bool ShouldRecordContributeToExpenseStatistics(
+            Record record,
+            HashSet<int> allocatedExpenseAccountIds)
+        {
+            return allocatedExpenseAccountIds.Contains(record._account_Id)
+                && CanRecordHaveExpenseAllocationCore(
+                    record.isInternal,
+                    record.matchedRecordId,
+                    record.isRefundMatched,
+                    record.v);
+        }
+
+        private HashSet<int> GetAllocatedExpenseAccountIds()
+        {
+            return db.Queryable<Account>()
+                .ToList()
+                .Where(account => IsAllocatedExpenseAccountUsage(account.usage))
+                .Select(account => account.Id)
+                .ToHashSet();
+        }
+
+        private static bool CanRecordHaveExpenseAllocation(
+            AccountUsage accountUsage,
+            bool isInternal,
+            int? matchedRecordId,
+            bool isRefundMatched,
+            decimal amount)
+        {
+            return IsAllocatedExpenseAccountUsage(accountUsage)
+                && CanRecordHaveExpenseAllocationCore(isInternal, matchedRecordId, isRefundMatched, amount);
+        }
+
+        private static bool CanRecordHaveExpenseAllocationCore(
+            bool isInternal,
+            int? matchedRecordId,
+            bool isRefundMatched,
+            decimal amount)
+        {
+            return !isInternal
+                && matchedRecordId is null
+                && !isRefundMatched
+                && amount < 0;
+        }
+
+        private static bool IsAllocatedExpenseAccountUsage(AccountUsage usage)
+        {
+            return usage == AccountUsage.Life || usage == AccountUsage.Transit;
         }
 
         private static string GetRecordReasonDisplay(Record record)
@@ -1627,23 +1775,32 @@ namespace MyBook
             return String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason;
         }
 
-        private static DateTime GetExpenseAllocationStartDate(Record record)
+        private static DateTime GetExpenseAllocationStartDate(Record record, int days)
         {
-            var days = NormalizeExpenseAllocationDays(record.expenseAllocationDays) ?? 1;
-            return record.date.Date.AddDays(1 - days);
+            return days > 0
+                ? record.date.Date
+                : record.date.Date.AddDays(1 + days);
+        }
+
+        private static DateTime GetExpenseAllocationEndDate(Record record, int days)
+        {
+            return days > 0
+                ? record.date.Date.AddDays(days)
+                : record.date.Date.AddDays(1);
         }
 
         private static decimal GetAllocatedExpenseAmountForDay(Record record, DateTime date, int days)
         {
             var total = Currency.RoundMoney(-record.v);
-            if (days <= 1)
+            var dayCount = Math.Abs(days);
+            if (dayCount <= 1)
                 return total;
 
-            var baseAmount = Currency.RoundMoney(total / days);
+            var baseAmount = Currency.RoundMoney(total / dayCount);
             if (date.Date != record.date.Date)
                 return baseAmount;
 
-            return Currency.RoundMoney(total - baseAmount * (days - 1));
+            return Currency.RoundMoney(total - baseAmount * (dayCount - 1));
         }
 
         private void MatchInternalTransfersAroundStatement(int statementImportId)

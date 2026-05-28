@@ -381,7 +381,7 @@ namespace MyBook
         public int HoldingQuantity { get; set; } = 0; // 交易涉及的持仓数量，非持仓交易为 0。
 
         [SugarColumn(IsNullable = true)]
-        public int? expenseAllocationDays { get; set; } = null; // UI 支出统计均摊天数，表示交易日及之前共 N 天。
+        public int? expenseAllocationDays { get; set; } = null; // UI 支出统计均摊天数，正数向交易日后均摊，负数向交易日前均摊。
 
         [SugarColumn(DefaultValue = "1")]
         public bool allocatedExpenseCacheDirty { get; set; } = true; // 均摊支出缓存维护状态，不属于业务数据。

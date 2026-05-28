@@ -32,9 +32,9 @@ namespace MyBook
             stock = new(config, database);
             graphQL = new(config, database);
             dailyTimer?.Dispose();
-            _ = RunDailyFetchAsync();
+            RunDailyFetchInBackground();
             dailyTimer = new Timer(
-                _ => _ = RunDailyFetchAsync(),
+                _ => RunDailyFetchInBackground(),
                 null,
                 GetDelayUntilNextDailyRun(),
                 TimeSpan.FromDays(1));
@@ -51,40 +51,55 @@ namespace MyBook
 #endif
         }
 
+        private void RunDailyFetchInBackground()
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RunDailyFetchAsync().ConfigureAwait(false);
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine($"scheduled fetch fail: {e.Message}");
+                }
+            });
+        }
+
         private async Task RunDailyFetchAsync()
         {
             if (mail is null)
                 return;
-            if (!await fetchLock.WaitAsync(0))
+            if (!await fetchLock.WaitAsync(0).ConfigureAwait(false))
                 return;
 
             try
             {
                 if (ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail))
-                    await TryFetchAsync("ICBC", mail.FetchICBCBills);
+                    await TryFetchAsync("ICBC", mail.FetchICBCBills).ConfigureAwait(false);
                 if (ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays))
-                    await TryFetchAsync("ICBC history detail", FetchICBCHistoryDetailsScheduledAsync);
-                await TryFetchAsync("IBKR", mail.FetchIBKRReports);
+                    await TryFetchAsync("ICBC history detail", FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
+                await TryFetchAsync("IBKR", mail.FetchIBKRReports).ConfigureAwait(false);
                 if (ShouldFetchMonthlyProvider("Wise", StatementImportProvider.WiseMail))
-                    await TryFetchAsync("Wise", mail.FetchWiseReports);
+                    await TryFetchAsync("Wise", mail.FetchWiseReports).ConfigureAwait(false);
                 if (ShouldFetchMonthlyProvider("OCBC", StatementImportProvider.OCBCStatementMail))
-                    await TryFetchAsync("OCBC", mail.FetchOCBCReports);
+                    await TryFetchAsync("OCBC", mail.FetchOCBCReports).ConfigureAwait(false);
                 if (graphQL is not null && ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport))
-                    await TryFetchAsync("Nexus DP", graphQL.FetchNexusDpMonthlyReports);
+                    await TryFetchAsync("Nexus DP", graphQL.FetchNexusDpMonthlyReports).ConfigureAwait(false);
                 if (stock is not null)
-                    await TryFetchAsync("exchange rate", stock.FetchExchangeRates);
+                    await TryFetchAsync("exchange rate", stock.FetchExchangeRates).ConfigureAwait(false);
                 if (database is not null)
                 {
                     await TryFetchAsync("allocated expense cache", () =>
                     {
                         database.ProcessAllocatedExpenseDirtyRecords();
                         return Task.CompletedTask;
-                    });
+                    }).ConfigureAwait(false);
                     await TryFetchAsync("snapshot", () =>
                     {
                         database.CreateDailySnapshot();
                         return Task.CompletedTask;
-                    });
+                    }).ConfigureAwait(false);
                 }
             }
             finally
@@ -121,7 +136,7 @@ namespace MyBook
                 return;
 
             var today = DateTime.Today;
-            await mail.FetchICBCHistoryDetails(today.AddMonths(-ICBCHistoryDetailSearchWindowMonths));
+            await mail.FetchICBCHistoryDetails(today.AddMonths(-ICBCHistoryDetailSearchWindowMonths)).ConfigureAwait(false);
             database.MarkStatementProcessedOnce(
                 StatementImportProvider.ICBCHistoryDetailMail,
                 today,
@@ -132,7 +147,7 @@ namespace MyBook
         {
             try
             {
-                await fetch();
+                await fetch().ConfigureAwait(false);
             }
             catch (Exception e)
             {
