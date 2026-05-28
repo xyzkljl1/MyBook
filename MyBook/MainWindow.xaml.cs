@@ -250,8 +250,8 @@ namespace MyBook
                 var data = database.GetDashboardData(DateTime.Today);
                 if (data.MissingExchangeRateCurrencies.Count > 0)
                 {
-                    var stock = new StockUtil(config, database);
-                    await stock.FetchExchangeRates(data.MissingExchangeRateCurrencies);
+                    using var pubWeb = new PubWebUtil(config, database);
+                    await pubWeb.FetchExchangeRates(data.MissingExchangeRateCurrencies);
                     data = database.GetDashboardData(DateTime.Today);
                     if (data.MissingExchangeRateCurrencies.Count > 0)
                     {

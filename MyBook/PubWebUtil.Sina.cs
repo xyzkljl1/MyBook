@@ -3,17 +3,16 @@ using System.Text.RegularExpressions;
 
 namespace MyBook
 {
-    // 新浪行情来源：上海交易所股票实时价格。
-    partial class StockUtil
+    // Sina source for Shanghai Stock Exchange prices.
+    partial class PubWebUtil
     {
-        // 返回小于 0 表示错误。新浪行情字段 3 是当前价，停牌或未开盘时可能为 0，此时回退到昨收。
         public async Task<decimal> FetchShanghaiStock(string code)
         {
             var symbol = $"sh{code.Trim().ToLowerInvariant().Replace("sh", "")}";
             var url = $"https://hq.sinajs.cn/list={symbol}";
             try
             {
-                var text = await HttpGetString(url);
+                var text = await HttpGetString(url).ConfigureAwait(false);
                 if (String.IsNullOrWhiteSpace(text))
                     return -1;
 
@@ -22,14 +21,15 @@ namespace MyBook
                     return -1;
 
                 var fields = match.Groups["data"].Value.Split(',');
-                if (fields.Length < 4)
+                if (fields.Length <= 3)
                     return -1;
 
-                var priceText = fields[3];
+                var currentPriceText = fields[3];
+                var previousCloseText = fields.Length > 2 ? fields[2] : "";
+                var priceText = currentPriceText;
                 if (!Decimal.TryParse(priceText, NumberStyles.Number, CultureInfo.InvariantCulture, out var price) || price <= 0)
-                    Decimal.TryParse(fields[2], NumberStyles.Number, CultureInfo.InvariantCulture, out price);
-
-                if (price <= 0)
+                    priceText = previousCloseText;
+                if (!Decimal.TryParse(priceText, NumberStyles.Number, CultureInfo.InvariantCulture, out price) || price <= 0)
                     return -1;
 
                 Console.WriteLine($"{fields[0]}({symbol}):{price}");

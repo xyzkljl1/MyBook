@@ -9,7 +9,7 @@ namespace MyBook
     {
         IConfigurationRoot? config;
         MailUtil? mail;
-        StockUtil? stock;
+        PubWebUtil? pubWeb;
         GraphQLUtil? graphQL;
         DatabaseUtil? database;
         Timer? dailyTimer;
@@ -29,7 +29,7 @@ namespace MyBook
             config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
             database = new(config);
             mail = new(config, database);
-            stock = new(config, database);
+            pubWeb = new(config, database);
             graphQL = new(config, database);
             dailyTimer?.Dispose();
             RunDailyFetchInBackground();
@@ -38,8 +38,8 @@ namespace MyBook
                 null,
                 GetDelayUntilNextDailyRun(),
                 TimeSpan.FromDays(1));
-            //stock.Fetch(new Finance("QQQ", HoldingType.NASDAQ));
-            //stock.Fetch(new Finance("021282", HoldingType.CNFUND));
+            //pubWeb.Fetch(new Finance("QQQ", HoldingType.NASDAQ));
+            //pubWeb.Fetch(new Finance("021282", HoldingType.CNFUND));
         }
 
         private static bool IsDebugBuild()
@@ -89,8 +89,8 @@ namespace MyBook
                 }).ConfigureAwait(false);
                 if (graphQL is not null && ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport))
                     await TryFetchAsync("Nexus DP", graphQL.FetchNexusDpMonthlyReports).ConfigureAwait(false);
-                if (stock is not null)
-                    await TryFetchAsync("exchange rate", stock.FetchExchangeRates).ConfigureAwait(false);
+                if (pubWeb is not null)
+                    await TryFetchAsync("exchange rate", pubWeb.FetchExchangeRates).ConfigureAwait(false);
                 if (database is not null)
                 {
                     await TryFetchAsync("allocated expense cache", () =>
@@ -170,6 +170,7 @@ namespace MyBook
         public void Dispose()
         {
             dailyTimer?.Dispose();
+            pubWeb?.Dispose();
             fetchLock.Dispose();
         }
     }

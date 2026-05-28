@@ -2,15 +2,15 @@ using System.Globalization;
 
 namespace MyBook
 {
-    // 天天基金估值接口来源：国内基金实时估值/净值。
-    partial class StockUtil
+    // Tiantian Fund source for domestic fund prices.
+    partial class PubWebUtil
     {
         public async Task<decimal> FetchCNFund(string code = "021282")
         {
             var url = $"http://fundgz.1234567.com.cn/js/{code}.js";
             try
             {
-                var doc = await HttpGetJson(url);
+                var doc = await HttpGetJson(url).ConfigureAwait(false);
                 if (doc is null)
                     return -1;
 

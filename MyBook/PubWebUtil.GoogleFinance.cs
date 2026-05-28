@@ -3,8 +3,8 @@ using System.Text.RegularExpressions;
 
 namespace MyBook
 {
-    // Google Finance 来源：美股/ETF 最新价格，以及外币兑人民币汇率。
-    partial class StockUtil
+    // Google Finance source for US stocks, ETFs, and FX rates to CNY.
+    partial class PubWebUtil
     {
         public async Task<Currency?> FetchCurrencyToRmb(CurrencyType currencyType)
         {
@@ -15,7 +15,7 @@ namespace MyBook
             var url = $"https://www.google.com/finance/quote/{fromCurrency}-CNY?hl=en";
             try
             {
-                var html = await HttpGetString(url);
+                var html = await HttpGetString(url).ConfigureAwait(false);
                 var rate = String.IsNullOrWhiteSpace(html) ? null : ParseGoogleFinanceExchangeRate(html, fromCurrency);
                 if (rate is null)
                     return null;
@@ -40,7 +40,6 @@ namespace MyBook
             return decimal.TryParse(match.Groups["rate"].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out var rate) ? rate : null;
         }
 
-        // Google Finance 会同时返回常规交易价格和盘前/盘后价格；如有扩展时段价格，优先使用扩展时段价格。
         public async Task<decimal> FetchGoogleFinanceStock(string code, string exchange = "NASDAQ")
         {
             var symbol = code.Trim().ToUpperInvariant();
@@ -48,7 +47,7 @@ namespace MyBook
             var url = $"https://www.google.com/finance/quote/{Uri.EscapeDataString(symbol)}:{market}?hl=en";
             try
             {
-                var html = await HttpGetString(url);
+                var html = await HttpGetString(url).ConfigureAwait(false);
                 if (String.IsNullOrWhiteSpace(html))
                     return -1;
 

@@ -62,6 +62,7 @@ Notable configuration keys:
 - `yahoo_user` / `yahoo_pass` - mailbox credentials for statement mail imports.
 - `gmail_user` / `gmail_app_pwd` - Gmail credentials used by supported mail fetches.
 - `mail_proxy` - optional IMAP proxy for all mailbox fetches, for example `http://127.0.0.1:1196` or `socks5://127.0.0.1:1195`. Leave empty for direct connections.
+- `pubweb_proxy` - optional HTTP proxy for public web market-data fetches, for example `http://127.0.0.1:8000`. Leave empty for direct connections; system proxy settings are not used by these fetches.
 - `alphavantage_key` - exchange-rate or finance data key.
 - `ib_gateway_port` - Interactive Brokers gateway port.
 - `ocbc_statement_passwords` - local list of OCBC statement passwords.
@@ -113,6 +114,7 @@ During scheduled fetches:
 - ICBC monthly bills, Wise reports, OCBC statements, and Nexus DP monthly reports are checked only when the latest import is more than 27 days old.
 - ICBC historical-detail attachments are checked only when the latest history-detail import or scheduled empty-import checkpoint is more than 90 days old. Each scheduled scan searches the last 5 months and writes a `scheduled-empty-import-yyyyMMdd` checkpoint even if no statement is imported, so empty scans are not retried every day.
 - Mail fetches share Yahoo/Gmail IMAP sessions within each fetch cycle or standalone mail import, use the configured `mail_proxy` when set, and reconnect once after connection-level failures.
+- Public web market-data fetches use the configured `pubweb_proxy` when set; exchange-rate pages are requested concurrently and saved after all requests finish.
 - IBKR, Wise, and OCBC attachment imports search the missing date/month range in batches, then group downloaded attachments by statement date or month.
 - Attachment-based mail imports first filter IMAP summaries and body structures, then download only matching attachment body parts instead of full messages.
 - Exchange rates are refreshed every cycle.

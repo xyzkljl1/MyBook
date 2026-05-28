@@ -5,6 +5,7 @@
     "ib_gateway_port":  0,
     "database_connection":  "",
     "mail_proxy":  "",
+    "pubweb_proxy":  "",
     "nexus_api_key":  "",
     "gmail_user":  "",
     "gmail_app_pwd":  "",
