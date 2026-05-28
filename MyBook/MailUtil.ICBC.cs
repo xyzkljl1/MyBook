@@ -200,12 +200,12 @@ namespace MyBook
                     record.isInternal = true;
                 }
 
-                if (line[3] == "消费" || line[3] == "跨行消费" || line[3] == "境外消费" || line[3] == "缴费")
+                if (line[3] == "消费" || line[3] == "跨行消费" || line[3] == "境外消费" || line[3] == "缴费" || line[3] == "直接分期扣款")
                 {
                     record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。
                     records.Add(record);
                 }
-                else if (line[3] == "退款" || line[3] == "境外退货")
+                else if (line[3] == "退款" || line[3] == "境外退货" || line[3] == "消费返利")
                 {
                     if (record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
