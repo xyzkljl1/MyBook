@@ -207,6 +207,12 @@ namespace MyBook
             return IsFrom(message, yahooAddress) && IsToOrCc(message, yahooAddress);
         }
 
+        private bool IsSelfSentYahooSummary(IMessageSummary summary)
+        {
+            var yahooAddress = GetConfiguredYahooAddress();
+            return SummaryIsFrom(summary, yahooAddress) && SummaryIsToOrCc(summary, yahooAddress);
+        }
+
         private static byte[] ReadMimePartBytes(MimePart mimePart)
         {
             using var memory = new MemoryStream();
@@ -247,6 +253,57 @@ namespace MyBook
                 .Any(attachment => predicate(attachment, GetAttachmentFileName(attachment)));
         }
 
+        private static bool SummaryHasMatchingAttachment(
+            IMessageSummary summary,
+            Func<string, bool> predicate)
+        {
+            if (summary.Body is null)
+                return true;
+
+            var hasFileName = false;
+            foreach (var part in summary.BodyParts.OfType<BodyPartBasic>())
+            {
+                if (String.IsNullOrWhiteSpace(part.FileName))
+                    continue;
+
+                hasFileName = true;
+                if (predicate(part.FileName))
+                    return true;
+            }
+
+            return !hasFileName;
+        }
+
+        private static bool SummaryIsFrom(IMessageSummary summary, string sender)
+        {
+            var envelope = summary.Envelope;
+            if (envelope is null)
+                return true;
+
+            var from = envelope.From?.Mailboxes ?? Enumerable.Empty<MailboxAddress>();
+            return from.Any(mailbox =>
+                String.Equals(mailbox.Address, sender, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool SummaryIsToOrCc(IMessageSummary summary, string recipient)
+        {
+            var envelope = summary.Envelope;
+            if (envelope is null)
+                return true;
+
+            var to = envelope.To?.Mailboxes ?? Enumerable.Empty<MailboxAddress>();
+            var cc = envelope.Cc?.Mailboxes ?? Enumerable.Empty<MailboxAddress>();
+            return to.Concat(cc).Any(mailbox =>
+                String.Equals(mailbox.Address, recipient, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool SummarySubjectEquals(IMessageSummary summary, string subject)
+        {
+            var summarySubject = summary.Envelope?.Subject;
+            return summarySubject is null
+                || String.Equals(summarySubject.Trim(), subject, StringComparison.Ordinal);
+        }
+
         private async Task<MimeMessage?> SearchBill(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
         {
             return (await SearchBills(sender, subject, date, messageFilter)).FirstOrDefault();
@@ -254,12 +311,22 @@ namespace MyBook
 
         private async Task<List<MimeMessage>> SearchBills(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
         {
+            return await SearchBills(sender, subject, date, null, messageFilter).ConfigureAwait(false);
+        }
+
+        private async Task<List<MimeMessage>> SearchBills(
+            string sender,
+            string subject,
+            DateTime date,
+            Func<IMessageSummary, bool>? summaryFilter,
+            Func<MimeMessage, bool>? messageFilter)
+        {
             var range = GetMonthRange(date);
             var query = SearchQuery.FromContains(sender)
                 .And(SearchQuery.SubjectContains(subject))
                 .And(SearchQuery.SentSince(range.Since))
                 .And(SearchQuery.SentBefore(range.Before.AddSeconds(-1)));
-            var messages = await SearchMessages($"{subject} {date:yyyy-MM-dd}", query, messageFilter);
+            var messages = await SearchMessages($"{subject} {date:yyyy-MM-dd}", query, summaryFilter, messageFilter);
             if (messages.Count > 1)
                 Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
 
@@ -271,6 +338,7 @@ namespace MyBook
             string subject,
             DateTime statementMonth,
             Func<MimeMessage, bool>? messageFilter,
+            Func<IMessageSummary, bool>? summaryFilter = null,
             Func<MimeMessage, DateTime>? orderDateSelector = null)
         {
             if (!ShouldSearchSupplementalStatementMail(statementMonth))
@@ -283,6 +351,7 @@ namespace MyBook
             return await SearchMessages(
                 $"{label} supplemental from {statementMonth:yyyy-MM-dd}",
                 query,
+                summary => IsSelfSentYahooSummary(summary) && (summaryFilter?.Invoke(summary) ?? true),
                 message => IsSelfSentYahooMessage(message) && (messageFilter?.Invoke(message) ?? true),
                 orderDateSelector);
         }
@@ -299,9 +368,19 @@ namespace MyBook
             Func<MimeMessage, bool>? messageFilter,
             Func<MimeMessage, DateTime>? orderDateSelector = null)
         {
+            return await SearchMessages(label, query, null, messageFilter, orderDateSelector).ConfigureAwait(false);
+        }
+
+        private async Task<List<MimeMessage>> SearchMessages(
+            string label,
+            SearchQuery query,
+            Func<IMessageSummary, bool>? summaryFilter,
+            Func<MimeMessage, bool>? messageFilter,
+            Func<MimeMessage, DateTime>? orderDateSelector = null)
+        {
             try
             {
-                return await SearchMessagesCore(CreateYahooMailbox(), label, query, messageFilter, orderDateSelector);
+                return await SearchMessagesCore(CreateYahooMailbox(), label, query, summaryFilter, messageFilter, orderDateSelector);
             }
             catch (Exception e)
             {
@@ -317,9 +396,20 @@ namespace MyBook
             Func<MimeMessage, bool>? messageFilter,
             Func<MimeMessage, DateTime>? orderDateSelector = null)
         {
+            return await SearchMessagesFromMailbox(mailbox, label, query, null, messageFilter, orderDateSelector).ConfigureAwait(false);
+        }
+
+        private async Task<List<MimeMessage>> SearchMessagesFromMailbox(
+            ImapMailbox mailbox,
+            string label,
+            SearchQuery query,
+            Func<IMessageSummary, bool>? summaryFilter,
+            Func<MimeMessage, bool>? messageFilter,
+            Func<MimeMessage, DateTime>? orderDateSelector = null)
+        {
             try
             {
-                return await SearchMessagesCore(mailbox, label, query, messageFilter, orderDateSelector);
+                return await SearchMessagesCore(mailbox, label, query, summaryFilter, messageFilter, orderDateSelector);
             }
             catch (Exception e)
             {
@@ -332,6 +422,7 @@ namespace MyBook
             ImapMailbox mailbox,
             string label,
             SearchQuery query,
+            Func<IMessageSummary, bool>? summaryFilter,
             Func<MimeMessage, bool>? messageFilter,
             Func<MimeMessage, DateTime>? orderDateSelector)
         {
@@ -340,8 +431,28 @@ namespace MyBook
                 label,
                 folder => RunMailOperation(token => folder.SearchAsync(query, token))).ConfigureAwait(false);
             Console.WriteLine($"mail search {label} found {uids.Count}");
+            var candidateUids = uids.AsEnumerable();
+            if (summaryFilter is not null && uids.Count > 0)
+            {
+                var summaries = await UseMailFolderAsync(
+                    mailbox,
+                    $"{label} summaries",
+                    folder => RunMailOperation(token => folder.FetchAsync(
+                        uids,
+                        MessageSummaryItems.Envelope
+                            | MessageSummaryItems.BodyStructure
+                            | MessageSummaryItems.UniqueId
+                            | MessageSummaryItems.InternalDate,
+                        token))).ConfigureAwait(false);
+                var filteredSummaries = summaries
+                    .Where(summaryFilter)
+                    .ToList();
+                Console.WriteLine($"mail summary filter {label} kept {filteredSummaries.Count}/{summaries.Count}");
+                candidateUids = filteredSummaries.Select(summary => summary.UniqueId);
+            }
+
             var messages = new List<MimeMessage>();
-            foreach (var uid in uids)
+            foreach (var uid in candidateUids)
             {
                 var message = await UseMailFolderAsync(
                     mailbox,

@@ -55,10 +55,11 @@ namespace MyBook
                     $"{label} summaries",
                     folder => RunMailOperation(token => folder.FetchAsync(
                         uids,
-                        MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId,
+                        MessageSummaryItems.Envelope | MessageSummaryItems.BodyStructure | MessageSummaryItems.UniqueId,
                         token))).ConfigureAwait(false);
                 var candidates = summaries
                     .Where(IsICBCHistoryDetailSummary)
+                    .Where(summary => SummaryHasMatchingAttachment(summary, fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)))
                     .OrderBy(GetMessageSummaryDate)
                     .ThenBy(summary => summary.UniqueId.Id)
                     .ToList();

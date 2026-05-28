@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using MailKit;
 using MimeKit;
 
 namespace MyBook
@@ -301,6 +302,9 @@ namespace MyBook
                 IBKRReportSender,
                 expectedSubject,
                 date,
+                summary => SummarySubjectEquals(summary, expectedSubject)
+                    && SummaryIsFrom(summary, IBKRReportSender)
+                    && HasIBKRReportAttachment(summary, date),
                 message => String.Equals(message.Subject?.Trim(), expectedSubject, StringComparison.Ordinal)
                     && HasIBKRReportAttachment(message, date));
 
@@ -3244,6 +3248,17 @@ namespace MyBook
         private static bool HasIBKRReportAttachment(MimeMessage message, DateTime reportDate)
         {
             return HasMatchingAttachment(message, (_, fileName) =>
+            {
+                return TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
+                    && IsDailyMyBookReportType(attachmentInfo.ReportType)
+                    && attachmentInfo.ReportDate.Date == reportDate.Date
+                    && IsIBKRCsvAttachment(fileName);
+            });
+        }
+
+        private static bool HasIBKRReportAttachment(IMessageSummary summary, DateTime reportDate)
+        {
+            return SummaryHasMatchingAttachment(summary, fileName =>
             {
                 return TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
                     && IsDailyMyBookReportType(attachmentInfo.ReportType)

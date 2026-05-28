@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using MailKit;
 using MailKit.Search;
 using MimeKit;
 
@@ -79,8 +80,14 @@ namespace MyBook
                 mailbox,
                 $"PayPal {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}",
                 query,
+                IsPayPalSenderSummary,
                 IsPayPalSender,
                 GetMailDateTime);
+        }
+
+        private static bool IsPayPalSenderSummary(IMessageSummary summary)
+        {
+            return PayPalSenders.Any(sender => SummaryIsFrom(summary, sender));
         }
 
         private static bool IsPayPalSender(MimeMessage message)

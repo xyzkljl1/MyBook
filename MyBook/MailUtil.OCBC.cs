@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using MailKit;
 using MailKit.Search;
 using MimeKit;
 using UglyToad.PdfPig;
@@ -79,6 +80,7 @@ namespace MyBook
             var messages = await SearchMessages(
                 $"OCBC statement {statementMonth:yyyy-MM}",
                 query,
+                summary => IsOCBCStatementSummary(summary, statementMonth),
                 message => IsOCBCStatementMail(message, statementMonth),
                 GetMailDateTime);
             var message = messages.FirstOrDefault();
@@ -95,6 +97,7 @@ namespace MyBook
                 subject,
                 statementMonth,
                 message => IsOCBCStatementContent(message, statementMonth),
+                summary => IsOCBCStatementContentSummary(summary, statementMonth),
                 GetMailDateTime);
             if (messages.Count > 0)
                 Console.WriteLine($"Find supplemental OCBC statement {statementMonth:yyyy-MM} from self-sent mail");
@@ -110,6 +113,12 @@ namespace MyBook
             return IsOCBCStatementContent(message, statementMonth);
         }
 
+        private static bool IsOCBCStatementSummary(IMessageSummary summary, DateTime statementMonth)
+        {
+            return SummaryIsFrom(summary, OCBCMailSender)
+                && IsOCBCStatementContentSummary(summary, statementMonth);
+        }
+
         private static bool IsOCBCStatementContent(MimeMessage message, DateTime statementMonth)
         {
             if (!TryParseOCBCStatementSubjectMonth(message.Subject ?? "", out var subjectMonth))
@@ -117,6 +126,18 @@ namespace MyBook
 
             return subjectMonth == FirstDayOfMonth(statementMonth)
                 && HasMatchingAttachment(message, (_, fileName) => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool IsOCBCStatementContentSummary(IMessageSummary summary, DateTime statementMonth)
+        {
+            var subject = summary.Envelope?.Subject;
+            if (String.IsNullOrWhiteSpace(subject))
+                return true;
+            if (!TryParseOCBCStatementSubjectMonth(subject, out var subjectMonth))
+                return false;
+
+            return subjectMonth == FirstDayOfMonth(statementMonth)
+                && SummaryHasMatchingAttachment(summary, fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
         }
 
         private static DateTime ParseOCBCStatementSubjectMonth(string subject)

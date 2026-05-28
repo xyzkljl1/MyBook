@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using MailKit;
 using MailKit.Search;
 using MimeKit;
 
@@ -115,8 +116,15 @@ namespace MyBook
             return await SearchMessages(
                 $"Wise XML statement {statementMonth:yyyy-MM}",
                 query,
+                IsWiseStatementSummary,
                 IsWiseStatementMail,
                 GetMailDateTime);
+        }
+
+        private static bool IsWiseStatementSummary(IMessageSummary summary)
+        {
+            return SummaryIsFrom(summary, WiseMailSender)
+                && SummaryHasMatchingAttachment(summary, IsWiseXmlStatementAttachment);
         }
 
         private static bool IsWiseStatementMail(MimeMessage message)
