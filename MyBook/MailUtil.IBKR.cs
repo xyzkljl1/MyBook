@@ -268,26 +268,29 @@ namespace MyBook
 
         public async Task FetchIBKRReports()
         {
-            var date = GetNextDailyStatementDate(IBKRProvider);
-            Console.WriteLine($"Fetch IBKR reports from {date:yyyy-MM-dd}");
-            var missingDays = 0;
-            while (date <= DateTime.Today)
+            await RunWithMailSessionScope(async () =>
             {
-                Console.WriteLine($"Fetch IBKR report {date:yyyy-MM-dd}");
-                var imported = await FetchIBKRReport(date);
-                if (imported)
+                var date = GetNextDailyStatementDate(IBKRProvider);
+                Console.WriteLine($"Fetch IBKR reports from {date:yyyy-MM-dd}");
+                var missingDays = 0;
+                while (date <= DateTime.Today)
                 {
-                    missingDays = 0;
-                }
-                else
-                {
-                    missingDays++;
-                    if (missingDays >= IBKRMissingReportLimitDays)
-                        throw new InvalidOperationException($"Missing IBKR reports for {IBKRMissingReportLimitDays} consecutive days ending {date:yyyy-MM-dd}");
-                }
+                    Console.WriteLine($"Fetch IBKR report {date:yyyy-MM-dd}");
+                    var imported = await FetchIBKRReport(date).ConfigureAwait(false);
+                    if (imported)
+                    {
+                        missingDays = 0;
+                    }
+                    else
+                    {
+                        missingDays++;
+                        if (missingDays >= IBKRMissingReportLimitDays)
+                            throw new InvalidOperationException($"Missing IBKR reports for {IBKRMissingReportLimitDays} consecutive days ending {date:yyyy-MM-dd}");
+                    }
 
-                date = date.AddDays(1);
-            }
+                    date = date.AddDays(1);
+                }
+            }).ConfigureAwait(false);
         }
 
         private async Task<bool> FetchIBKRReport(DateTime date)

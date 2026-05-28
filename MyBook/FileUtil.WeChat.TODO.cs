@@ -1,7 +1,7 @@
 namespace MyBook
 {
     // TODO: Parse WeChat bill records from a local file.
-    partial class LocalUtil
+    partial class FileUtil
     {
         public Records ParseWeChatBillFile(string filePath)
         {

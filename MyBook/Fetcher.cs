@@ -75,15 +75,18 @@ namespace MyBook
 
             try
             {
-                if (ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail))
-                    await TryFetchAsync("ICBC", mail.FetchICBCBills).ConfigureAwait(false);
-                if (ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays))
-                    await TryFetchAsync("ICBC history detail", FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
-                await TryFetchAsync("IBKR", mail.FetchIBKRReports).ConfigureAwait(false);
-                if (ShouldFetchMonthlyProvider("Wise", StatementImportProvider.WiseMail))
-                    await TryFetchAsync("Wise", mail.FetchWiseReports).ConfigureAwait(false);
-                if (ShouldFetchMonthlyProvider("OCBC", StatementImportProvider.OCBCStatementMail))
-                    await TryFetchAsync("OCBC", mail.FetchOCBCReports).ConfigureAwait(false);
+                await mail.RunWithMailSessionScope(async () =>
+                {
+                    if (ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail))
+                        await TryFetchAsync("ICBC", mail.FetchICBCBills).ConfigureAwait(false);
+                    if (ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays))
+                        await TryFetchAsync("ICBC history detail", FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
+                    await TryFetchAsync("IBKR", mail.FetchIBKRReports).ConfigureAwait(false);
+                    if (ShouldFetchMonthlyProvider("Wise", StatementImportProvider.WiseMail))
+                        await TryFetchAsync("Wise", mail.FetchWiseReports).ConfigureAwait(false);
+                    if (ShouldFetchMonthlyProvider("OCBC", StatementImportProvider.OCBCStatementMail))
+                        await TryFetchAsync("OCBC", mail.FetchOCBCReports).ConfigureAwait(false);
+                }).ConfigureAwait(false);
                 if (graphQL is not null && ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport))
                     await TryFetchAsync("Nexus DP", graphQL.FetchNexusDpMonthlyReports).ConfigureAwait(false);
                 if (stock is not null)

@@ -2,12 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using MailKit;
 using MailKit.Net.Imap;
 using MailKit.Search;
+using MailKit.Security;
 using Microsoft.Extensions.Configuration;
 using MimeKit;
 
@@ -21,6 +24,7 @@ namespace MyBook
         private readonly string apppasswd;
         private readonly DatabaseUtil database;
         private readonly IConfigurationRoot config;
+        private readonly AsyncLocal<MailSessionScope?> currentMailSessionScope = new();
         private const int MailClientTimeoutMilliseconds = 300000;
         private static readonly TimeSpan MailClientTimeout = TimeSpan.FromMilliseconds(MailClientTimeoutMilliseconds);
         private sealed record ImapMailbox(string Label, string Host, int Port, bool UseSsl, string Username, string Password, bool UseAllMail);
@@ -33,6 +37,38 @@ namespace MyBook
             apppasswd = config["yahoo_pass"]!;
             this.database = database;
             this.config = config;
+        }
+
+        public async Task RunWithMailSessionScope(Func<Task> action)
+        {
+            await UseMailSessionScope(async _ =>
+            {
+                await action().ConfigureAwait(false);
+                return true;
+            }).ConfigureAwait(false);
+        }
+
+        private async Task<T> RunWithMailSessionScope<T>(Func<Task<T>> action)
+        {
+            return await UseMailSessionScope(_ => action()).ConfigureAwait(false);
+        }
+
+        private async Task<T> UseMailSessionScope<T>(Func<MailSessionScope, Task<T>> action)
+        {
+            if (currentMailSessionScope.Value is not null)
+                return await action(currentMailSessionScope.Value).ConfigureAwait(false);
+
+            await using var scope = new MailSessionScope();
+            var previousScope = currentMailSessionScope.Value;
+            currentMailSessionScope.Value = scope;
+            try
+            {
+                return await action(scope).ConfigureAwait(false);
+            }
+            finally
+            {
+                currentMailSessionScope.Value = previousScope;
+            }
         }
 
         private static bool IsSameAccount(Account? left, Account? right)
@@ -63,20 +99,23 @@ namespace MyBook
             string displayName,
             Func<DateTime, Task<bool>> fetchStatement)
         {
-            var month = GetNextMonthlyStatementDate(provider);
-            var currentMonth = FirstDayOfMonth(DateTime.Today);
-            while (month <= currentMonth)
+            await RunWithMailSessionScope(async () =>
             {
-                var imported = await fetchStatement(month);
-                if (!imported)
+                var month = GetNextMonthlyStatementDate(provider);
+                var currentMonth = FirstDayOfMonth(DateTime.Today);
+                while (month <= currentMonth)
                 {
-                    if (DateTime.Today >= month.AddMonths(1))
-                        throw new InvalidOperationException($"Missing {displayName} for {month:yyyy-MM}");
-                    return;
-                }
+                    var imported = await fetchStatement(month).ConfigureAwait(false);
+                    if (!imported)
+                    {
+                        if (DateTime.Today >= month.AddMonths(1))
+                            throw new InvalidOperationException($"Missing {displayName} for {month:yyyy-MM}");
+                        return;
+                    }
 
-                month = month.AddMonths(1);
-            }
+                    month = month.AddMonths(1);
+                }
+            }).ConfigureAwait(false);
         }
 
         private DateTime GetNextDailyStatementDate(StatementImportProvider provider)
@@ -296,27 +335,18 @@ namespace MyBook
             Func<MimeMessage, bool>? messageFilter,
             Func<MimeMessage, DateTime>? orderDateSelector)
         {
-            using MailKit.Net.Imap.ImapClient client = new();
-            client.Timeout = MailClientTimeoutMilliseconds;
-            client.CheckCertificateRevocation = false;
-            client.ProxyClient = null;
-
-            //client.ServerCertificateValidationCallback = (s, c, h, e) => true;
-            Console.WriteLine($"mail connect direct {mailbox.Label} {label}");
-            await RunMailOperation(token => client.ConnectAsync(mailbox.Host, mailbox.Port, mailbox.UseSsl, token));
-            Console.WriteLine("mail connected");
-            await RunMailOperation(token => client.AuthenticateAsync(mailbox.Username, mailbox.Password, token));
-            Console.WriteLine("mail authenticated");
-            var folder = await GetMailSearchFolder(client, mailbox);
-            await RunMailOperation(token => folder.OpenAsync(FolderAccess.ReadOnly, token));
-            Console.WriteLine($"mail folder opened {folder.FullName}");
-
-            var uids = await RunMailOperation(token => folder.SearchAsync(query, token));
+            var uids = await UseMailFolderAsync(
+                mailbox,
+                label,
+                folder => RunMailOperation(token => folder.SearchAsync(query, token))).ConfigureAwait(false);
             Console.WriteLine($"mail search {label} found {uids.Count}");
             var messages = new List<MimeMessage>();
             foreach (var uid in uids)
             {
-                var message = await RunMailOperation(token => folder.GetMessageAsync(uid, token));
+                var message = await UseMailFolderAsync(
+                    mailbox,
+                    $"{label} uid={uid.Id}",
+                    folder => RunMailOperation(token => folder.GetMessageAsync(uid, token))).ConfigureAwait(false);
                 if (messageFilter is not null && !messageFilter(message))
                     continue;
 
@@ -328,6 +358,15 @@ namespace MyBook
                 .OrderBy(orderDateSelector)
                 .ThenBy(message => message.Subject, StringComparer.Ordinal)
                 .ToList();
+        }
+
+        private async Task<T> UseMailFolderAsync<T>(
+            ImapMailbox mailbox,
+            string label,
+            Func<IMailFolder, Task<T>> action)
+        {
+            return await UseMailSessionScope(scope =>
+                scope.UseFolderAsync(mailbox, label, action)).ConfigureAwait(false);
         }
 
         private ImapMailbox CreateYahooMailbox()
@@ -434,6 +473,137 @@ namespace MyBook
         {
             using var cancellation = new CancellationTokenSource(MailClientTimeoutMilliseconds);
             return await operation(cancellation.Token).WaitAsync(MailClientTimeout);
+        }
+
+        private sealed class MailSessionScope : IAsyncDisposable
+        {
+            private readonly Dictionary<ImapMailbox, MailSessionConnection> connections = new();
+
+            public async Task<T> UseFolderAsync<T>(
+                ImapMailbox mailbox,
+                string label,
+                Func<IMailFolder, Task<T>> action)
+            {
+                var connection = GetConnection(mailbox);
+                for (var attempt = 0; ; attempt++)
+                {
+                    try
+                    {
+                        var folder = await EnsureOpenFolderAsync(connection, label).ConfigureAwait(false);
+                        return await action(folder).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (attempt == 0 && IsMailConnectionException(exception))
+                    {
+                        Console.WriteLine($"mail reconnect {mailbox.Label} {label}: {exception.Message}");
+                        await ResetConnectionAsync(connection).ConfigureAwait(false);
+                    }
+                }
+            }
+
+            public async ValueTask DisposeAsync()
+            {
+                foreach (var connection in connections.Values)
+                    await ResetConnectionAsync(connection).ConfigureAwait(false);
+                connections.Clear();
+            }
+
+            private MailSessionConnection GetConnection(ImapMailbox mailbox)
+            {
+                if (!connections.TryGetValue(mailbox, out var connection))
+                {
+                    connection = new MailSessionConnection(mailbox);
+                    connections.Add(mailbox, connection);
+                }
+
+                return connection;
+            }
+
+            private static async Task<IMailFolder> EnsureOpenFolderAsync(MailSessionConnection connection, string label)
+            {
+                if (connection.Client is not null
+                    && connection.Client.IsConnected
+                    && connection.Client.IsAuthenticated
+                    && connection.Folder is not null
+                    && connection.Folder.IsOpen)
+                {
+                    return connection.Folder;
+                }
+
+                await ResetConnectionAsync(connection).ConfigureAwait(false);
+                var mailbox = connection.Mailbox;
+                var client = new ImapClient
+                {
+                    Timeout = MailClientTimeoutMilliseconds,
+                    CheckCertificateRevocation = false,
+                    ProxyClient = null
+                };
+
+                try
+                {
+                    Console.WriteLine($"mail connect direct {mailbox.Label} {label}");
+                    await RunMailOperation(token => client.ConnectAsync(mailbox.Host, mailbox.Port, mailbox.UseSsl, token))
+                        .ConfigureAwait(false);
+                    Console.WriteLine("mail connected");
+                    await RunMailOperation(token => client.AuthenticateAsync(mailbox.Username, mailbox.Password, token))
+                        .ConfigureAwait(false);
+                    Console.WriteLine("mail authenticated");
+                    var folder = await GetMailSearchFolder(client, mailbox).ConfigureAwait(false);
+                    await RunMailOperation(token => folder.OpenAsync(FolderAccess.ReadOnly, token))
+                        .ConfigureAwait(false);
+                    Console.WriteLine($"mail folder opened {folder.FullName}");
+                    connection.Client = client;
+                    connection.Folder = folder;
+                    return folder;
+                }
+                catch
+                {
+                    client.Dispose();
+                    throw;
+                }
+            }
+
+            private static async Task ResetConnectionAsync(MailSessionConnection connection)
+            {
+                var client = connection.Client;
+                connection.Folder = null;
+                connection.Client = null;
+                if (client is null)
+                    return;
+
+                try
+                {
+                    if (client.IsConnected)
+                        await client.DisconnectAsync(true).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Broken IMAP sessions are discarded and recreated by the next operation.
+                }
+                finally
+                {
+                    client.Dispose();
+                }
+            }
+
+            private static bool IsMailConnectionException(Exception exception)
+            {
+                return exception is IOException
+                    or SocketException
+                    or TimeoutException
+                    or OperationCanceledException
+                    or SslHandshakeException
+                    or ServiceNotConnectedException
+                    or ServiceNotAuthenticatedException
+                    or ProtocolException
+                    || exception.InnerException is not null && IsMailConnectionException(exception.InnerException);
+            }
+        }
+
+        private sealed class MailSessionConnection(ImapMailbox mailbox)
+        {
+            public ImapMailbox Mailbox { get; } = mailbox;
+            public ImapClient? Client { get; set; }
+            public IMailFolder? Folder { get; set; }
         }
     }
 }

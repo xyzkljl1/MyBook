@@ -42,7 +42,7 @@ Expected files:
 - `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines; if an old month is missing, it can also import a self-sent supplemental statement mail with the original subject and PDF attachment.
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly reports through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
-- `LocalUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
+- `FileUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
 - `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
 - `WebUtil.Meituan.TODO` will fetch Meituan account balance information.
 
@@ -65,7 +65,7 @@ Notable configuration keys:
 - `ib_gateway_port` - Interactive Brokers gateway port.
 - `ocbc_statement_passwords` - local list of OCBC statement passwords.
 - `nexus_api_key` - legacy/personal Nexus API key fallback.
-- `nexus_oauth_client_id`, `nexus_oauth_client_secret`, `nexus_oauth_scope` - Nexus OAuth app settings.
+- `nexus_oauth_client_id`, `nexus_oauth_client_secret` - Nexus OAuth token refresh settings.
 
 When adding, removing, or renaming configuration keys, update `MyBook/config.json.example` at the same time and keep all example values blank or zero.
 
@@ -87,12 +87,6 @@ dotnet run --project MyBook\MyBook.csproj -- --export-bootstrap-sql
 
 `Database/bootstrap.fixed-data.sql` may contain private account metadata, so it is intentionally not tracked.
 Backup versions are kept as ignored `Database/bootstrap-*.schema.sql` and `Database/bootstrap-*.fixed-data.sql` file pairs.
-
-Clean volatile imported data while preserving fixed data:
-
-```powershell
-dotnet run --project MyBook\MyBook.csproj -- --clean-database
-```
 
 Create a start snapshot:
 
@@ -117,10 +111,11 @@ During scheduled fetches:
 - IBKR reports are checked every cycle.
 - ICBC monthly bills, Wise reports, OCBC statements, and Nexus DP monthly reports are checked only when the latest import is more than 27 days old.
 - ICBC historical-detail attachments are checked only when the latest history-detail import or scheduled empty-import checkpoint is more than 90 days old. Each scheduled scan searches the last 5 months and writes a `scheduled-empty-import-yyyyMMdd` checkpoint even if no statement is imported, so empty scans are not retried every day.
+- Mail fetches share Yahoo/Gmail IMAP sessions within each fetch cycle or standalone mail import and reconnect once after connection-level failures.
 - Exchange rates are refreshed every cycle.
 - A daily snapshot is created after the fetch cycle.
 
-Debug builds do not run scheduled fetch tasks. The app prints `skip scheduled fetch in DEBUG` and only performs fetches when an explicit command-line fetch command is used.
+Debug builds do not run scheduled fetch tasks. The app prints `skip scheduled fetch in DEBUG`.
 
 ## Nexus OAuth
 
@@ -131,26 +126,14 @@ Nexus API requests include the application headers required by the Nexus API Acc
 
 OAuth token storage uses the local database table `OAuthTokens`. Tokens are not stored in `config.json`.
 
-Start the local OAuth authorization flow:
-
-```powershell
-dotnet run --project MyBook\MyBook.csproj -- --authorize-nexus-oauth-token
-```
-
-The callback URI is hard-coded and must match the redirect URI registered for the Nexus OAuth app:
-
-```text
-http://127.0.0.1:4700/callback
-```
-
-The current Nexus OAuth module is marked TODO because it has not been remotely verified with a valid client id.
+The current Nexus OAuth token refresh module is marked TODO because it has not been remotely verified with a valid client id.
 
 ## TODO Modules
 
 The following modules are intentionally present as placeholders or not-yet-complete integrations:
 
 - `GraphQLUtil.NexusOAuth.TODO.cs`
-- `LocalUtil.WeChat.TODO.cs`
+- `FileUtil.WeChat.TODO.cs`
 - `MailUtil.Steam.TODO.cs`
 - `WebUtil.Bilibili.TODO.cs`
 - `WebUtil.Meituan.TODO.cs`

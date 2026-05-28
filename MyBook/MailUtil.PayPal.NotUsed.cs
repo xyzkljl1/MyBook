@@ -28,24 +28,27 @@ namespace MyBook
 
         private async Task FetchPayPalReports(DateTime since, DateTime before)
         {
-            var accounts = GetPayPalAccounts();
-            if (accounts.Count == 0)
+            await RunWithMailSessionScope(async () =>
             {
-                Console.WriteLine("Fetch PayPal mails: no PayPal accounts");
-                return;
-            }
+                var accounts = GetPayPalAccounts();
+                if (accounts.Count == 0)
+                {
+                    Console.WriteLine("Fetch PayPal mails: no PayPal accounts");
+                    return;
+                }
 
-            foreach (var group in accounts
-                         .GroupBy(account => account.email ?? "", StringComparer.OrdinalIgnoreCase)
-                         .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
-            {
-                if (String.IsNullOrWhiteSpace(group.Key))
-                    throw new InvalidOperationException($"Missing email for PayPal account {group.First().name}");
+                foreach (var group in accounts
+                             .GroupBy(account => account.email ?? "", StringComparer.OrdinalIgnoreCase)
+                             .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (String.IsNullOrWhiteSpace(group.Key))
+                        throw new InvalidOperationException($"Missing email for PayPal account {group.First().name}");
 
-                var messages = await SearchPayPalMails(group.Key, since, before);
-                Console.WriteLine($"Fetch PayPal mails {MaskEmail(group.Key)} {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}: count={messages.Count}");
-                ParsePayPalMails(group.ToList(), messages);
-            }
+                    var messages = await SearchPayPalMails(group.Key, since, before).ConfigureAwait(false);
+                    Console.WriteLine($"Fetch PayPal mails {MaskEmail(group.Key)} {since:yyyy-MM-dd}..{before.AddDays(-1):yyyy-MM-dd}: count={messages.Count}");
+                    ParsePayPalMails(group.ToList(), messages);
+                }
+            }).ConfigureAwait(false);
         }
 
         private List<Account> GetPayPalAccounts()

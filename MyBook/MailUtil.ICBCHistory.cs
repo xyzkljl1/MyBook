@@ -35,59 +35,58 @@ namespace MyBook
 
         public async Task<int> FetchICBCHistoryDetails(DateTime since)
         {
-            var mailbox = CreateYahooMailbox();
-            using ImapClient client = new();
-            client.Timeout = MailClientTimeoutMilliseconds;
-            client.CheckCertificateRevocation = false;
-            client.ProxyClient = null;
-
-            Console.WriteLine($"mail connect direct {mailbox.Label} ICBC history detail since {since:yyyy-MM-dd}");
-            await RunMailOperation(token => client.ConnectAsync(mailbox.Host, mailbox.Port, mailbox.UseSsl, token));
-            Console.WriteLine("mail connected");
-            await RunMailOperation(token => client.AuthenticateAsync(mailbox.Username, mailbox.Password, token));
-            Console.WriteLine("mail authenticated");
-            var folder = await GetMailSearchFolder(client, mailbox);
-            await RunMailOperation(token => folder.OpenAsync(FolderAccess.ReadOnly, token));
-            Console.WriteLine($"mail folder opened {folder.FullName}");
-
-            var query = SearchQuery.FromContains(ICBCHistoryDetailSender)
-                .And(SearchQuery.SubjectContains(ICBCHistoryDetailSubjectKeyword))
-                .And(SearchQuery.SentSince(since.Date));
-            var uids = await RunMailOperation(token => folder.SearchAsync(query, token));
-            Console.WriteLine($"mail search ICBC history detail since {since:yyyy-MM-dd} found {uids.Count}");
-            if (uids.Count == 0)
-                return 0;
-
-            var summaries = await RunMailOperation(token => folder.FetchAsync(
-                uids,
-                MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId,
-                token));
-            var candidates = summaries
-                .Where(IsICBCHistoryDetailSummary)
-                .OrderBy(GetMessageSummaryDate)
-                .ThenBy(summary => summary.UniqueId.Id)
-                .ToList();
-
-            var importedCount = 0;
-            var skippedUnreadableCount = 0;
-            foreach (var summary in candidates)
+            return await RunWithMailSessionScope(async () =>
             {
-                var message = await RunMailOperation(token => folder.GetMessageAsync(summary.UniqueId, token));
-                var parsedAttachments = ParseICBCHistoryDetailAttachments(message);
-                skippedUnreadableCount += parsedAttachments.SkippedUnreadableCount;
-                foreach (var attachment in parsedAttachments.Statements)
-                {
-                    var parsed = ParseICBCHistoryDetailPdfText(
-                        attachment.Text,
-                        attachment.FileName,
-                        attachment.FileHash);
-                    if (ImportICBCHistoryDetail(parsed))
-                        importedCount++;
-                }
-            }
+                var mailbox = CreateYahooMailbox();
+                var label = $"ICBC history detail since {since:yyyy-MM-dd}";
+                var query = SearchQuery.FromContains(ICBCHistoryDetailSender)
+                    .And(SearchQuery.SubjectContains(ICBCHistoryDetailSubjectKeyword))
+                    .And(SearchQuery.SentSince(since.Date));
+                var uids = await UseMailFolderAsync(
+                    mailbox,
+                    label,
+                    folder => RunMailOperation(token => folder.SearchAsync(query, token))).ConfigureAwait(false);
+                Console.WriteLine($"mail search {label} found {uids.Count}");
+                if (uids.Count == 0)
+                    return 0;
 
-            Console.WriteLine($"Imported remote ICBC history detail statements: {importedCount}, skippedUnreadable={skippedUnreadableCount}");
-            return importedCount;
+                var summaries = await UseMailFolderAsync(
+                    mailbox,
+                    $"{label} summaries",
+                    folder => RunMailOperation(token => folder.FetchAsync(
+                        uids,
+                        MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId,
+                        token))).ConfigureAwait(false);
+                var candidates = summaries
+                    .Where(IsICBCHistoryDetailSummary)
+                    .OrderBy(GetMessageSummaryDate)
+                    .ThenBy(summary => summary.UniqueId.Id)
+                    .ToList();
+
+                var importedCount = 0;
+                var skippedUnreadableCount = 0;
+                foreach (var summary in candidates)
+                {
+                    var message = await UseMailFolderAsync(
+                        mailbox,
+                        $"{label} uid={summary.UniqueId.Id}",
+                        folder => RunMailOperation(token => folder.GetMessageAsync(summary.UniqueId, token))).ConfigureAwait(false);
+                    var parsedAttachments = ParseICBCHistoryDetailAttachments(message);
+                    skippedUnreadableCount += parsedAttachments.SkippedUnreadableCount;
+                    foreach (var attachment in parsedAttachments.Statements)
+                    {
+                        var parsed = ParseICBCHistoryDetailPdfText(
+                            attachment.Text,
+                            attachment.FileName,
+                            attachment.FileHash);
+                        if (ImportICBCHistoryDetail(parsed))
+                            importedCount++;
+                    }
+                }
+
+                Console.WriteLine($"Imported remote ICBC history detail statements: {importedCount}, skippedUnreadable={skippedUnreadableCount}");
+                return importedCount;
+            }).ConfigureAwait(false);
         }
 
         private static bool IsICBCHistoryDetailSummary(IMessageSummary summary)
