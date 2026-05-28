@@ -3143,19 +3143,24 @@ namespace MyBook
             return $"{accountName}\t{holdingType}\t{code}";
         }
 
-        public DashboardData GetDashboardData(DateTime today)
+        public DashboardData GetDashboardData(DateTime today, DateTime? monthlyFlowStartMonth = null)
         {
             var currentMonth = new DateTime(today.Year, today.Month, 1);
-            var firstMonth = currentMonth.AddMonths(-11);
+            var firstMonth = monthlyFlowStartMonth.HasValue
+                ? new DateTime(monthlyFlowStartMonth.Value.Year, monthlyFlowStartMonth.Value.Month, 1)
+                : currentMonth.AddMonths(-11);
+            var monthlyEndExclusive = firstMonth.AddMonths(12);
             var nextMonth = currentMonth.AddMonths(1);
             var lastMonthStart = currentMonth.AddMonths(-1);
             var lastMonthEnd = currentMonth.AddDays(-1);
             var reasonFirstMonth = lastMonthStart.AddMonths(-11);
+            var recordStart = firstMonth < reasonFirstMonth ? firstMonth : reasonFirstMonth;
+            var recordEnd = monthlyEndExclusive > nextMonth ? monthlyEndExclusive : nextMonth;
             var reasonMonths = Enumerable.Range(0, 12)
                 .Select(reasonFirstMonth.AddMonths)
                 .ToList();
             var records = db.Queryable<Record>()
-                .Where(record => !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.date >= reasonFirstMonth && record.date < nextMonth)
+                .Where(record => !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.date >= recordStart && record.date < recordEnd)
                 .ToList();
             var accountList = db.Queryable<Account>().ToList();
             var lifeAccountIds = accountList
@@ -3256,7 +3261,8 @@ namespace MyBook
                     .OrderBy(currency => currency)
                     .ToList(),
                 LastMonthStart = lastMonthStart,
-                LastMonthEnd = lastMonthEnd
+                LastMonthEnd = lastMonthEnd,
+                MonthlyFlowStartMonth = firstMonth
             };
         }
 

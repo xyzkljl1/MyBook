@@ -212,7 +212,7 @@
                                       MinWidth="180"
                                       Height="32"/>
                         </StackPanel>
-                        <TextBlock Text="过去12个月" FontSize="15" FontWeight="SemiBold" Foreground="#334155"/>
+                        <TextBlock Text="{Binding MonthlyFlowRangeText}" FontSize="15" FontWeight="SemiBold" Foreground="#334155"/>
                     </DockPanel>
                     <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
                         <ItemsControl ItemsSource="{Binding VisibleMonthlySeries}">
@@ -235,11 +235,19 @@
                                             </DockPanel>
                                             <Grid Grid.Row="1" Margin="0,12,0,0">
                                                 <TextBlock Text="收" FontSize="12" FontWeight="SemiBold" Foreground="#047857" HorizontalAlignment="Right"/>
-                                                <local:MonthlyFlowChart Items="{Binding Points}" FlowKind="Income" Margin="0,14,0,0"/>
+                                                <local:MonthlyFlowChart Items="{Binding Points}"
+                                                                        FlowKind="Income"
+                                                                        WindowShiftRequested="MonthlyFlowChart_WindowShiftRequested"
+                                                                        PeriodDoubleClicked="MonthlyFlowChart_PeriodDoubleClicked"
+                                                                        Margin="0,14,0,0"/>
                                             </Grid>
                                             <Grid Grid.Row="2" Margin="0,12,0,0">
                                                 <TextBlock Text="支" FontSize="12" FontWeight="SemiBold" Foreground="#BE123C" HorizontalAlignment="Right"/>
-                                                <local:MonthlyFlowChart Items="{Binding Points}" FlowKind="Expense" Margin="0,14,0,0"/>
+                                                <local:MonthlyFlowChart Items="{Binding Points}"
+                                                                        FlowKind="Expense"
+                                                                        WindowShiftRequested="MonthlyFlowChart_WindowShiftRequested"
+                                                                        PeriodDoubleClicked="MonthlyFlowChart_PeriodDoubleClicked"
+                                                                        Margin="0,14,0,0"/>
                                             </Grid>
                                         </Grid>
                                     </Border>
@@ -488,8 +496,7 @@
                                                      VisibleStartDate="{Binding AllocatedExpenseStartDate}"
                                                      VisibleEndDate="{Binding AllocatedExpenseEndDate}"
                                                      WindowShiftRequested="AllocatedExpenseChart_WindowShiftRequested"
-                                                     PeriodDoubleClicked="AllocatedExpenseChart_PeriodDoubleClicked"
-                                                     Cursor="Hand"/>
+                                                     PeriodDoubleClicked="AllocatedExpenseChart_PeriodDoubleClicked"/>
                     </Border>
                     <Border Grid.Row="2" Style="{StaticResource Card}" Padding="0">
                         <DataGrid ItemsSource="{Binding AllocatedExpenseBuckets}"

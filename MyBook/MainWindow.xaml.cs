@@ -27,7 +27,7 @@ namespace MyBook
         Drawing.Icon? trayIconImage;
         bool isExitRequested;
         bool isLoadingRecordDetails;
-        bool isAdjustingDetailRange;
+        bool isAdjustingDetailSelection;
         bool isLoadingAllocatedExpenses;
         bool isAdjustingAllocatedExpenseRange;
 
@@ -45,6 +45,9 @@ namespace MyBook
         private async void Refresh_Click(object sender, RoutedEventArgs e)
         {
             var viewModel = DataContext as DashboardViewModel;
+            if (viewModel is not null && !ConfirmDiscardRecordDetailChanges(viewModel))
+                return;
+
             await LoadDashboardAsync(viewModel?.DetailStartDate, viewModel?.DetailEndDate, viewModel?.SelectedDetailAccountFilterKey);
         }
 
@@ -60,20 +63,32 @@ namespace MyBook
 
         private async void DetailDate_SelectedDateChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (isLoadingRecordDetails || isAdjustingDetailRange)
+            if (isLoadingRecordDetails || isAdjustingDetailSelection)
                 return;
             if (DataContext is not DashboardViewModel viewModel)
                 return;
+
+            if (!ConfirmDiscardRecordDetailChanges(viewModel))
+            {
+                RestoreLoadedDetailSelection(viewModel);
+                return;
+            }
 
             await LoadRecordDetailsAsync(viewModel);
         }
 
         private async void DetailAccount_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (isLoadingRecordDetails)
+            if (isLoadingRecordDetails || isAdjustingDetailSelection)
                 return;
             if (DataContext is not DashboardViewModel viewModel)
                 return;
+
+            if (!ConfirmDiscardRecordDetailChanges(viewModel))
+            {
+                RestoreLoadedDetailSelection(viewModel);
+                return;
+            }
 
             await LoadRecordDetailsAsync(viewModel);
         }
@@ -140,8 +155,10 @@ namespace MyBook
         {
             if (DataContext is not DashboardViewModel viewModel)
                 return;
+            if (!ConfirmDiscardRecordDetailChanges(viewModel))
+                return;
 
-            isAdjustingDetailRange = true;
+            isAdjustingDetailSelection = true;
             try
             {
                 viewModel.DetailStartDate = e.StartDate;
@@ -149,7 +166,45 @@ namespace MyBook
             }
             finally
             {
-                isAdjustingDetailRange = false;
+                isAdjustingDetailSelection = false;
+            }
+
+            DetailTab.IsSelected = true;
+            await LoadRecordDetailsAsync(viewModel);
+        }
+
+        private async void MonthlyFlowChart_WindowShiftRequested(object sender, AllocatedExpenseWindowShiftEventArgs e)
+        {
+            if (e.UnitOffset == 0)
+                return;
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+            if (!ConfirmDiscardRecordDetailChanges(viewModel))
+                return;
+
+            await LoadDashboardAsync(
+                viewModel.DetailStartDate,
+                viewModel.DetailEndDate,
+                viewModel.SelectedDetailAccountFilterKey,
+                viewModel.MonthlyFlowStartMonth.AddMonths(e.UnitOffset));
+        }
+
+        private async void MonthlyFlowChart_PeriodDoubleClicked(object sender, AllocatedExpensePeriodDoubleClickEventArgs e)
+        {
+            if (DataContext is not DashboardViewModel viewModel)
+                return;
+            if (!ConfirmDiscardRecordDetailChanges(viewModel))
+                return;
+
+            isAdjustingDetailSelection = true;
+            try
+            {
+                viewModel.DetailStartDate = e.StartDate;
+                viewModel.DetailEndDate = e.EndDate;
+            }
+            finally
+            {
+                isAdjustingDetailSelection = false;
             }
 
             DetailTab.IsSelected = true;
@@ -168,8 +223,7 @@ namespace MyBook
             if (DataContext is not DashboardViewModel viewModel)
                 return;
 
-            RecordDetailsGrid.CommitEdit(DataGridEditingUnit.Cell, true);
-            RecordDetailsGrid.CommitEdit(DataGridEditingUnit.Row, true);
+            CommitRecordDetailsGridEdits();
             var changes = viewModel.GetPendingRecordChanges()
                 .Concat(viewModel.GetPendingBalanceCorrections())
                 .ToList();
@@ -269,19 +323,62 @@ namespace MyBook
             return confirmed;
         }
 
-        private async Task LoadDashboardAsync(DateTime? detailStartDate = null, DateTime? detailEndDate = null, string? detailAccountFilterKey = null)
+        private bool ConfirmDiscardRecordDetailChanges(DashboardViewModel viewModel)
+        {
+            CommitRecordDetailsGridEdits();
+            if (!viewModel.HasPendingDetailChanges())
+                return true;
+
+            var result = MessageBox.Show(
+                this,
+                "详情页有未保存的修改，继续操作会丢弃这些修改。是否继续？",
+                "确认丢弃详情修改",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning,
+                MessageBoxResult.No);
+            return result == MessageBoxResult.Yes;
+        }
+
+        private void CommitRecordDetailsGridEdits()
+        {
+            RecordDetailsGrid.CommitEdit(DataGridEditingUnit.Cell, true);
+            RecordDetailsGrid.CommitEdit(DataGridEditingUnit.Row, true);
+        }
+
+        private void RestoreLoadedDetailSelection(DashboardViewModel viewModel)
+        {
+            isAdjustingDetailSelection = true;
+            try
+            {
+                viewModel.RestoreLoadedDetailSelection();
+            }
+            finally
+            {
+                isAdjustingDetailSelection = false;
+            }
+        }
+
+        private async Task LoadDashboardAsync(
+            DateTime? detailStartDate = null,
+            DateTime? detailEndDate = null,
+            string? detailAccountFilterKey = null,
+            DateTime? monthlyFlowStartMonth = null)
         {
             try
             {
                 var previousViewModel = DataContext as DashboardViewModel;
                 var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
                 var database = new DatabaseUtil(config);
-                var data = database.GetDashboardData(DateTime.Today);
+                var effectiveMonthlyFlowStartMonth = NormalizeMonth(
+                    monthlyFlowStartMonth ??
+                    previousViewModel?.MonthlyFlowStartMonth ??
+                    DateTime.Today.AddMonths(-11));
+                var data = database.GetDashboardData(DateTime.Today, effectiveMonthlyFlowStartMonth);
                 if (data.MissingExchangeRateCurrencies.Count > 0)
                 {
                     using var pubWeb = new PubWebUtil(config, database);
                     await pubWeb.FetchExchangeRates(data.MissingExchangeRateCurrencies);
-                    data = database.GetDashboardData(DateTime.Today);
+                    data = database.GetDashboardData(DateTime.Today, effectiveMonthlyFlowStartMonth);
                     if (data.MissingExchangeRateCurrencies.Count > 0)
                     {
                         throw new InvalidOperationException(
@@ -291,7 +388,7 @@ namespace MyBook
 
                 var viewModel = DashboardViewModel.From(data);
                 if (previousViewModel is not null)
-                    viewModel.CopyAllocatedExpenseSettingsFrom(previousViewModel);
+                    viewModel.CopyDashboardSettingsFrom(previousViewModel);
                 if (detailStartDate.HasValue)
                     viewModel.DetailStartDate = detailStartDate.Value;
                 if (detailEndDate.HasValue)
@@ -304,6 +401,11 @@ namespace MyBook
             {
                 DataContext = DashboardViewModel.FromError(e.Message);
             }
+        }
+
+        private static DateTime NormalizeMonth(DateTime date)
+        {
+            return new DateTime(date.Year, date.Month, 1);
         }
 
         private async Task LoadRecordDetailsAsync(DashboardViewModel? viewModel = null, string? preferredDetailAccountFilterKey = null)
@@ -340,6 +442,7 @@ namespace MyBook
                     .ToList();
                 LoadDetailAccountBalances(viewModel, database);
                 viewModel.SetRecordDetails(details);
+                viewModel.MarkLoadedDetailSelection();
                 viewModel.SetDetailStatus($"共 {details.Count} 条");
             }
             catch (Exception e)
@@ -425,14 +528,14 @@ namespace MyBook
         {
             if (String.IsNullOrWhiteSpace(viewModel.SelectedDetailAccountName))
             {
-                viewModel.SetDetailAccountBalances([]);
+                viewModel.SetDetailAccountBalances([], null);
                 return;
             }
 
             var balances = database.GetAccountBalanceDetails(viewModel.SelectedDetailAccountName)
                 .Select(AccountBalanceRowViewModel.From)
                 .ToList();
-            viewModel.SetDetailAccountBalances(balances);
+            viewModel.SetDetailAccountBalances(balances, viewModel.SelectedDetailAccountName);
         }
 
         private void InitializeTrayIcon()
@@ -488,6 +591,15 @@ namespace MyBook
                 return;
             }
 
+            if (DataContext is DashboardViewModel viewModel && !ConfirmDiscardRecordDetailChanges(viewModel))
+            {
+                e.Cancel = true;
+                isExitRequested = false;
+                if (trayIcon is not null)
+                    trayIcon.Visible = true;
+                return;
+            }
+
             base.OnClosing(e);
         }
 
@@ -509,10 +621,15 @@ namespace MyBook
         double selectedReasonMonthIndex;
         DateTime detailStartDate = DateTime.Today.AddDays(-30);
         DateTime detailEndDate = DateTime.Today;
+        DateTime loadedDetailStartDate = DateTime.Today.AddDays(-30);
+        DateTime loadedDetailEndDate = DateTime.Today;
+        DateTime monthlyFlowStartMonth = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1).AddMonths(-11);
         DateTime allocatedExpenseStartDate = DateTime.Today.AddDays(-14);
         DateTime allocatedExpenseEndDate = DateTime.Today;
         bool showInvestmentByHolding;
         DetailAccountFilterViewModel? selectedDetailAccountFilter;
+        string? loadedDetailAccountFilterKey;
+        string? loadedDetailBalanceAccountName;
         MonthlyFlowAccountStatisticsViewModel? selectedMonthlyAccount;
         InvestmentAccountStatisticsViewModel? selectedInvestmentAccount;
 
@@ -539,6 +656,21 @@ namespace MyBook
         public string DetailStatusText { get; private set; } = "";
         public string AllocatedExpenseStatusText { get; private set; } = "";
         public string AllocatedExpenseTotalText => $"¥{AllocatedExpenseBuckets.Sum(bucket => bucket.TotalRmb):N2}";
+        public DateTime MonthlyFlowStartMonth
+        {
+            get => monthlyFlowStartMonth;
+            set
+            {
+                value = new DateTime(value.Year, value.Month, 1);
+                if (monthlyFlowStartMonth == value)
+                    return;
+
+                monthlyFlowStartMonth = value;
+                OnPropertyChanged(nameof(MonthlyFlowStartMonth));
+                OnPropertyChanged(nameof(MonthlyFlowRangeText));
+            }
+        }
+        public string MonthlyFlowRangeText => $"{MonthlyFlowStartMonth:yyyy-MM} - {MonthlyFlowStartMonth.AddMonths(11):yyyy-MM}";
         public IEnumerable<MonthlyFlowSeriesViewModel> VisibleMonthlySeries
         {
             get
@@ -820,6 +952,7 @@ namespace MyBook
                 SnapshotTimeText = $"更新于 {DateTime.Now:yyyy-MM-dd HH:mm}",
                 ReasonTabHeader = "分类",
                 TotalAssets = TotalAssetsViewModel.From(data.TotalAssetsRmb),
+                MonthlyFlowStartMonth = data.MonthlyFlowStartMonth,
                 CurrencySummaries = data.CurrencySummaries.Select(CurrencySummaryViewModel.From).ToList(),
                 AssetSummaries = BuildAssetSummaryViewModels(data),
                 MonthlySeries = data.MonthlyFlowSeries
@@ -868,12 +1001,19 @@ namespace MyBook
             };
         }
 
-        public void CopyAllocatedExpenseSettingsFrom(DashboardViewModel source)
+        public void CopyDashboardSettingsFrom(DashboardViewModel source)
         {
+            showSingleCurrencyMonthly = source.ShowSingleCurrencyMonthly;
+            selectedMonthlyAccount = MonthlyAccounts.FirstOrDefault(account =>
+                String.Equals(account.DisplayName, source.SelectedMonthlyAccount?.DisplayName, StringComparison.Ordinal)) ??
+                MonthlyAccounts.FirstOrDefault();
             showAllocatedExpenseLineChart = source.ShowAllocatedExpenseLineChart;
             showAllocatedExpenseMonthly = source.ShowAllocatedExpenseMonthly;
             allocatedExpenseStartDate = source.AllocatedExpenseStartDate;
             allocatedExpenseEndDate = source.AllocatedExpenseEndDate;
+            OnPropertyChanged(nameof(ShowSingleCurrencyMonthly));
+            OnPropertyChanged(nameof(SelectedMonthlyAccount));
+            OnPropertyChanged(nameof(VisibleMonthlySeries));
             OnPropertyChanged(nameof(ShowAllocatedExpenseLineChart));
             OnPropertyChanged(nameof(ShowAllocatedExpenseMonthly));
             OnPropertyChanged(nameof(AllocatedExpenseStartDate));
@@ -981,9 +1121,36 @@ namespace MyBook
             OnPropertyChanged(nameof(DetailAccountFilters));
             SelectedDetailAccountFilter =
                 filters.FirstOrDefault(filter => String.Equals(filter.Key, preferredFilterKey, StringComparison.Ordinal)) ??
+                filters.FirstOrDefault(filter => filter.Kind == DetailAccountFilterKind.All) ??
                 filters.FirstOrDefault(filter => filter.Kind == DetailAccountFilterKind.Account &&
                     String.Equals(filter.AccountNames.FirstOrDefault(), defaultAccountName, StringComparison.OrdinalIgnoreCase)) ??
                 filters.FirstOrDefault();
+        }
+
+        public void MarkLoadedDetailSelection()
+        {
+            loadedDetailStartDate = DetailStartDate;
+            loadedDetailEndDate = DetailEndDate;
+            loadedDetailAccountFilterKey = SelectedDetailAccountFilterKey;
+        }
+
+        public void RestoreLoadedDetailSelection()
+        {
+            DetailStartDate = loadedDetailStartDate;
+            DetailEndDate = loadedDetailEndDate;
+            SelectDetailAccountFilter(loadedDetailAccountFilterKey);
+        }
+
+        public bool HasPendingDetailChanges()
+        {
+            return GetPendingRecordChanges().Count > 0 || GetPendingBalanceCorrections().Count > 0;
+        }
+
+        private void SelectDetailAccountFilter(string? key)
+        {
+            SelectedDetailAccountFilter =
+                DetailAccountFilters.FirstOrDefault(filter => String.Equals(filter.Key, key, StringComparison.Ordinal)) ??
+                DetailAccountFilters.FirstOrDefault();
         }
 
         public string GetDefaultNewRecordAccountName()
@@ -1098,8 +1265,9 @@ namespace MyBook
             return new DateTime(date.Year, date.Month, 1);
         }
 
-        public void SetDetailAccountBalances(IEnumerable<AccountBalanceRowViewModel> balances)
+        public void SetDetailAccountBalances(IEnumerable<AccountBalanceRowViewModel> balances, string? accountName)
         {
+            loadedDetailBalanceAccountName = accountName;
             DetailAccountBalances.Clear();
             foreach (var balance in balances)
                 DetailAccountBalances.Add(balance);
@@ -1117,11 +1285,11 @@ namespace MyBook
 
         public List<RecordDetailPendingChange> GetPendingBalanceCorrections()
         {
-            if (String.IsNullOrWhiteSpace(SelectedDetailAccountName))
+            if (String.IsNullOrWhiteSpace(loadedDetailBalanceAccountName))
                 return [];
 
             return DetailAccountBalances
-                .Select(balance => balance.GetPendingCorrection(SelectedDetailAccountName))
+                .Select(balance => balance.GetPendingCorrection(loadedDetailBalanceAccountName))
                 .Where(change => change is not null)
                 .Select(change => change!)
                 .ToList();
@@ -1830,6 +1998,7 @@ namespace MyBook
 
     public class MonthlyFlowPointViewModel
     {
+        public DateTime Month { get; set; }
         public string MonthLabel { get; set; } = "";
         public decimal Income { get; set; }
         public decimal Expense { get; set; }
@@ -1840,6 +2009,7 @@ namespace MyBook
         {
             return new MonthlyFlowPointViewModel
             {
+                Month = point.Month,
                 MonthLabel = point.MonthLabel,
                 Income = point.Income,
                 Expense = point.Expense,
@@ -1977,6 +2147,8 @@ namespace MyBook
         const double DragUnitMinimumPixels = 32;
         const double ChartLeftPadding = 64;
         const double ChartRightPadding = 36;
+        const double ChartTopPadding = 44;
+        const double ChartBottomPadding = 34;
         const decimal FixedAxisMax = 1000m;
 
         public static readonly DependencyProperty ItemsProperty = DependencyProperty.Register(
@@ -2021,6 +2193,7 @@ namespace MyBook
         bool isDraggingWindow;
         Point dragStartPoint;
         Point dragCurrentPoint;
+        AllocatedExpenseBucketViewModel? hoveredBucket;
 
         public event EventHandler<AllocatedExpenseWindowShiftEventArgs>? WindowShiftRequested;
         public event EventHandler<AllocatedExpensePeriodDoubleClickEventArgs>? PeriodDoubleClicked;
@@ -2073,9 +2246,10 @@ namespace MyBook
         protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
         {
             base.OnMouseLeftButtonDown(e);
+            var position = e.GetPosition(this);
             if (e.ClickCount >= 2)
             {
-                if (TryGetBucketAtPoint(e.GetPosition(this), out var bucket))
+                if (TryGetBucketAtPoint(position, out var bucket))
                 {
                     PeriodDoubleClicked?.Invoke(
                         this,
@@ -2085,8 +2259,11 @@ namespace MyBook
                 return;
             }
 
+            if (!IsPointInDragArea(position))
+                return;
+
             isDraggingWindow = true;
-            dragStartPoint = e.GetPosition(this);
+            dragStartPoint = position;
             dragCurrentPoint = dragStartPoint;
             CaptureMouse();
             e.Handled = true;
@@ -2094,18 +2271,33 @@ namespace MyBook
 
         protected override HitTestResult HitTestCore(PointHitTestParameters hitTestParameters)
         {
-            return new PointHitTestResult(this, hitTestParameters.HitPoint);
+            return IsPointInInteractiveArea(hitTestParameters.HitPoint)
+                ? new PointHitTestResult(this, hitTestParameters.HitPoint)
+                : null!;
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            var position = e.GetPosition(this);
+            Cursor = isDraggingWindow || IsPointInDragArea(position)
+                ? Cursors.Hand
+                : null;
+            UpdateHoveredBucket(position);
             if (!isDraggingWindow)
                 return;
 
-            dragCurrentPoint = e.GetPosition(this);
+            dragCurrentPoint = position;
             InvalidateVisual();
             e.Handled = true;
+        }
+
+        protected override void OnMouseLeave(MouseEventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (!isDraggingWindow)
+                Cursor = null;
+            SetHoveredBucket(null);
         }
 
         protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
@@ -2148,10 +2340,10 @@ namespace MyBook
             base.OnRender(dc);
             var width = ActualWidth;
             var height = ActualHeight;
-            var left = 64.0;
-            var top = 44.0;
-            var right = 36.0;
-            var bottom = 34.0;
+            var left = ChartLeftPadding;
+            var top = ChartTopPadding;
+            var right = ChartRightPadding;
+            var bottom = ChartBottomPadding;
             var chartWidth = Math.Max(1, width - left - right);
             var chartHeight = Math.Max(1, height - top - bottom);
 
@@ -2166,7 +2358,9 @@ namespace MyBook
                 return;
             }
 
-            var axisMax = FixedAxisMax;
+            var axisMax = IsMonthly
+                ? CalculateAxisMax(viewportPlacements.Max(placement => placement.Bucket.TotalRmb))
+                : FixedAxisMax;
             DrawAxes(dc, left, top, chartWidth, chartHeight, axisMax);
             DrawLegend(dc, viewportPlacements.Select(placement => placement.Bucket).ToList(), width);
 
@@ -2175,7 +2369,7 @@ namespace MyBook
             else
                 DrawStackedBars(dc, placements, left, top, chartWidth, chartHeight, axisMax);
 
-            DrawLabels(dc, placements, left, top + chartHeight, chartWidth);
+            DrawLabels(dc, placements, left, top + chartHeight, chartWidth, hoveredBucket);
         }
 
         private List<AllocatedExpenseBucketPlacement> BuildBucketPlacements(
@@ -2209,8 +2403,8 @@ namespace MyBook
 
         private bool TryGetBucketAtPoint(Point point, out AllocatedExpenseBucketViewModel bucket)
         {
-            var left = 64.0;
-            var right = 36.0;
+            var left = ChartLeftPadding;
+            var right = ChartRightPadding;
             var chartWidth = Math.Max(1, ActualWidth - left - right);
             var loadedBuckets = Items?.Cast<AllocatedExpenseBucketViewModel>().ToList() ?? [];
             var placements = BuildBucketPlacements(loadedBuckets, left, chartWidth);
@@ -2229,6 +2423,48 @@ namespace MyBook
 
             bucket = placement.Bucket;
             return true;
+        }
+
+        private void UpdateHoveredBucket(Point point)
+        {
+            if (!IsPointInDateLabelArea(point))
+            {
+                SetHoveredBucket(null);
+                return;
+            }
+
+            SetHoveredBucket(TryGetBucketAtPoint(point, out var bucket) ? bucket : null);
+        }
+
+        private void SetHoveredBucket(AllocatedExpenseBucketViewModel? bucket)
+        {
+            if (ReferenceEquals(hoveredBucket, bucket))
+                return;
+
+            hoveredBucket = bucket;
+            InvalidateVisual();
+        }
+
+        private bool IsPointInInteractiveArea(Point point)
+        {
+            return IsPointInDragArea(point) || IsPointInDateLabelArea(point);
+        }
+
+        private bool IsPointInDragArea(Point point)
+        {
+            var left = ChartLeftPadding;
+            var top = ChartTopPadding;
+            var right = Math.Max(left, ActualWidth - ChartRightPadding);
+            var bottom = Math.Max(top, ActualHeight - ChartBottomPadding);
+            return point.X > left && point.X < right && point.Y > top && point.Y < bottom;
+        }
+
+        private bool IsPointInDateLabelArea(Point point)
+        {
+            var left = ChartLeftPadding;
+            var right = Math.Max(left, ActualWidth - ChartRightPadding);
+            var baselineY = Math.Max(ChartTopPadding, ActualHeight - ChartBottomPadding);
+            return point.X > left && point.X < right && point.Y > baselineY && point.Y < ActualHeight;
         }
 
         private int GetVisibleUnitCount()
@@ -2355,7 +2591,8 @@ namespace MyBook
             List<AllocatedExpenseBucketPlacement> placements,
             double left,
             double baselineY,
-            double chartWidth)
+            double chartWidth,
+            AllocatedExpenseBucketViewModel? hoveredBucket)
         {
             var visibleCount = placements.Count == 0
                 ? 0
@@ -2368,7 +2605,20 @@ namespace MyBook
                     continue;
 
                 var x = placements[i].CenterX;
-                var text = CreateText(placements[i].Bucket.PeriodLabel, 11, ParseBrush("#64748B"));
+                var isHovered = ReferenceEquals(placements[i].Bucket, hoveredBucket);
+                var text = CreateText(
+                    placements[i].Bucket.PeriodLabel,
+                    isHovered ? 12 : 11,
+                    ParseBrush(isHovered ? "#0F766E" : "#64748B"));
+                if (isHovered)
+                {
+                    dc.DrawRoundedRectangle(
+                        new SolidColorBrush(Color.FromRgb(204, 251, 241)),
+                        null,
+                        new Rect(x - text.Width / 2 - 5, baselineY + 9, text.Width + 10, text.Height + 4),
+                        4,
+                        4);
+                }
                 dc.DrawText(text, new Point(x - text.Width / 2, baselineY + 12));
             }
         }
@@ -2450,6 +2700,17 @@ namespace MyBook
             return (SolidColorBrush)new BrushConverter().ConvertFromString(color)!;
         }
 
+        private static decimal CalculateAxisMax(decimal maxValue)
+        {
+            if (maxValue <= 0)
+                return 1;
+
+            var rawStep = (double)maxValue / 4.0;
+            var magnitude = Math.Pow(10, Math.Floor(Math.Log10(Math.Max(1, rawStep))));
+            var step = (decimal)(Math.Ceiling(rawStep / magnitude) * magnitude);
+            return Math.Max(1, step * 4);
+        }
+
         private readonly record struct AllocatedExpenseBucketPlacement(
             AllocatedExpenseBucketViewModel Bucket,
             double CenterX,
@@ -2458,6 +2719,12 @@ namespace MyBook
 
     public class MonthlyFlowChart : FrameworkElement
     {
+        const double DragUnitMinimumPixels = 32;
+        const double ChartLeftPadding = 58;
+        const double ChartRightPadding = 58;
+        const double ChartTopPadding = 46;
+        const double ChartBottomPadding = 28;
+
         public static readonly DependencyProperty ItemsProperty = DependencyProperty.Register(
             nameof(Items),
             typeof(IEnumerable),
@@ -2469,6 +2736,14 @@ namespace MyBook
             typeof(MonthlyFlowChart),
             new FrameworkPropertyMetadata("Income", FrameworkPropertyMetadataOptions.AffectsRender));
 
+        bool isDraggingWindow;
+        Point dragStartPoint;
+        Point dragCurrentPoint;
+        MonthlyFlowPointViewModel? hoveredPoint;
+
+        public event EventHandler<AllocatedExpenseWindowShiftEventArgs>? WindowShiftRequested;
+        public event EventHandler<AllocatedExpensePeriodDoubleClickEventArgs>? PeriodDoubleClicked;
+
         public IEnumerable? Items
         {
             get => (IEnumerable?)GetValue(ItemsProperty);
@@ -2479,6 +2754,85 @@ namespace MyBook
         {
             get => (string)GetValue(FlowKindProperty);
             set => SetValue(FlowKindProperty, value);
+        }
+
+        protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
+        {
+            base.OnMouseLeftButtonDown(e);
+            var position = e.GetPosition(this);
+            if (e.ClickCount >= 2)
+            {
+                if (TryGetPointAtPoint(position, out var point))
+                {
+                    PeriodDoubleClicked?.Invoke(
+                        this,
+                        AllocatedExpensePeriodDoubleClickEventArgs.From(point.Month, isMonthly: true));
+                    e.Handled = true;
+                }
+                return;
+            }
+
+            if (!IsPointInDragArea(position))
+                return;
+
+            isDraggingWindow = true;
+            dragStartPoint = position;
+            dragCurrentPoint = position;
+            CaptureMouse();
+            e.Handled = true;
+        }
+
+        protected override HitTestResult HitTestCore(PointHitTestParameters hitTestParameters)
+        {
+            return IsPointInInteractiveArea(hitTestParameters.HitPoint)
+                ? new PointHitTestResult(this, hitTestParameters.HitPoint)
+                : null!;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            var position = e.GetPosition(this);
+            Cursor = isDraggingWindow || IsPointInDragArea(position) || IsPointInDateLabelArea(position)
+                ? Cursors.Hand
+                : null;
+            UpdateHoveredPoint(position);
+            if (!isDraggingWindow)
+                return;
+
+            dragCurrentPoint = position;
+            InvalidateVisual();
+            e.Handled = true;
+        }
+
+        protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
+        {
+            base.OnMouseLeftButtonUp(e);
+            if (!isDraggingWindow)
+                return;
+
+            var unitOffset = CalculateDragUnitOffset(e.GetPosition(this));
+            isDraggingWindow = false;
+            ReleaseMouseCapture();
+            InvalidateVisual();
+            if (unitOffset != 0)
+                WindowShiftRequested?.Invoke(this, new AllocatedExpenseWindowShiftEventArgs { UnitOffset = unitOffset });
+            e.Handled = true;
+        }
+
+        protected override void OnLostMouseCapture(MouseEventArgs e)
+        {
+            base.OnLostMouseCapture(e);
+            isDraggingWindow = false;
+            InvalidateVisual();
+        }
+
+        protected override void OnMouseLeave(MouseEventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (!isDraggingWindow)
+                Cursor = null;
+            SetHoveredPoint(null);
         }
 
         protected override void OnRender(DrawingContext dc)
@@ -2493,14 +2847,15 @@ namespace MyBook
 
             var width = ActualWidth;
             var height = ActualHeight;
-            var left = 58.0;
-            var top = 46.0;
-            var right = 58.0;
-            var bottom = 28.0;
+            var left = ChartLeftPadding;
+            var top = ChartTopPadding;
+            var right = ChartRightPadding;
+            var bottom = ChartBottomPadding;
             var chartWidth = Math.Max(1, width - left - right);
             var chartHeight = Math.Max(1, height - top - bottom);
             var chartRight = left + chartWidth;
             var useExpense = String.Equals(FlowKind, "Expense", StringComparison.OrdinalIgnoreCase);
+            var placements = BuildPointPlacements(points, left, chartWidth);
             var maxValue = Math.Max(1, points.Max(point => GetFlowSegments(point, useExpense).Sum(segment => segment.Value)));
             var axisStep = CalculateAxisStep(maxValue);
             var axisMax = axisStep * Math.Max(1, (int)Math.Ceiling(maxValue / axisStep));
@@ -2520,20 +2875,14 @@ namespace MyBook
             dc.DrawLine(gridPen, new Point(left, top), new Point(left, top + chartHeight));
             dc.DrawLine(gridPen, new Point(chartRight, top), new Point(chartRight, top + chartHeight));
             dc.DrawLine(gridPen, new Point(left, top + chartHeight), new Point(chartRight, top + chartHeight));
-            DrawBars(dc, points, axisMax, left, top, chartWidth, chartHeight, useExpense);
+            DrawBars(dc, placements, axisMax, left, top, chartWidth, chartHeight, useExpense);
             DrawLegend(dc, width);
-
-            for (var i = 0; i < points.Count; i++)
-            {
-                var groupWidth = chartWidth / points.Count;
-                var x = left + groupWidth * i + groupWidth / 2;
-                DrawText(dc, points[i].MonthLabel, 11, "#64748B", x - 15, top + chartHeight + 13);
-            }
+            DrawLabels(dc, placements, left, top + chartHeight, chartWidth, hoveredPoint);
         }
 
         private static void DrawBars(
             DrawingContext dc,
-            List<MonthlyFlowPointViewModel> points,
+            List<MonthlyFlowPointPlacement> placements,
             decimal axisMax,
             double left,
             double top,
@@ -2541,16 +2890,127 @@ namespace MyBook
             double chartHeight,
             bool useExpense)
         {
-            var groupWidth = chartWidth / points.Count;
+            if (placements.Count == 0)
+                return;
+
+            var groupWidth = placements[0].GroupWidth;
             var barWidth = Math.Min(24, Math.Max(8, groupWidth * 0.28));
-            for (var i = 0; i < points.Count; i++)
+            foreach (var placement in placements)
             {
-                var segments = GetFlowSegments(points[i], useExpense);
+                var segments = GetFlowSegments(placement.Point, useExpense);
                 var total = segments.Sum(segment => segment.Value);
-                var center = left + groupWidth * i + groupWidth / 2;
-                DrawStackedBar(dc, segments, center - barWidth / 2, top, chartHeight, barWidth, axisMax);
-                DrawBarValueLabel(dc, center, top, chartHeight, total, axisMax, useExpense);
+                DrawStackedBar(dc, segments, placement.CenterX - barWidth / 2, top, chartHeight, barWidth, axisMax);
+                if (IsInViewport(placement, left, chartWidth))
+                    DrawBarValueLabel(dc, placement.CenterX, top, chartHeight, total, axisMax, useExpense);
             }
+        }
+
+        private List<MonthlyFlowPointPlacement> BuildPointPlacements(
+            List<MonthlyFlowPointViewModel> points,
+            double left,
+            double chartWidth)
+        {
+            if (points.Count == 0)
+                return [];
+
+            var groupWidth = chartWidth / points.Count;
+            var dragPixelOffset = GetDragPixelOffset();
+            return points
+                .Select((point, index) =>
+                {
+                    var centerX = left + (index + 0.5) * groupWidth + dragPixelOffset;
+                    return new MonthlyFlowPointPlacement(point, centerX, groupWidth);
+                })
+                .Where(placement => placement.CenterX + placement.GroupWidth >= left && placement.CenterX - placement.GroupWidth <= left + chartWidth)
+                .ToList();
+        }
+
+        private bool TryGetPointAtPoint(Point point, out MonthlyFlowPointViewModel month)
+        {
+            var left = ChartLeftPadding;
+            var chartWidth = Math.Max(1, ActualWidth - ChartLeftPadding - ChartRightPadding);
+            var points = Items?.Cast<MonthlyFlowPointViewModel>().ToList() ?? [];
+            var placements = BuildPointPlacements(points, left, chartWidth);
+            var placement = placements
+                .Where(placement => IsInViewport(placement, left, chartWidth))
+                .Where(placement =>
+                    point.X >= placement.CenterX - placement.GroupWidth / 2 &&
+                    point.X <= placement.CenterX + placement.GroupWidth / 2)
+                .OrderBy(placement => Math.Abs(point.X - placement.CenterX))
+                .FirstOrDefault();
+            if (placement.Point is null)
+            {
+                month = new MonthlyFlowPointViewModel();
+                return false;
+            }
+
+            month = placement.Point;
+            return true;
+        }
+
+        private void UpdateHoveredPoint(Point point)
+        {
+            if (!IsPointInDateLabelArea(point))
+            {
+                SetHoveredPoint(null);
+                return;
+            }
+
+            SetHoveredPoint(TryGetPointAtPoint(point, out var month) ? month : null);
+        }
+
+        private void SetHoveredPoint(MonthlyFlowPointViewModel? point)
+        {
+            if (ReferenceEquals(hoveredPoint, point))
+                return;
+
+            hoveredPoint = point;
+            InvalidateVisual();
+        }
+
+        private int CalculateDragUnitOffset(Point endPoint)
+        {
+            var deltaX = endPoint.X - dragStartPoint.X;
+            var pointCount = Math.Max(1, Items?.Cast<MonthlyFlowPointViewModel>().Count() ?? 0);
+            var chartWidth = Math.Max(1, ActualWidth - ChartLeftPadding - ChartRightPadding);
+            var pixelsPerUnit = Math.Max(DragUnitMinimumPixels, chartWidth / pointCount);
+            if (Math.Abs(deltaX) < pixelsPerUnit * 0.5)
+                return 0;
+
+            return (int)Math.Round(-deltaX / pixelsPerUnit, MidpointRounding.AwayFromZero);
+        }
+
+        private double GetDragPixelOffset()
+        {
+            return isDraggingWindow ? dragCurrentPoint.X - dragStartPoint.X : 0;
+        }
+
+        private static bool IsInViewport(MonthlyFlowPointPlacement placement, double left, double chartWidth)
+        {
+            return placement.CenterX + placement.GroupWidth / 2 >= left &&
+                placement.CenterX - placement.GroupWidth / 2 <= left + chartWidth;
+        }
+
+        private bool IsPointInInteractiveArea(Point point)
+        {
+            return IsPointInDragArea(point) || IsPointInDateLabelArea(point);
+        }
+
+        private bool IsPointInDragArea(Point point)
+        {
+            var left = ChartLeftPadding;
+            var top = ChartTopPadding;
+            var right = Math.Max(left, ActualWidth - ChartRightPadding);
+            var bottom = Math.Max(top, ActualHeight - ChartBottomPadding);
+            return point.X > left && point.X < right && point.Y > top && point.Y < bottom;
+        }
+
+        private bool IsPointInDateLabelArea(Point point)
+        {
+            var left = ChartLeftPadding;
+            var right = Math.Max(left, ActualWidth - ChartRightPadding);
+            var baselineY = Math.Max(ChartTopPadding, ActualHeight - ChartBottomPadding);
+            return point.X > left && point.X < right && point.Y > baselineY && point.Y < ActualHeight;
         }
 
         private static List<MonthlyFlowSegmentViewModel> GetFlowSegments(MonthlyFlowPointViewModel point, bool useExpense)
@@ -2606,6 +3066,38 @@ namespace MyBook
                 4,
                 4);
             dc.DrawText(text, new Point(textLeft, textTop));
+        }
+
+        private static void DrawLabels(
+            DrawingContext dc,
+            List<MonthlyFlowPointPlacement> placements,
+            double left,
+            double baselineY,
+            double chartWidth,
+            MonthlyFlowPointViewModel? hoveredPoint)
+        {
+            foreach (var placement in placements)
+            {
+                if (!IsInViewport(placement, left, chartWidth))
+                    continue;
+
+                var isHovered = ReferenceEquals(placement.Point, hoveredPoint);
+                var text = CreateText(
+                    placement.Point.MonthLabel,
+                    isHovered ? 12 : 11,
+                    ParseBrush(isHovered ? "#0F766E" : "#64748B"));
+                if (isHovered)
+                {
+                    dc.DrawRoundedRectangle(
+                        new SolidColorBrush(Color.FromRgb(204, 251, 241)),
+                        null,
+                        new Rect(placement.CenterX - text.Width / 2 - 5, baselineY + 9, text.Width + 10, text.Height + 4),
+                        4,
+                        4);
+                }
+
+                dc.DrawText(text, new Point(placement.CenterX - text.Width / 2, baselineY + 12));
+            }
         }
 
         private static void DrawLegend(DrawingContext dc, double width)
@@ -2676,6 +3168,11 @@ namespace MyBook
                 _ => ParseBrush("#64748B")
             };
         }
+
+        private readonly record struct MonthlyFlowPointPlacement(
+            MonthlyFlowPointViewModel Point,
+            double CenterX,
+            double GroupWidth);
     }
 
     public class ReasonFlowChart : FrameworkElement

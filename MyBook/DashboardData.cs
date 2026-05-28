@@ -17,6 +17,7 @@ namespace MyBook
         public List<CurrencyType> MissingExchangeRateCurrencies { get; set; } = [];
         public DateTime LastMonthStart { get; set; }
         public DateTime LastMonthEnd { get; set; }
+        public DateTime MonthlyFlowStartMonth { get; set; }
     }
 
     public class AssetSummaryPoint
