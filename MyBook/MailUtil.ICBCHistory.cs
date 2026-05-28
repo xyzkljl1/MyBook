@@ -37,41 +37,22 @@ namespace MyBook
         {
             return await RunWithMailSessionScope(async () =>
             {
-                var mailbox = CreateYahooMailbox();
                 var label = $"ICBC history detail since {since:yyyy-MM-dd}";
                 var query = SearchQuery.FromContains(ICBCHistoryDetailSender)
                     .And(SearchQuery.SubjectContains(ICBCHistoryDetailSubjectKeyword))
                     .And(SearchQuery.SentSince(since.Date));
-                var uids = await UseMailFolderAsync(
-                    mailbox,
+                var messages = await SearchAttachmentMessages(
                     label,
-                    folder => RunMailOperation(token => folder.SearchAsync(query, token))).ConfigureAwait(false);
-                Console.WriteLine($"mail search {label} found {uids.Count}");
-                if (uids.Count == 0)
-                    return 0;
-
-                var summaries = await UseMailFolderAsync(
-                    mailbox,
-                    $"{label} summaries",
-                    folder => RunMailOperation(token => folder.FetchAsync(
-                        uids,
-                        MessageSummaryItems.Envelope | MessageSummaryItems.BodyStructure | MessageSummaryItems.UniqueId,
-                        token))).ConfigureAwait(false);
-                var candidates = summaries
-                    .Where(IsICBCHistoryDetailSummary)
-                    .Where(summary => SummaryHasMatchingAttachment(summary, fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)))
-                    .OrderBy(GetMessageSummaryDate)
-                    .ThenBy(summary => summary.UniqueId.Id)
-                    .ToList();
+                    query,
+                    summary => IsICBCHistoryDetailSummary(summary)
+                        && SummaryHasMatchingAttachment(summary, fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)),
+                    fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase),
+                    GetMailDateTime).ConfigureAwait(false);
 
                 var importedCount = 0;
                 var skippedUnreadableCount = 0;
-                foreach (var summary in candidates)
+                foreach (var message in messages)
                 {
-                    var message = await UseMailFolderAsync(
-                        mailbox,
-                        $"{label} uid={summary.UniqueId.Id}",
-                        folder => RunMailOperation(token => folder.GetMessageAsync(summary.UniqueId, token))).ConfigureAwait(false);
                     var parsedAttachments = ParseICBCHistoryDetailAttachments(message);
                     skippedUnreadableCount += parsedAttachments.SkippedUnreadableCount;
                     foreach (var attachment in parsedAttachments.Statements)
@@ -96,11 +77,6 @@ namespace MyBook
             return TryParseICBCHistoryDetailApplicationNo(subject, out _)
                 && summary.Envelope?.From?.Mailboxes.Any(mailbox =>
                     String.Equals(mailbox.Address, ICBCHistoryDetailSender, StringComparison.OrdinalIgnoreCase)) == true;
-        }
-
-        private static DateTime GetMessageSummaryDate(IMessageSummary summary)
-        {
-            return summary.Envelope?.Date?.LocalDateTime ?? DateTime.MinValue;
         }
 
         private List<string> SaveOpenableICBCHistoryDetailAttachments(
@@ -142,7 +118,7 @@ namespace MyBook
             return savedFiles;
         }
 
-        private ICBCHistoryDetailParsedAttachments ParseICBCHistoryDetailAttachments(MimeMessage message)
+        private ICBCHistoryDetailParsedAttachments ParseICBCHistoryDetailAttachments(MailAttachmentMessage message)
         {
             var statements = new List<ICBCHistoryDetailParsedAttachment>();
             var skippedUnreadableCount = 0;
@@ -151,7 +127,7 @@ namespace MyBook
                 if (!fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
                     return null;
 
-                var bytes = ReadMimePartBytes(attachment);
+                var bytes = attachment.Content;
                 if (!TryReadICBCHistoryDetailPdfText(bytes, out var text, out var error))
                 {
                     Console.WriteLine($"Skip encrypted/unreadable ICBC history PDF: {fileName}; {error}");

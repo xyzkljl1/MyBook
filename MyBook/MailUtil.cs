@@ -171,9 +171,26 @@ namespace MyBook
             return localTime == default ? default : localTime;
         }
 
+        private static DateTime GetMailDateTime(MailAttachmentMessage message)
+        {
+            return message.MailDateTime;
+        }
+
         private static DateTime GetMailDate(MimeMessage message)
         {
             return GetMailDateTime(message).Date;
+        }
+
+        private static DateTime GetMailDate(MailAttachmentMessage message)
+        {
+            return GetMailDateTime(message).Date;
+        }
+
+        private static DateTime GetSummaryDateTime(IMessageSummary summary)
+        {
+            return summary.Envelope?.Date?.LocalDateTime
+                ?? summary.InternalDate?.LocalDateTime
+                ?? default;
         }
 
         private static string NormalizeMailText(string text)
@@ -227,6 +244,11 @@ namespace MyBook
                 ?? "";
         }
 
+        private static string GetAttachmentFileName(BodyPartBasic attachment)
+        {
+            return attachment.FileName ?? "";
+        }
+
         private static List<TAttachment> ReadMatchingAttachments<TAttachment>(
             MimeMessage message,
             Func<MimePart, string, TAttachment?> readAttachment)
@@ -237,6 +259,22 @@ namespace MyBook
             {
                 var fileName = GetAttachmentFileName(attachment);
                 var parsed = readAttachment(attachment, fileName);
+                if (parsed is not null)
+                    result.Add(parsed);
+            }
+
+            return result;
+        }
+
+        private static List<TAttachment> ReadMatchingAttachments<TAttachment>(
+            MailAttachmentMessage message,
+            Func<MailAttachment, string, TAttachment?> readAttachment)
+            where TAttachment : class
+        {
+            var result = new List<TAttachment>();
+            foreach (var attachment in message.Attachments)
+            {
+                var parsed = readAttachment(attachment, attachment.FileName);
                 if (parsed is not null)
                     result.Add(parsed);
             }
@@ -261,17 +299,26 @@ namespace MyBook
                 return true;
 
             var hasFileName = false;
-            foreach (var part in summary.BodyParts.OfType<BodyPartBasic>())
+            foreach (var part in GetSummaryAttachmentParts(summary))
             {
-                if (String.IsNullOrWhiteSpace(part.FileName))
-                    continue;
-
                 hasFileName = true;
-                if (predicate(part.FileName))
+                if (predicate(GetAttachmentFileName(part)))
                     return true;
             }
 
             return !hasFileName;
+        }
+
+        private static IEnumerable<BodyPartBasic> GetSummaryAttachmentParts(IMessageSummary summary)
+        {
+            if (summary.Body is null)
+                yield break;
+
+            foreach (var part in summary.BodyParts.OfType<BodyPartBasic>())
+            {
+                if (!String.IsNullOrWhiteSpace(GetAttachmentFileName(part)))
+                    yield return part;
+            }
         }
 
         private static bool SummaryIsFrom(IMessageSummary summary, string sender)
@@ -333,6 +380,30 @@ namespace MyBook
             return messages;
         }
 
+        private async Task<List<MailAttachmentMessage>> SearchBillAttachments(
+            string sender,
+            string subject,
+            DateTime date,
+            Func<IMessageSummary, bool>? summaryFilter,
+            Func<string, bool> attachmentFileNameFilter)
+        {
+            var range = GetMonthRange(date);
+            var query = SearchQuery.FromContains(sender)
+                .And(SearchQuery.SubjectContains(subject))
+                .And(SearchQuery.SentSince(range.Since))
+                .And(SearchQuery.SentBefore(range.Before.AddSeconds(-1)));
+            var messages = await SearchAttachmentMessages(
+                $"{subject} {date:yyyy-MM-dd}",
+                query,
+                summaryFilter,
+                attachmentFileNameFilter,
+                GetMailDateTime).ConfigureAwait(false);
+            if (messages.Count > 1)
+                Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
+
+            return messages;
+        }
+
         private async Task<List<MimeMessage>> SearchSupplementalStatementMails(
             string label,
             string subject,
@@ -354,6 +425,29 @@ namespace MyBook
                 summary => IsSelfSentYahooSummary(summary) && (summaryFilter?.Invoke(summary) ?? true),
                 message => IsSelfSentYahooMessage(message) && (messageFilter?.Invoke(message) ?? true),
                 orderDateSelector);
+        }
+
+        private async Task<List<MailAttachmentMessage>> SearchSupplementalStatementAttachmentMails(
+            string label,
+            string subject,
+            DateTime statementMonth,
+            Func<IMessageSummary, bool>? summaryFilter,
+            Func<string, bool> attachmentFileNameFilter,
+            Func<MailAttachmentMessage, DateTime>? orderDateSelector = null)
+        {
+            if (!ShouldSearchSupplementalStatementMail(statementMonth))
+                return [];
+
+            var yahooAddress = GetConfiguredYahooAddress();
+            var query = SearchQuery.FromContains(yahooAddress)
+                .And(SearchQuery.SubjectContains(subject))
+                .And(SearchQuery.SentSince(statementMonth.Date));
+            return await SearchAttachmentMessages(
+                $"{label} supplemental from {statementMonth:yyyy-MM-dd}",
+                query,
+                summary => IsSelfSentYahooSummary(summary) && (summaryFilter?.Invoke(summary) ?? true),
+                attachmentFileNameFilter,
+                orderDateSelector).ConfigureAwait(false);
         }
 
         private static bool ShouldSearchSupplementalStatementMail(DateTime statementMonth)
@@ -468,6 +562,134 @@ namespace MyBook
             return messages
                 .OrderBy(orderDateSelector)
                 .ThenBy(message => message.Subject, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private async Task<List<MailAttachmentMessage>> SearchAttachmentMessages(
+            string label,
+            SearchQuery query,
+            Func<IMessageSummary, bool>? summaryFilter,
+            Func<string, bool> attachmentFileNameFilter,
+            Func<MailAttachmentMessage, DateTime>? orderDateSelector = null)
+        {
+            try
+            {
+                return await SearchAttachmentMessagesCore(
+                    CreateYahooMailbox(),
+                    label,
+                    query,
+                    summaryFilter,
+                    attachmentFileNameFilter,
+                    orderDateSelector).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"fetch mail attachments fail {label}: {e.Message}");
+                throw new InvalidOperationException($"Fetch mail attachments failed: {label}: {e.Message}", e);
+            }
+        }
+
+        private async Task<List<MailAttachmentMessage>> SearchAttachmentMessagesFromMailbox(
+            ImapMailbox mailbox,
+            string label,
+            SearchQuery query,
+            Func<IMessageSummary, bool>? summaryFilter,
+            Func<string, bool> attachmentFileNameFilter,
+            Func<MailAttachmentMessage, DateTime>? orderDateSelector = null)
+        {
+            try
+            {
+                return await SearchAttachmentMessagesCore(
+                    mailbox,
+                    label,
+                    query,
+                    summaryFilter,
+                    attachmentFileNameFilter,
+                    orderDateSelector).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"fetch mail attachments fail {label}: {e.Message}");
+                throw new InvalidOperationException($"Fetch mail attachments failed: {label}: {e.Message}", e);
+            }
+        }
+
+        private async Task<List<MailAttachmentMessage>> SearchAttachmentMessagesCore(
+            ImapMailbox mailbox,
+            string label,
+            SearchQuery query,
+            Func<IMessageSummary, bool>? summaryFilter,
+            Func<string, bool> attachmentFileNameFilter,
+            Func<MailAttachmentMessage, DateTime>? orderDateSelector)
+        {
+            var uids = await UseMailFolderAsync(
+                mailbox,
+                label,
+                folder => RunMailOperation(token => folder.SearchAsync(query, token))).ConfigureAwait(false);
+            Console.WriteLine($"mail search {label} found {uids.Count}");
+            if (uids.Count == 0)
+                return [];
+
+            var summaries = await UseMailFolderAsync(
+                mailbox,
+                $"{label} summaries",
+                folder => RunMailOperation(token => folder.FetchAsync(
+                    uids,
+                    MessageSummaryItems.Envelope
+                        | MessageSummaryItems.BodyStructure
+                        | MessageSummaryItems.UniqueId
+                        | MessageSummaryItems.InternalDate,
+                    token))).ConfigureAwait(false);
+            var filteredSummaries = summaries
+                .Where(summary => summaryFilter?.Invoke(summary) ?? true)
+                .ToList();
+            if (summaryFilter is not null)
+                Console.WriteLine($"mail summary filter {label} kept {filteredSummaries.Count}/{summaries.Count}");
+
+            var attachmentMessages = new List<MailAttachmentMessage>();
+            foreach (var summary in filteredSummaries)
+            {
+                var matchingParts = GetSummaryAttachmentParts(summary)
+                    .Where(part => attachmentFileNameFilter(GetAttachmentFileName(part)))
+                    .ToList();
+                if (matchingParts.Count == 0)
+                    continue;
+
+                var attachments = new List<MailAttachment>();
+                foreach (var part in matchingParts)
+                {
+                    var entity = await UseMailFolderAsync(
+                        mailbox,
+                        $"{label} uid={summary.UniqueId.Id} attachment={GetAttachmentFileName(part)}",
+                        folder => RunMailOperation(token => folder.GetBodyPartAsync(summary.UniqueId, part, token))).ConfigureAwait(false);
+                    if (entity is not MimePart mimePart)
+                        continue;
+
+                    var fileName = GetAttachmentFileName(mimePart);
+                    if (String.IsNullOrWhiteSpace(fileName))
+                        fileName = GetAttachmentFileName(part);
+                    if (!attachmentFileNameFilter(fileName))
+                        continue;
+
+                    attachments.Add(new MailAttachment(fileName, ReadMimePartBytes(mimePart)));
+                }
+
+                if (attachments.Count == 0)
+                    continue;
+
+                attachmentMessages.Add(new MailAttachmentMessage(
+                    summary.UniqueId.Id,
+                    summary.Envelope?.Subject ?? "",
+                    GetSummaryDateTime(summary),
+                    attachments));
+            }
+
+            Console.WriteLine($"mail attachment filter {label} kept {attachmentMessages.Count}/{filteredSummaries.Count}");
+            orderDateSelector ??= GetMailDateTime;
+            return attachmentMessages
+                .OrderBy(orderDateSelector)
+                .ThenBy(message => message.Subject, StringComparer.Ordinal)
+                .ThenBy(message => message.UniqueId)
                 .ToList();
         }
 
@@ -716,5 +938,13 @@ namespace MyBook
             public ImapClient? Client { get; set; }
             public IMailFolder? Folder { get; set; }
         }
+
+        private sealed record MailAttachmentMessage(
+            uint UniqueId,
+            string Subject,
+            DateTime MailDateTime,
+            IReadOnlyList<MailAttachment> Attachments);
+
+        private sealed record MailAttachment(string FileName, byte[] Content);
     }
 }

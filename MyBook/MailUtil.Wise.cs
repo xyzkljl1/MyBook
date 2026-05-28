@@ -108,16 +108,16 @@ namespace MyBook
             return true;
         }
 
-        private async Task<List<MimeMessage>> SearchWiseStatementMails(DateTime statementMonth)
+        private async Task<List<MailAttachmentMessage>> SearchWiseStatementMails(DateTime statementMonth)
         {
             var query = SearchQuery.FromContains(WiseMailSender)
                 .And(SearchQuery.SentSince(statementMonth.Date))
                 .And(SearchQuery.SentBefore(statementMonth.AddMonths(2).Date));
-            return await SearchMessages(
+            return await SearchAttachmentMessages(
                 $"Wise XML statement {statementMonth:yyyy-MM}",
                 query,
                 IsWiseStatementSummary,
-                IsWiseStatementMail,
+                IsWiseXmlStatementAttachment,
                 GetMailDateTime);
         }
 
@@ -127,26 +127,20 @@ namespace MyBook
                 && SummaryHasMatchingAttachment(summary, IsWiseXmlStatementAttachment);
         }
 
-        private static bool IsWiseStatementMail(MimeMessage message)
-        {
-            return IsFrom(message, WiseMailSender)
-                && HasMatchingAttachment(message, (_, fileName) => IsWiseXmlStatementAttachment(fileName));
-        }
-
         private static bool IsWiseXmlStatementAttachment(string fileName)
         {
             return fileName.StartsWith("statement_", StringComparison.OrdinalIgnoreCase)
                 && Path.GetExtension(fileName).Equals(".xml", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static List<InMemoryWiseStatementAttachment> ReadWiseStatementAttachments(MimeMessage message)
+        private static List<InMemoryWiseStatementAttachment> ReadWiseStatementAttachments(MailAttachmentMessage message)
         {
             return ReadMatchingAttachments(message, (attachment, fileName) =>
                 IsWiseXmlStatementAttachment(fileName)
                     ? new InMemoryWiseStatementAttachment(
                         fileName,
                         GetMailDate(message),
-                        ReadMimePartBytes(attachment))
+                        attachment.Content)
                     : null);
         }
 

@@ -46,7 +46,7 @@ namespace MyBook
             return true;
         }
 
-        private void ImportOCBCStatement(DateTime statementMonth, MimeMessage message)
+        private void ImportOCBCStatement(DateTime statementMonth, MailAttachmentMessage message)
         {
             var accounts = GetOCBCStatementAccounts();
             var attachment = ReadOCBCStatementPdfAttachment(message);
@@ -72,16 +72,16 @@ namespace MyBook
                 : $"Skip imported OCBC statement {parsed.StatementKey}");
         }
 
-        private async Task<MimeMessage?> SearchOCBCStatementMail(DateTime statementMonth, string subject)
+        private async Task<MailAttachmentMessage?> SearchOCBCStatementMail(DateTime statementMonth, string subject)
         {
             var query = SearchQuery.FromContains(OCBCMailSender)
                 .And(SearchQuery.SentSince(statementMonth.Date))
                 .And(SearchQuery.SentBefore(statementMonth.AddMonths(2).Date));
-            var messages = await SearchMessages(
+            var messages = await SearchAttachmentMessages(
                 $"OCBC statement {statementMonth:yyyy-MM}",
                 query,
                 summary => IsOCBCStatementSummary(summary, statementMonth),
-                message => IsOCBCStatementMail(message, statementMonth),
+                fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase),
                 GetMailDateTime);
             var message = messages.FirstOrDefault();
             if (message is not null)
@@ -90,14 +90,14 @@ namespace MyBook
             return await SearchSupplementalOCBCStatementMail(statementMonth, subject);
         }
 
-        private async Task<MimeMessage?> SearchSupplementalOCBCStatementMail(DateTime statementMonth, string subject)
+        private async Task<MailAttachmentMessage?> SearchSupplementalOCBCStatementMail(DateTime statementMonth, string subject)
         {
-            var messages = await SearchSupplementalStatementMails(
+            var messages = await SearchSupplementalStatementAttachmentMails(
                 $"OCBC statement {statementMonth:yyyy-MM}",
                 subject,
                 statementMonth,
-                message => IsOCBCStatementContent(message, statementMonth),
                 summary => IsOCBCStatementContentSummary(summary, statementMonth),
+                fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase),
                 GetMailDateTime);
             if (messages.Count > 0)
                 Console.WriteLine($"Find supplemental OCBC statement {statementMonth:yyyy-MM} from self-sent mail");
@@ -105,27 +105,10 @@ namespace MyBook
             return messages.FirstOrDefault();
         }
 
-        private static bool IsOCBCStatementMail(MimeMessage message, DateTime statementMonth)
-        {
-            if (!IsFrom(message, OCBCMailSender))
-                return false;
-
-            return IsOCBCStatementContent(message, statementMonth);
-        }
-
         private static bool IsOCBCStatementSummary(IMessageSummary summary, DateTime statementMonth)
         {
             return SummaryIsFrom(summary, OCBCMailSender)
                 && IsOCBCStatementContentSummary(summary, statementMonth);
-        }
-
-        private static bool IsOCBCStatementContent(MimeMessage message, DateTime statementMonth)
-        {
-            if (!TryParseOCBCStatementSubjectMonth(message.Subject ?? "", out var subjectMonth))
-                return false;
-
-            return subjectMonth == FirstDayOfMonth(statementMonth)
-                && HasMatchingAttachment(message, (_, fileName) => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
         }
 
         private static bool IsOCBCStatementContentSummary(IMessageSummary summary, DateTime statementMonth)
@@ -180,11 +163,11 @@ namespace MyBook
             return accounts;
         }
 
-        private byte[] ReadOCBCStatementPdfAttachment(MimeMessage message)
+        private byte[] ReadOCBCStatementPdfAttachment(MailAttachmentMessage message)
         {
             var pdfAttachments = ReadMatchingAttachments(message, (attachment, fileName) =>
                 fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
-                    ? ReadMimePartBytes(attachment)
+                    ? attachment.Content
                     : null);
             if (pdfAttachments.Count != 1)
                 throw new MailParseException($"OCBC statement mail should contain exactly one PDF attachment: {message.Subject}");

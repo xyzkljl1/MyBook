@@ -112,7 +112,7 @@ During scheduled fetches:
 - ICBC monthly bills, Wise reports, OCBC statements, and Nexus DP monthly reports are checked only when the latest import is more than 27 days old.
 - ICBC historical-detail attachments are checked only when the latest history-detail import or scheduled empty-import checkpoint is more than 90 days old. Each scheduled scan searches the last 5 months and writes a `scheduled-empty-import-yyyyMMdd` checkpoint even if no statement is imported, so empty scans are not retried every day.
 - Mail fetches share Yahoo/Gmail IMAP sessions within each fetch cycle or standalone mail import and reconnect once after connection-level failures.
-- Attachment-based mail imports first filter IMAP summaries and body structures, then download only candidate full messages.
+- Attachment-based mail imports first filter IMAP summaries and body structures, then download only matching attachment body parts instead of full messages.
 - Exchange rates are refreshed every cycle.
 - A daily snapshot is created after the fetch cycle.
 

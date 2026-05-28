@@ -298,15 +298,14 @@ namespace MyBook
         {
             var subjectDate = date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
             var expectedSubject = $"{subjectDate}的自定义活动报表";
-            var messages = await SearchBills(
+            var messages = await SearchBillAttachments(
                 IBKRReportSender,
                 expectedSubject,
                 date,
                 summary => SummarySubjectEquals(summary, expectedSubject)
                     && SummaryIsFrom(summary, IBKRReportSender)
                     && HasIBKRReportAttachment(summary, date),
-                message => String.Equals(message.Subject?.Trim(), expectedSubject, StringComparison.Ordinal)
-                    && HasIBKRReportAttachment(message, date));
+                fileName => IsIBKRReportAttachment(fileName, date));
 
             if (messages.Count == 0)
             {
@@ -3225,7 +3224,7 @@ namespace MyBook
         }
 
         private static List<InMemoryIBKRReportAttachment> ReadIBKRReportAttachments(
-            MimeMessage message,
+            MailAttachmentMessage message,
             DateTime reportDate)
         {
             return ReadMatchingAttachments(message, (attachment, fileName) =>
@@ -3241,30 +3240,21 @@ namespace MyBook
                     attachmentInfo.ReportType,
                     attachmentInfo.ReportId,
                     attachmentInfo.ReportDate,
-                    ReadMimePartBytes(attachment));
+                    attachment.Content);
             });
         }
 
-        private static bool HasIBKRReportAttachment(MimeMessage message, DateTime reportDate)
+        private static bool IsIBKRReportAttachment(string fileName, DateTime reportDate)
         {
-            return HasMatchingAttachment(message, (_, fileName) =>
-            {
-                return TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
-                    && IsDailyMyBookReportType(attachmentInfo.ReportType)
-                    && attachmentInfo.ReportDate.Date == reportDate.Date
-                    && IsIBKRCsvAttachment(fileName);
-            });
+            return TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
+                && IsDailyMyBookReportType(attachmentInfo.ReportType)
+                && attachmentInfo.ReportDate.Date == reportDate.Date
+                && IsIBKRCsvAttachment(fileName);
         }
 
         private static bool HasIBKRReportAttachment(IMessageSummary summary, DateTime reportDate)
         {
-            return SummaryHasMatchingAttachment(summary, fileName =>
-            {
-                return TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
-                    && IsDailyMyBookReportType(attachmentInfo.ReportType)
-                    && attachmentInfo.ReportDate.Date == reportDate.Date
-                    && IsIBKRCsvAttachment(fileName);
-            });
+            return SummaryHasMatchingAttachment(summary, fileName => IsIBKRReportAttachment(fileName, reportDate));
         }
 
         private static bool IsDailyMyBookReportType(string reportType)
