@@ -1448,9 +1448,7 @@ namespace MyBook
                 return;
 
             var skipDays = expenseAllocationSkipDays.Value;
-            if (skipDays == 0)
-                throw new InvalidOperationException("Expense allocation skip days cannot be 0. Leave it empty to use the default allocation period.");
-            if (Math.Sign(expenseAllocationDays) != Math.Sign(skipDays))
+            if (skipDays != 0 && Math.Sign(expenseAllocationDays) != Math.Sign(skipDays))
                 throw new InvalidOperationException("Expense allocation days and skip days must have the same sign.");
             if (Math.Abs(skipDays) >= Math.Abs(expenseAllocationDays))
                 throw new InvalidOperationException("Expense allocation skip days absolute value must be smaller than expense allocation days absolute value.");
@@ -2562,7 +2560,20 @@ namespace MyBook
 
         private static ExpenseAllocationSetting? TryGetAutomaticExpenseAllocation(StatementImportProvider provider, Record record)
         {
+            if (String.Equals(record.Reason, "水电网", StringComparison.Ordinal))
+                return GetPreviousMonthExpenseAllocation(record);
+
             return null;
+        }
+
+        private static ExpenseAllocationSetting GetPreviousMonthExpenseAllocation(Record record)
+        {
+            var recordDate = record.date.Date;
+            var thisMonthStart = new DateTime(recordDate.Year, recordDate.Month, 1);
+            var previousMonthStart = thisMonthStart.AddMonths(-1);
+            return new ExpenseAllocationSetting(
+                (previousMonthStart - recordDate).Days,
+                (thisMonthStart - recordDate).Days);
         }
 
         private readonly record struct ExpenseAllocationSetting(int Days, int? SkipDays);

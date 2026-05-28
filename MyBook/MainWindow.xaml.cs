@@ -1294,7 +1294,7 @@ namespace MyBook
 
         public static TotalAssetsViewModel From(decimal value)
         {
-            var text = MoneyText.From(value, "¥ ");
+            var text = MoneyText.FromWan(value, "¥ ");
             return new TotalAssetsViewModel
             {
                 ValueText = text.DisplayText,
@@ -1306,6 +1306,7 @@ namespace MyBook
     public readonly record struct MoneyText(string DisplayText, string ExactText)
     {
         private const decimal AbbreviationThreshold = 100000m;
+        private const decimal WanAbbreviationThreshold = 10000m;
 
         public string ExactTextOrDisplay => String.IsNullOrWhiteSpace(ExactText) ? DisplayText : ExactText;
 
@@ -1319,6 +1320,19 @@ namespace MyBook
 
             var abbreviated = $"{sign}{prefix}{Math.Round(absoluteValue / 1000, 0):0}k";
             return new MoneyText(abbreviated, exact);
+        }
+
+        public static MoneyText FromWan(decimal value, string prefix = "")
+        {
+            var sign = value < 0 ? "-" : "";
+            var absoluteValue = Math.Abs(value);
+            var exact = $"{sign}{prefix}{FormatAmount(absoluteValue)}";
+            if (absoluteValue < WanAbbreviationThreshold)
+                return new MoneyText(exact, "");
+
+            var abbreviatedValue = Decimal.Round(absoluteValue / WanAbbreviationThreshold, 2, MidpointRounding.ToEven);
+            var abbreviatedText = $"{sign}{prefix}{FormatAmount(abbreviatedValue)}万";
+            return new MoneyText(abbreviatedText, abbreviatedText == exact ? "" : exact);
         }
 
         public static string FormatAmount(decimal value)
