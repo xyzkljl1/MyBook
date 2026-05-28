@@ -104,14 +104,10 @@ namespace MyBook
             const string query = """
                 query NexusDpMonthlySummary($accountId: Int!) {
                   userMonthlySummary(accountId: $accountId) {
-                    userId
                     entries {
                       year
                       month
                       value
-                      modValue
-                      modCount
-                      reportType
                     }
                   }
                 }
@@ -125,7 +121,7 @@ namespace MyBook
                 .ToList() ?? [];
             return new NexusDpMonthlySummary(
                 resolvedAccountId,
-                summary["userId"]?.Value<int>() ?? resolvedAccountId,
+                resolvedAccountId,
                 entries);
         }
 
@@ -139,9 +135,53 @@ namespace MyBook
                 return;
 
             var accountId = await ResolveNexusAccountId(null);
+            NexusDpMonthlySummary? summary = null;
+            try
+            {
+                summary = await FetchNexusDpMonthlySummary(accountId).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                Console.WriteLine($"Fetch Nexus DP monthly summary failed, falling back to monthly reports: {exception.Message}");
+            }
+
             var savedCount = 0;
             var skippedCount = 0;
-            for (var month = firstMonth; month <= lastMonth; month = month.AddMonths(1))
+            var fallbackMonths = new List<DateTime>();
+            if (summary is not null)
+            {
+                var summaryDpByMonth = summary.Entries
+                    .GroupBy(entry => new DateTime(entry.Year, entry.Month, 1))
+                    .ToDictionary(group => group.Key, group => group.Sum(entry => entry.Value));
+
+                for (var month = firstMonth; month <= lastMonth; month = month.AddMonths(1))
+                {
+                    var statementDate = LastDayOfMonth(month);
+                    var statementKey = BuildNexusDpStatementKey(account, month);
+                    if (db.IsStatementImported(NexusDpProvider, statementDate, statementKey))
+                    {
+                        skippedCount++;
+                        continue;
+                    }
+
+                    if (summaryDpByMonth.TryGetValue(month, out var totalDp))
+                    {
+                        if (SaveNexusDpMonthlyReport(db, account, month.Year, month.Month, totalDp))
+                            savedCount++;
+                        else
+                            skippedCount++;
+                    }
+                    else
+                    {
+                        fallbackMonths.Add(month);
+                    }
+                }
+            }
+
+            var monthlyReportMonths = summary is null
+                ? EnumerateMonths(firstMonth, lastMonth).ToList()
+                : fallbackMonths;
+            foreach (var month in monthlyReportMonths)
             {
                 var statementDate = LastDayOfMonth(month);
                 var statementKey = BuildNexusDpStatementKey(account, month);
@@ -151,22 +191,27 @@ namespace MyBook
                     continue;
                 }
 
-                var report = await FetchNexusDpMonthlyReport(month.Year, month.Month, accountId);
+                var report = await FetchNexusDpMonthlyReport(month.Year, month.Month, accountId).ConfigureAwait(false);
                 if (SaveNexusDpMonthlyReport(db, account, report))
                     savedCount++;
                 else
                     skippedCount++;
             }
 
-            Console.WriteLine($"Fetch Nexus DP monthly reports done: saved={savedCount}, skipped={skippedCount}");
+            Console.WriteLine($"Fetch Nexus DP monthly reports done: saved={savedCount}, skipped={skippedCount}, summary={(summary is null ? "failed" : "used")}, monthlyReports={monthlyReportMonths.Count}");
         }
 
         private bool SaveNexusDpMonthlyReport(DatabaseUtil db, Account account, NexusDpMonthlyReport report)
         {
-            var statementMonth = new DateTime(report.Year, report.Month, 1);
+            return SaveNexusDpMonthlyReport(db, account, report.Year, report.Month, report.TotalDp);
+        }
+
+        private bool SaveNexusDpMonthlyReport(DatabaseUtil db, Account account, int year, int month, int totalDp)
+        {
+            var statementMonth = new DateTime(year, month, 1);
             var statementDate = LastDayOfMonth(statementMonth);
             var statementKey = BuildNexusDpStatementKey(account, statementMonth);
-            var usdIncome = report.TotalDp / NexusDpPerUsd;
+            var usdIncome = totalDp / NexusDpPerUsd;
             var beginningBalance = db.GetAccountBalance(account, CurrencyType.USD);
             var endingBalance = new Currency(beginningBalance.v + usdIncome, CurrencyType.USD);
             var records = usdIncome == 0
@@ -180,7 +225,7 @@ namespace MyBook
                         date = statementDate,
                         updateTime = DateTime.Now,
                         DestAccount = "Donation Points",
-                        Source = $"NexusDpMonthlyReport/{report.Year:D4}-{report.Month:D2}/{report.TotalDp}DP",
+                        Source = $"NexusDpMonthlyReport/{year:D4}-{month:D2}/{totalDp}DP",
                         Reason = "创作收入"
                     }
                 ];
@@ -237,6 +282,12 @@ namespace MyBook
             return new DateTime(month.Year, month.Month, DateTime.DaysInMonth(month.Year, month.Month));
         }
 
+        private static IEnumerable<DateTime> EnumerateMonths(DateTime firstMonth, DateTime lastMonth)
+        {
+            for (var month = firstMonth; month <= lastMonth; month = month.AddMonths(1))
+                yield return month;
+        }
+
         private static NexusDpMonthlyReportEntry ParseNexusDpMonthlyReportEntry(JToken token, int expectedYear, int expectedMonth)
         {
             var year = token["year"]?.Value<int>()
@@ -257,11 +308,16 @@ namespace MyBook
 
         private static NexusDpMonthlySummaryEntry ParseNexusDpMonthlySummaryEntry(JToken token)
         {
+            var year = token["year"]?.Value<int>()
+                ?? throw new InvalidOperationException($"Nexus monthly summary year is missing: {token}");
+            var month = token["month"]?.Value<int>()
+                ?? throw new InvalidOperationException($"Nexus monthly summary month is missing: {token}");
+            if (month is < 1 or > 12)
+                throw new InvalidOperationException($"Nexus monthly summary month is invalid: {token}");
+
             return new NexusDpMonthlySummaryEntry(
-                token["year"]?.Value<int>()
-                    ?? throw new InvalidOperationException($"Nexus monthly summary year is missing: {token}"),
-                token["month"]?.Value<int>()
-                    ?? throw new InvalidOperationException($"Nexus monthly summary month is missing: {token}"),
+                year,
+                month,
                 token["value"]?.Value<int>() ?? 0,
                 token["modValue"]?.Value<int>() ?? 0,
                 token["modCount"]?.Value<int>() ?? 0,

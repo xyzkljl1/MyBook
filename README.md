@@ -41,7 +41,7 @@ Expected files:
 - `MailUtil.Wise` imports local initial Wise XML statements from `initialReports` when the Wise account has no history, then fetches monthly Wise XML statements from mailbox attachments and imports per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers.
 - `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines; if an old month is missing, it can also import a self-sent supplemental statement mail with the original subject and PDF attachment.
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
-- `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly reports through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
+- `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly summaries through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
 - `FileUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
 - `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
 - `WebUtil.Meituan.TODO` will fetch Meituan account balance information.
@@ -115,6 +115,7 @@ During scheduled fetches:
 - ICBC historical-detail attachments are checked only when the latest history-detail import or scheduled empty-import checkpoint is more than 90 days old. Each scheduled scan searches the last 5 months and writes a `scheduled-empty-import-yyyyMMdd` checkpoint even if no statement is imported, so empty scans are not retried every day.
 - Mail fetches share Yahoo/Gmail IMAP sessions within each fetch cycle or standalone mail import, use the configured `mail_proxy` when set, and reconnect once after connection-level failures.
 - Public web market-data fetches use the configured `pubweb_proxy` when set; exchange-rate pages are requested concurrently and saved after all requests finish.
+- Nexus DP imports use the monthly summary API first and fall back to per-month reports only for missing months or summary failures.
 - IBKR, Wise, and OCBC attachment imports search the missing date/month range in batches, then group downloaded attachments by statement date or month.
 - Attachment-based mail imports first filter IMAP summaries and body structures, then download only matching attachment body parts instead of full messages.
 - Exchange rates are refreshed every cycle.
