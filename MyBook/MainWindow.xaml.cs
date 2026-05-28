@@ -1369,8 +1369,7 @@ namespace MyBook
                 })
                 .Where(segment => segment is not null)
                 .Select(segment => segment!)
-                .OrderByDescending(segment => segment.RmbAmount ?? 0)
-                .ThenBy(segment => segment.Reason)
+                .OrderBy(segment => segment.Reason, StringComparer.Ordinal)
                 .ThenBy(segment => segment.Currency)
                 .ToList();
             var total = Currency.RoundMoney(segments.Sum(segment => segment.RmbAmount ?? 0));
