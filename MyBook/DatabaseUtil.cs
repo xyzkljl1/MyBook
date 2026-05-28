@@ -1170,8 +1170,8 @@ namespace MyBook
             }
 
             var records = query.ToList()
-                .OrderBy(record => record.date)
-                .ThenBy(record => record.Id)
+                .OrderByDescending(record => record.date)
+                .ThenByDescending(record => record.Id)
                 .ToList();
             var accounts = db.Queryable<Account>()
                 .ToList()
