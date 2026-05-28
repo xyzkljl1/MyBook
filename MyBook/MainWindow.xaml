@@ -482,8 +482,11 @@
                         </StackPanel>
                     </DockPanel>
                     <Border Grid.Row="1" Style="{StaticResource Card}" Padding="12" Margin="0,0,0,12">
-                        <local:AllocatedExpenseChart Items="{Binding AllocatedExpenseBuckets}"
+                        <local:AllocatedExpenseChart Items="{Binding LoadedAllocatedExpenseBuckets}"
                                                      IsLineChart="{Binding ShowAllocatedExpenseLineChart}"
+                                                     IsMonthly="{Binding ShowAllocatedExpenseMonthly}"
+                                                     VisibleStartDate="{Binding AllocatedExpenseStartDate}"
+                                                     VisibleEndDate="{Binding AllocatedExpenseEndDate}"
                                                      WindowShiftRequested="AllocatedExpenseChart_WindowShiftRequested"
                                                      Cursor="SizeWE"/>
                     </Border>
