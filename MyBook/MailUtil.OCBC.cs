@@ -20,13 +20,14 @@ namespace MyBook
         private const StatementImportProvider OCBCProvider = StatementImportProvider.OCBCStatementMail;
         private const string OCBCMailSender = "documents@ocbc.com";
         private const string OCBCAccountType = "OCBC";
+        private const string OCBCStatementSubjectKeyword = "OCBC:";
         private const string OCBCStatementPasswordConfigKey = "ocbc_statement_passwords";
         private static readonly Regex OCBCStatementSubjectRegex = new(
             @"^OCBC:\s*Your Combined e-Statement for (?<month>[A-Za-z]{3})\s+(?<year>\d{4})(?:\s+is attached)?\s*$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         public async Task FetchOCBCReports()
         {
-            await FetchMonthlyStatements(OCBCProvider, "OCBC statement", FetchOCBCReport);
+            await RunWithMailSessionScope(FetchOCBCReportsBatch).ConfigureAwait(false);
         }
 
         public async Task FetchOCBCReports(DateTime date)
@@ -44,6 +45,75 @@ namespace MyBook
 
             ImportOCBCStatement(statementMonth, message);
             return true;
+        }
+
+        private async Task FetchOCBCReportsBatch()
+        {
+            var startMonth = GetNextMonthlyStatementDate(OCBCProvider);
+            var currentMonth = FirstDayOfMonth(DateTime.Today);
+            if (startMonth > currentMonth)
+                return;
+
+            var officialMessages = await SearchOCBCStatementMails(startMonth, currentMonth).ConfigureAwait(false);
+            var officialByMonth = GroupOCBCStatementMessagesByMonth(officialMessages);
+            var supplementalByMonth = new Dictionary<DateTime, List<MailAttachmentMessage>>();
+            var supplementalStartMonth = EnumerateMonths(startMonth, currentMonth)
+                .FirstOrDefault(ShouldSearchSupplementalStatementMail);
+            if (supplementalStartMonth != default)
+            {
+                var supplementalMessages = await SearchSupplementalOCBCStatementMails(supplementalStartMonth, currentMonth).ConfigureAwait(false);
+                supplementalByMonth = GroupOCBCStatementMessagesByMonth(supplementalMessages);
+            }
+
+            var month = startMonth;
+            while (month <= currentMonth)
+            {
+                var messages = officialByMonth.TryGetValue(month, out var officialMonthMessages) && officialMonthMessages.Count > 0
+                    ? officialMonthMessages
+                    : supplementalByMonth.TryGetValue(month, out var supplementalMonthMessages)
+                        ? supplementalMonthMessages
+                        : [];
+                if (messages.Count == 0)
+                {
+                    if (DateTime.Today >= month.AddMonths(1))
+                        throw new InvalidOperationException($"Missing OCBC statement for {month:yyyy-MM}");
+                    return;
+                }
+
+                ImportOCBCStatement(month, messages[0]);
+                month = month.AddMonths(1);
+            }
+        }
+
+        private static IEnumerable<DateTime> EnumerateMonths(DateTime startMonth, DateTime endMonth)
+        {
+            var month = FirstDayOfMonth(startMonth);
+            var end = FirstDayOfMonth(endMonth);
+            while (month <= end)
+            {
+                yield return month;
+                month = month.AddMonths(1);
+            }
+        }
+
+        private static Dictionary<DateTime, List<MailAttachmentMessage>> GroupOCBCStatementMessagesByMonth(IEnumerable<MailAttachmentMessage> messages)
+        {
+            return messages
+                .Select(message => new
+                {
+                    Message = message,
+                    HasMonth = TryParseOCBCStatementSubjectMonth(message.Subject, out var month),
+                    Month = month
+                })
+                .Where(item => item.HasMonth)
+                .GroupBy(item => FirstDayOfMonth(item.Month))
+                .ToDictionary(
+                    group => group.Key,
+                    group => group
+                        .Select(item => item.Message)
+                        .OrderBy(GetMailDateTime)
+                        .ThenBy(message => message.UniqueId)
+                        .ToList());
         }
 
         private void ImportOCBCStatement(DateTime statementMonth, MailAttachmentMessage message)
@@ -90,6 +160,20 @@ namespace MyBook
             return await SearchSupplementalOCBCStatementMail(statementMonth, subject);
         }
 
+        private async Task<List<MailAttachmentMessage>> SearchOCBCStatementMails(DateTime startMonth, DateTime endMonth)
+        {
+            var query = SearchQuery.FromContains(OCBCMailSender)
+                .And(SearchQuery.SubjectContains(OCBCStatementSubjectKeyword))
+                .And(SearchQuery.SentSince(startMonth.Date))
+                .And(SearchQuery.SentBefore(endMonth.AddMonths(2).Date));
+            return await SearchAttachmentMessages(
+                $"OCBC statement {startMonth:yyyy-MM}..{endMonth:yyyy-MM}",
+                query,
+                summary => IsOCBCStatementSummary(summary, startMonth, endMonth),
+                fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase),
+                GetMailDateTime).ConfigureAwait(false);
+        }
+
         private async Task<MailAttachmentMessage?> SearchSupplementalOCBCStatementMail(DateTime statementMonth, string subject)
         {
             var messages = await SearchSupplementalStatementAttachmentMails(
@@ -105,10 +189,30 @@ namespace MyBook
             return messages.FirstOrDefault();
         }
 
+        private async Task<List<MailAttachmentMessage>> SearchSupplementalOCBCStatementMails(DateTime startMonth, DateTime endMonth)
+        {
+            var yahooAddress = GetConfiguredYahooAddress();
+            var query = SearchQuery.FromContains(yahooAddress)
+                .And(SearchQuery.SubjectContains(OCBCStatementSubjectKeyword))
+                .And(SearchQuery.SentSince(startMonth.Date));
+            return await SearchAttachmentMessages(
+                $"OCBC statement supplemental {startMonth:yyyy-MM}..{endMonth:yyyy-MM}",
+                query,
+                summary => IsSelfSentYahooSummary(summary) && IsOCBCStatementContentSummary(summary, startMonth, endMonth),
+                fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase),
+                GetMailDateTime).ConfigureAwait(false);
+        }
+
         private static bool IsOCBCStatementSummary(IMessageSummary summary, DateTime statementMonth)
         {
             return SummaryIsFrom(summary, OCBCMailSender)
                 && IsOCBCStatementContentSummary(summary, statementMonth);
+        }
+
+        private static bool IsOCBCStatementSummary(IMessageSummary summary, DateTime startMonth, DateTime endMonth)
+        {
+            return SummaryIsFrom(summary, OCBCMailSender)
+                && IsOCBCStatementContentSummary(summary, startMonth, endMonth);
         }
 
         private static bool IsOCBCStatementContentSummary(IMessageSummary summary, DateTime statementMonth)
@@ -120,6 +224,20 @@ namespace MyBook
                 return false;
 
             return subjectMonth == FirstDayOfMonth(statementMonth)
+                && SummaryHasMatchingAttachment(summary, fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool IsOCBCStatementContentSummary(IMessageSummary summary, DateTime startMonth, DateTime endMonth)
+        {
+            var subject = summary.Envelope?.Subject;
+            if (String.IsNullOrWhiteSpace(subject))
+                return true;
+            if (!TryParseOCBCStatementSubjectMonth(subject, out var subjectMonth))
+                return false;
+
+            var statementMonth = FirstDayOfMonth(subjectMonth);
+            return statementMonth >= FirstDayOfMonth(startMonth)
+                && statementMonth <= FirstDayOfMonth(endMonth)
                 && SummaryHasMatchingAttachment(summary, fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
         }
 

@@ -42,7 +42,7 @@ namespace MyBook
         public async Task FetchWiseReports()
         {
             ImportWiseInitialReportsIfNeeded();
-            await FetchMonthlyStatements(WiseProvider, "Wise statement", FetchWiseReport);
+            await RunWithMailSessionScope(FetchWiseReportsBatch).ConfigureAwait(false);
         }
 
         public async Task FetchWiseReports(DateTime date)
@@ -108,6 +108,50 @@ namespace MyBook
             return true;
         }
 
+        private async Task FetchWiseReportsBatch()
+        {
+            var startMonth = GetNextMonthlyStatementDate(WiseProvider);
+            var currentMonth = FirstDayOfMonth(DateTime.Today);
+            if (startMonth > currentMonth)
+                return;
+
+            var messages = await SearchWiseStatementMails(startMonth, currentMonth).ConfigureAwait(false);
+            var attachments = messages
+                .SelectMany(ReadWiseStatementAttachments)
+                .ToList();
+            var statementsByMonth = attachments.Count == 0
+                ? new Dictionary<DateTime, List<WiseParsedStatement>>()
+                : ParseWiseStatementAttachments(attachments)
+                    .Where(statement =>
+                        FirstDayOfMonth(statement.StatementEndDate) >= startMonth
+                        && FirstDayOfMonth(statement.StatementEndDate) <= currentMonth)
+                    .GroupBy(statement => FirstDayOfMonth(statement.StatementEndDate))
+                    .ToDictionary(
+                        group => group.Key,
+                        group => group
+                            .OrderBy(statement => statement.StatementEndDate)
+                            .ThenBy(statement => statement.StatementKey, StringComparer.Ordinal)
+                            .ToList());
+
+            var month = startMonth;
+            while (month <= currentMonth)
+            {
+                if (!statementsByMonth.TryGetValue(month, out var statements) || statements.Count == 0)
+                {
+                    if (DateTime.Today >= month.AddMonths(1))
+                        throw new InvalidOperationException($"Missing Wise statement for {month:yyyy-MM}");
+                    return;
+                }
+
+                if (statements.Count > 1)
+                    throw new MailParseException($"Found multiple Wise XML statements for {month:yyyy-MM}");
+
+                var saved = SaveWiseParsedStatement(statements[0]);
+                PrintWiseParsedStatementSummary($"Wise XML {month:yyyy-MM}", statements[0], saved);
+                month = month.AddMonths(1);
+            }
+        }
+
         private async Task<List<MailAttachmentMessage>> SearchWiseStatementMails(DateTime statementMonth)
         {
             var query = SearchQuery.FromContains(WiseMailSender)
@@ -119,6 +163,19 @@ namespace MyBook
                 IsWiseStatementSummary,
                 IsWiseXmlStatementAttachment,
                 GetMailDateTime);
+        }
+
+        private async Task<List<MailAttachmentMessage>> SearchWiseStatementMails(DateTime startMonth, DateTime endMonth)
+        {
+            var query = SearchQuery.FromContains(WiseMailSender)
+                .And(SearchQuery.SentSince(startMonth.Date))
+                .And(SearchQuery.SentBefore(endMonth.AddMonths(2).Date));
+            return await SearchAttachmentMessages(
+                $"Wise XML statement {startMonth:yyyy-MM}..{endMonth:yyyy-MM}",
+                query,
+                IsWiseStatementSummary,
+                IsWiseXmlStatementAttachment,
+                GetMailDateTime).ConfigureAwait(false);
         }
 
         private static bool IsWiseStatementSummary(IMessageSummary summary)
