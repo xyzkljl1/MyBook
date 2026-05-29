@@ -864,7 +864,8 @@ namespace MyBook
             var quantityChangeTotals = ParseIBKRPositionQuantityChangeRecords(report, builder, baseCurrency, contractInfos, tradeTotals);
             var mtmTotals = ParseIBKRMtmRecords(report, builder, baseCurrency, contractInfos, quantityChangeTotals.CoveredTransactionImpacts);
             var commissionTotals = ParseIBKRCommissionRecords(report, builder, baseCurrency, contractInfos);
-            var interestAccrualTotals = ParseIBKRInterestAccrualRecords(report, builder, baseCurrency);
+            var interestAccrualTotals = ParseIBKRInterestAccrualTotals(report);
+            var interestAccrualChangeTotals = AddIBKRInterestAccrualChangeRecords(report, builder, baseCurrency);
             var debitInterestTotals = ParseIBKRDebitInterestDetails(report);
             var dividendAccrualTotal = ParseIBKRDividendAccruals(report);
             var dividendAccrualChangeTotal = ParseIBKRDividendAccrualChangeRecords(report, builder, baseCurrency, contractInfos);
@@ -906,6 +907,14 @@ namespace MyBook
                     throw new MailParseException("Parse IBKR Report Fail, Missing Interest Accrual NAV Row");
                 AssertIBKRMoneyFieldAlmostEquals(interestAccrualTotals.Total, accruedInterest, accruedInterestRow.Fields[5], "IBKR interest accrual NAV");
             }
+            if (interestAccrualChangeTotals.HasData)
+            {
+                if (accruedInterestRow is null)
+                    throw new MailParseException("Parse IBKR Report Fail, Missing Interest Accrual NAV Row");
+                AssertIBKRMoneyFieldAlmostEquals(interestAccrualChangeTotals.Total, accruedInterest, accruedInterestRow.Fields[5], "IBKR classified interest accrual NAV");
+            }
+            if (interestAccrualTotals.HasData && interestAccrualChangeTotals.HasData)
+                AssertIBKRMoneyEquals(interestAccrualTotals.Total, interestAccrualChangeTotals.Total, "IBKR classified interest accrual total");
 
             _ = debitInterestTotals;
 
@@ -1597,10 +1606,7 @@ namespace MyBook
             _ = ParseIBKRDecimalAt(row, 11, "other commission fee");
         }
 
-        private IBKRInterestTotals ParseIBKRInterestAccrualRecords(
-            IBKRCsvReport report,
-            IBKRRecordBuilder builder,
-            CurrencyType baseCurrency)
+        private static IBKRInterestTotals ParseIBKRInterestAccrualTotals(IBKRCsvReport report)
         {
             var rows = report.OptionalDataRows("应计利息").ToList();
             if (rows.Count == 0)
@@ -1621,14 +1627,112 @@ namespace MyBook
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Interest Accrual Row: {FormatIBKRCsvRow(row)}");
 
                 total += amount;
-                builder.Add(
-                    new Currency(amount, baseCurrency),
-                    label,
-                    $"InterestAccruals/{FormatIBKRCsvRow(row)}",
-                    destAccount: "ACCRUED_INTEREST");
             }
 
             return new IBKRInterestTotals(true, total);
+        }
+
+        private IBKRInterestTotals AddIBKRInterestAccrualChangeRecords(
+            IBKRCsvReport report,
+            IBKRRecordBuilder builder,
+            CurrencyType baseCurrency)
+        {
+            decimal total = 0;
+            var hasClassifiedRows = false;
+            foreach (var (component, reason) in new[]
+            {
+                ("应计经纪商利息", "应计现金利息"),
+                ("应计债券利息", "应计债券利息")
+            })
+            {
+                var row = FindIBKRNavComponentRow(report, component);
+                if (row is null)
+                    continue;
+
+                hasClassifiedRows = true;
+                var amount = ParseIBKRDecimalAt(row, 5, $"NAV component change {component}");
+                total += amount;
+                builder.Add(
+                    new Currency(amount, baseCurrency),
+                    reason,
+                    $"NavAccrual/{FormatIBKRCsvRow(row)}",
+                    destAccount: "ACCRUED_INTEREST");
+            }
+
+            if (hasClassifiedRows)
+                return new IBKRInterestTotals(true, total);
+
+            var accruedInterestRow = FindIBKRNavComponentRow(report, "应计利息");
+            if (accruedInterestRow is null)
+                return new IBKRInterestTotals(false, 0);
+
+            var accruedInterestChange = ParseIBKRDecimalAt(accruedInterestRow, 5, "NAV component change 应计利息");
+            if (accruedInterestChange == 0)
+                return new IBKRInterestTotals(false, 0);
+
+            var inferredReason = InferIBKRSingleInterestAccrualReason(report)
+                ?? throw new MailParseException(
+                    $"Parse IBKR Report Fail, Cannot classify Interest Accrual without NAV details: {FormatIBKRCsvRow(accruedInterestRow)}");
+            builder.Add(
+                new Currency(accruedInterestChange, baseCurrency),
+                inferredReason,
+                $"NavAccrualInferred/{FormatIBKRCsvRow(accruedInterestRow)}",
+                destAccount: "ACCRUED_INTEREST");
+            return new IBKRInterestTotals(true, accruedInterestChange);
+        }
+
+        private static string? InferIBKRSingleInterestAccrualReason(IBKRCsvReport report)
+        {
+            var hasCashInterest = HasIBKRNonZeroInterestDetailTotal(report, "借方利息细节")
+                || HasIBKRNonZeroInterestDetailTotal(report, "贷方利息细节");
+            var hasBondInterest = HasIBKRBondAccrualSource(report);
+            if (hasCashInterest == hasBondInterest)
+                return null;
+            return hasCashInterest ? "应计现金利息" : "应计债券利息";
+        }
+
+        private static bool HasIBKRNonZeroInterestDetailTotal(IBKRCsvReport report, string sectionName)
+        {
+            decimal total = 0;
+            var hasRows = false;
+            foreach (var row in report.OptionalDataRows(sectionName))
+            {
+                AssertIBKRFieldCount(row, 11);
+                if (row.Fields[0].StartsWith("总数", StringComparison.Ordinal))
+                    return ParseIBKRDecimalAt(row, 9, $"{sectionName} total") != 0;
+
+                hasRows = true;
+                total += ParseIBKRDecimalAt(row, 9, $"{sectionName} interest");
+            }
+
+            return hasRows && total != 0;
+        }
+
+        private static bool HasIBKRBondAccrualSource(IBKRCsvReport report)
+        {
+            if (ParseIBKRNavComponent(report, "债券") != 0)
+                return true;
+
+            return HasIBKRNonZeroBondInterestRows(report, "支付的债券利息")
+                || HasIBKRNonZeroBondInterestRows(report, "收到的债券利息")
+                || report.OptionalDataRows("持仓与以市值计的盈亏")
+                    .Any(row => row.Fields.Count > 1 && row.Fields[1] == "债券");
+        }
+
+        private static bool HasIBKRNonZeroBondInterestRows(IBKRCsvReport report, string sectionName)
+        {
+            foreach (var row in report.OptionalDataRows(sectionName))
+            {
+                if (row.Fields.Count == 0)
+                    continue;
+                if (row.Fields[0].StartsWith("总数", StringComparison.Ordinal))
+                    return ParseIBKRDecimalAt(row, 3, $"{sectionName} total") != 0;
+                AssertIBKRFieldCount(row, 5);
+                if (ParseIBKRDecimalAt(row, 3, $"{sectionName} amount") != 0)
+                    return true;
+            }
+
+            return false;
         }
 
         private static IBKRInterestTotals ParseIBKRDebitInterestDetails(IBKRCsvReport report)
@@ -1903,7 +2007,13 @@ namespace MyBook
                         tradeSell += amount;
                         break;
                     case "支付和收到的经纪商利息":
+                        nonTradeCashFlow += amount;
+                        builder.Add(new Currency(amount, baseCurrency), "现金利息", $"CashReport/{FormatIBKRCsvRow(row)}", destAccount: baseCurrency.ToString());
+                        break;
                     case "支付和收到的债券利息":
+                        nonTradeCashFlow += amount;
+                        builder.Add(new Currency(amount, baseCurrency), "债券利息", $"CashReport/{FormatIBKRCsvRow(row)}", destAccount: baseCurrency.ToString());
+                        break;
                     case "股息":
                     case "代替股息的支付":
                     case "代扣税款":

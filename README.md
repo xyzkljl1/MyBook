@@ -37,7 +37,7 @@ Expected files:
 
 - `MailUtil.ICBC` fetches ICBC credit-card statements monthly from mailbox messages and imports card balances plus RMB and foreign-currency transaction details.
 - `MailUtil.ICBCHistory` fetches ICBC historical-detail PDF mail attachments on demand, by date range, or by low-frequency scheduled scans, and imports debit-account history details and credit-card history supplements when the statement balance chain and overlap checks pass.
-- `MailUtil.IBKR` fetches Interactive Brokers `DailyMyBook` CSV reports daily from mailbox attachments and imports cash, NAV, positions, trades, commissions, transfers, interest, dividends, withholding tax, FX translation, and end-of-day holdings. It can also read local initial reports before daily reports exist.
+- `MailUtil.IBKR` fetches Interactive Brokers `DailyMyBook` CSV reports daily from mailbox attachments and imports cash, NAV, positions, trades, commissions, transfers, cash/bond interest, accrued cash/bond interest, dividends, withholding tax, FX translation, and end-of-day holdings. It can also read local initial reports before daily reports exist.
 - `MailUtil.Wise` imports local initial Wise XML statements from `initialReports` when the Wise account has no history, then fetches monthly Wise XML statements from mailbox attachments and imports per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers.
 - `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines; if an old month is missing, it can also import a self-sent supplemental statement mail with the original subject and PDF attachment.
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
@@ -73,7 +73,7 @@ When adding, removing, or renaming configuration keys, update `MyBook/config.jso
 
 ## Database
 
-The application validates the database schema on startup. Fixed data includes `Accounts` and fake/checkpoint `StatementImports`; imported records, holdings, snapshots, and OAuth tokens are runtime data.
+The application validates the database schema on startup. Fixed data includes `Accounts`, fake/checkpoint `StatementImports`, and `Start` snapshots with their `SnapshotItems`; imported records, holdings, non-start snapshots, and OAuth tokens are runtime data.
 
 Rebuild an empty database from the tracked schema plus the local fixed-data file:
 

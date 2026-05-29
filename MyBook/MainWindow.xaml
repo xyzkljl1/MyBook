@@ -605,7 +605,7 @@
                                                   Margin="0,12,0,0">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="项目" Binding="{Binding Name}" Width="*"/>
-                                                <DataGridTextColumn Header="收入" Binding="{Binding TotalText}" Width="Auto"/>
+                                                <DataGridTextColumn Header="盈亏" Binding="{Binding TotalText}" Width="Auto"/>
                                             </DataGrid.Columns>
                                         </DataGrid>
                                         <Border Grid.Row="2" BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="0,8,0,0" Margin="0,8,0,0">

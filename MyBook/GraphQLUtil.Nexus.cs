@@ -226,7 +226,7 @@ namespace MyBook
                         updateTime = DateTime.Now,
                         DestAccount = "Donation Points",
                         Source = $"NexusDpMonthlyReport/{year:D4}-{month:D2}/{totalDp}DP",
-                        Reason = "创作收入"
+                        Reason = "DP"
                     }
                 ];
 

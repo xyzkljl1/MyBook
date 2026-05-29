@@ -364,6 +364,50 @@ namespace MyBook
                     SqlValue(statementImport.time),
                     SqlValue(statementImport.statementKey)
                 }));
+
+            var startSnapshots = GetFixedStartSnapshots();
+            AppendInsertSql(
+                builder,
+                "Snapshots",
+                ["Id", "source", "time", "schemaVersion", "maxStatementImportId", "effectiveDate", "snapshotKey", "createdAt"],
+                startSnapshots.Select(snapshot => new[]
+                {
+                    SqlValue(snapshot.Id),
+                    SqlValue(snapshot.source),
+                    SqlValue(snapshot.time),
+                    SqlValue(snapshot.schemaVersion),
+                    SqlValue(snapshot.maxStatementImportId),
+                    SqlValue(snapshot.effectiveDate),
+                    SqlValue(snapshot.snapshotKey),
+                    SqlValue(snapshot.createdAt)
+                }));
+
+            var startSnapshotIds = startSnapshots
+                .Select(snapshot => snapshot.Id)
+                .ToHashSet();
+            var startSnapshotItems = startSnapshotIds.Count == 0
+                ? []
+                : db.Queryable<SnapshotItem>()
+                    .Where(item => startSnapshotIds.Contains(item._snapshot_Id))
+                    .OrderBy(item => item._snapshot_Id)
+                    .OrderBy(item => item.Id)
+                    .ToList();
+            AppendInsertSql(
+                builder,
+                "SnapshotItems",
+                ["Id", "itemType", "stableKey", "accountName", "currencyType", "amount", "payloadJson", "_snapshot_Id", "_account_Id"],
+                startSnapshotItems.Select(item => new[]
+                {
+                    SqlValue(item.Id),
+                    SqlValue(item.itemType),
+                    SqlValue(item.stableKey),
+                    SqlValue(item.accountName),
+                    item.currencyType.HasValue ? SqlValue(item.currencyType.Value) : "NULL",
+                    SqlValue(item.amount),
+                    SqlValue(item.payloadJson),
+                    SqlValue(item._snapshot_Id),
+                    SqlValue(item._account_Id)
+                }));
         }
 
         private static void AppendInsertSql(
@@ -406,6 +450,14 @@ namespace MyBook
                 """);
         }
 
+        private List<Snapshot> GetFixedStartSnapshots()
+        {
+            return db.Queryable<Snapshot>()
+                .Where(snapshot => snapshot.source == SnapshotSource.Start)
+                .OrderBy(snapshot => snapshot.Id)
+                .ToList();
+        }
+
         private static string SqlValue(int value)
         {
             return value.ToString(CultureInfo.InvariantCulture);
@@ -419,6 +471,16 @@ namespace MyBook
         private static string SqlValue(bool value)
         {
             return value ? "1" : "0";
+        }
+
+        private static string SqlValue(decimal value)
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string SqlValue(decimal? value)
+        {
+            return value.HasValue ? SqlValue(value.Value) : "NULL";
         }
 
         private static string SqlValue(DateTime value)
@@ -3195,7 +3257,7 @@ namespace MyBook
                 .Select(account => account.Id)
                 .ToHashSet();
             var investmentRecords = db.Queryable<Record>()
-                .Where(record => !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.v > 0 && record.date < today.Date.AddDays(1))
+                .Where(record => !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.v != 0 && record.date < today.Date.AddDays(1))
                 .ToList()
                 .Where(record => investmentAccountIds.Contains(record._account_Id))
                 .ToList();
@@ -3242,7 +3304,7 @@ namespace MyBook
                     investmentRecords,
                     today,
                     exchangeRates,
-                    record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason),
+                    BuildInvestmentReasonKey),
                 InvestmentByHolding = BuildInvestmentStatistics(
                     investmentRecords,
                     today,
@@ -4019,6 +4081,28 @@ namespace MyBook
                 : record.DestAccount;
         }
 
+        private static string BuildInvestmentReasonKey(Record record)
+        {
+            var reason = record.Reason.Trim();
+            if (String.IsNullOrWhiteSpace(reason))
+                return "未分类";
+
+            return reason switch
+            {
+                "\u5e94\u8ba1\u80a1\u606f" => "\u80a1\u606f",
+                "\u5e94\u8ba1\u7ecf\u7eaa\u5546\u5229\u606f" => "\u73b0\u91d1\u5229\u606f",
+                "\u5e94\u8ba1\u73b0\u91d1\u5229\u606f" => "\u73b0\u91d1\u5229\u606f",
+                "\u5e94\u8ba1\u503a\u5238\u5229\u606f" => "\u503a\u5238\u5229\u606f",
+                "\u4ee3\u66ff\u80a1\u606f\u7684\u652f\u4ed8" => "\u80a1\u606f",
+                "\u652f\u4ed8\u548c\u6536\u5230\u7684\u7ecf\u7eaa\u5546\u5229\u606f" => "\u73b0\u91d1\u5229\u606f",
+                "\u652f\u4ed8\u548c\u6536\u5230\u7684\u503a\u5238\u5229\u606f" => "\u503a\u5238\u5229\u606f",
+                "\u4ea4\u6613\u4ef7\u683c\u5f71\u54cd" => "\u6301\u4ed3\u4ef7\u683c\u53d8\u52a8",
+                "\u5176\u5b83\u5916\u6c47\u6362\u7b97" => "\u5916\u6c47\u6362\u7b97\u6536\u76ca/\u635f\u5931",
+                "\u73b0\u91d1\u5916\u6c47\u6362\u7b97\u6536\u76ca/\u635f\u5931" => "\u5916\u6c47\u6362\u7b97\u6536\u76ca/\u635f\u5931",
+                _ => reason
+            };
+        }
+
         private static List<InvestmentAccountStatistics> BuildInvestmentAccountStatistics(
             Dictionary<int, string> accounts,
             IEnumerable<int> investmentAccountIds,
@@ -4100,7 +4184,7 @@ namespace MyBook
                     records,
                     today,
                     exchangeRates,
-                    record => String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason),
+                    BuildInvestmentReasonKey),
                 ByHolding = BuildInvestmentStatistics(
                     records,
                     today,
@@ -4252,7 +4336,7 @@ namespace MyBook
             Func<Record, string> keySelector)
         {
             var items = records
-                .Where(record => record.date >= start && record.date < end && record.v > 0)
+                .Where(record => record.date >= start && record.date < end && record.v != 0)
                 .GroupBy(keySelector)
                 .Select(group => new InvestmentStatisticsItem
                 {
@@ -4262,8 +4346,8 @@ namespace MyBook
                         .Where(value => value.HasValue)
                         .Sum(value => value!.Value))
                 })
-                .Where(item => item.Total > 0)
-                .OrderByDescending(item => item.Total)
+                .Where(item => item.Total != 0)
+                .OrderByDescending(item => Math.Abs(item.Total))
                 .ThenBy(item => item.Name)
                 .ToList();
             return new InvestmentStatisticsPeriod
