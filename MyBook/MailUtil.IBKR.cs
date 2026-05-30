@@ -273,7 +273,7 @@ namespace MyBook
         {
             await RunWithMailSessionScope(async () =>
             {
-                var startDate = GetNextDailyStatementDate(IBKRProvider);
+                var startDate = GetNextIBKRReportDate();
                 var endDate = DateTime.Today;
                 Console.WriteLine($"Fetch IBKR reports from {startDate:yyyy-MM-dd}");
                 var reportsByDate = await FetchIBKRReports(startDate, endDate).ConfigureAwait(false);
@@ -298,6 +298,36 @@ namespace MyBook
                     date = date.AddDays(1);
                 }
             }).ConfigureAwait(false);
+        }
+
+        private DateTime GetNextIBKRReportDate()
+        {
+            var latestReportDates = database.GetStatementImports(IBKRProvider)
+                .Select(import => TryParseIBKRStatementKey(import.statementKey))
+                .Where(parsed => parsed is not null)
+                .Select(parsed => parsed!)
+                .GroupBy(parsed => parsed.AccountId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.Max(parsed => parsed.ReportDate),
+                    StringComparer.OrdinalIgnoreCase);
+            var accountIds = database.GetAllAccounts()
+                .Where(account => account.name.StartsWith("IBKR_", StringComparison.OrdinalIgnoreCase))
+                .Select(GetIBKRStatementAccountId)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (accountIds.Count == 0)
+                return GetNextDailyStatementDate(IBKRProvider);
+
+            var latestDates = accountIds
+                .Select(accountId => latestReportDates.TryGetValue(accountId, out var date)
+                    ? date.Date
+                    : (DateTime?)null)
+                .ToList();
+            if (latestDates.Any(date => !date.HasValue))
+                return GetNextDailyStatementDate(IBKRProvider);
+
+            return latestDates.Min(date => date!.Value).AddDays(1);
         }
 
         private async Task<Dictionary<DateTime, List<IBKRParsedReport>>> FetchIBKRReports(DateTime startDate, DateTime endDate)
@@ -658,20 +688,58 @@ namespace MyBook
 
         private static string BuildIBKRStatementKey(Account account, DateTime reportDate)
         {
-            const string prefix = "IBKR_";
-            var accountId = account.name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                ? account.name[prefix.Length..]
-                : account.name;
-            return $"{accountId}_{reportDate:yyyy-MM-dd}";
+            return $"{GetIBKRStatementAccountId(account)}_{reportDate:yyyy-MM-dd}";
         }
 
         private static string BuildIBKRInitialStatementKey(Account account, IBKRStatementPeriod period)
         {
+            return $"{GetIBKRStatementAccountId(account)}_{period.StartDate:yyyy-MM-dd}_{period.EndDate:yyyy-MM-dd}_initial";
+        }
+
+        private static string GetIBKRStatementAccountId(Account account)
+        {
             const string prefix = "IBKR_";
-            var accountId = account.name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            return account.name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
                 ? account.name[prefix.Length..]
                 : account.name;
-            return $"{accountId}_{period.StartDate:yyyy-MM-dd}_{period.EndDate:yyyy-MM-dd}_initial";
+        }
+
+        private static IBKRStatementKey? TryParseIBKRStatementKey(string statementKey)
+        {
+            if (String.IsNullOrWhiteSpace(statementKey))
+                return null;
+
+            var initialMatch = Regex.Match(
+                statementKey,
+                @"^(?<account>.+)_(?<start>\d{4}-\d{2}-\d{2})_(?<end>\d{4}-\d{2}-\d{2})_initial$",
+                RegexOptions.CultureInvariant);
+            if (initialMatch.Success
+                && DateTime.TryParseExact(
+                    initialMatch.Groups["end"].Value,
+                    "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var initialEndDate))
+            {
+                return new IBKRStatementKey(initialMatch.Groups["account"].Value, initialEndDate.Date);
+            }
+
+            var dailyMatch = Regex.Match(
+                statementKey,
+                @"^(?<account>.+)_(?<date>\d{4}-\d{2}-\d{2})$",
+                RegexOptions.CultureInvariant);
+            if (dailyMatch.Success
+                && DateTime.TryParseExact(
+                    dailyMatch.Groups["date"].Value,
+                    "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var reportDate))
+            {
+                return new IBKRStatementKey(dailyMatch.Groups["account"].Value, reportDate.Date);
+            }
+
+            return null;
         }
 
         private Account GetIBKRAccount(string reportAccountId)
@@ -3531,6 +3599,8 @@ namespace MyBook
             bool IsInitialReport);
 
         private sealed record IBKRReportSaveItem(IBKRParsedReport Report, bool ReturnResult);
+
+        private sealed record IBKRStatementKey(string AccountId, DateTime ReportDate);
 
         private sealed record IBKRStatementPeriod(DateTime StartDate, DateTime EndDate);
 
