@@ -13,6 +13,7 @@ namespace MyBook
         public InvestmentStatistics InvestmentByReason { get; set; } = new();
         public InvestmentStatistics InvestmentByHolding { get; set; } = new();
         public List<InvestmentAccountStatistics> InvestmentAccounts { get; set; } = [];
+        public List<StatementImportSummaryData> LatestStatementImports { get; set; } = [];
         public decimal TotalAssetsRmb { get; set; }
         public List<CurrencyType> MissingExchangeRateCurrencies { get; set; } = [];
         public DateTime LastMonthStart { get; set; }
@@ -211,5 +212,13 @@ namespace MyBook
         public string AccountName { get; set; } = "";
         public CurrencyType Currency { get; set; }
         public decimal Amount { get; set; }
+    }
+
+    public class StatementImportSummaryData
+    {
+        public StatementImportProvider Provider { get; set; }
+        public int? Id { get; set; }
+        public DateTime? Time { get; set; }
+        public string StatementKey { get; set; } = "";
     }
 }

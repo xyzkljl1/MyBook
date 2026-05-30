@@ -3322,10 +3322,38 @@ namespace MyBook
                     .Where(currency => currency != CurrencyType.RMB && !exchangeRates.ContainsKey(currency))
                     .OrderBy(currency => currency)
                     .ToList(),
+                LatestStatementImports = BuildLatestStatementImportSummaries(),
                 LastMonthStart = lastMonthStart,
                 LastMonthEnd = lastMonthEnd,
                 MonthlyFlowStartMonth = firstMonth
             };
+        }
+
+        private List<StatementImportSummaryData> BuildLatestStatementImportSummaries()
+        {
+            var latestImports = db.Queryable<StatementImport>()
+                .ToList()
+                .GroupBy(statementImport => statementImport.provider)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group
+                        .OrderByDescending(statementImport => statementImport.time)
+                        .ThenByDescending(statementImport => statementImport.Id)
+                        .First());
+
+            return Enum.GetValues<StatementImportProvider>()
+                .Select(provider =>
+                {
+                    latestImports.TryGetValue(provider, out var latestImport);
+                    return new StatementImportSummaryData
+                    {
+                        Provider = provider,
+                        Id = latestImport?.Id,
+                        Time = latestImport?.time,
+                        StatementKey = latestImport?.statementKey ?? ""
+                    };
+                })
+                .ToList();
         }
 
         private Dictionary<CurrencyType, decimal> GetCurrencyToRmbRates()

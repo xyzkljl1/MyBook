@@ -647,6 +647,7 @@ namespace MyBook
         public List<AccountNetFlowStatisticsViewModel> AccountNetFlows { get; set; } = [];
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
+        public List<StatementImportSummaryViewModel> LatestStatementImports { get; set; } = [];
         public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
         public ObservableCollection<AccountBalanceRowViewModel> DetailAccountBalances { get; } = [];
         public ObservableCollection<AllocatedExpenseBucketViewModel> AllocatedExpenseBuckets { get; } = [];
@@ -968,6 +969,9 @@ namespace MyBook
                 ReasonMonthSeries = reasonSeries,
                 InvestmentAccounts = investmentAccounts
                     .Select(InvestmentAccountStatisticsViewModel.From)
+                    .ToList(),
+                LatestStatementImports = data.LatestStatementImports
+                    .Select(StatementImportSummaryViewModel.From)
                     .ToList()
             };
             viewModel.SelectedMonthlyAccount = viewModel.MonthlyAccounts.FirstOrDefault();
@@ -1293,6 +1297,31 @@ namespace MyBook
                 .Where(change => change is not null)
                 .Select(change => change!)
                 .ToList();
+        }
+    }
+
+    public class StatementImportSummaryViewModel
+    {
+        public StatementImportProvider Provider { get; set; }
+        public string ProviderText => Provider.ToString();
+        public int? Id { get; set; }
+        public DateTime? Time { get; set; }
+        public string TimeText => Time.HasValue
+            ? Time.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+            : "无";
+        public string StatementKey { get; set; } = "";
+        public string StatementKeyText => String.IsNullOrWhiteSpace(StatementKey) ? "无" : StatementKey;
+        public bool HasImport => Id.HasValue;
+
+        public static StatementImportSummaryViewModel From(StatementImportSummaryData data)
+        {
+            return new StatementImportSummaryViewModel
+            {
+                Provider = data.Provider,
+                Id = data.Id,
+                Time = data.Time,
+                StatementKey = data.StatementKey
+            };
         }
     }
 
