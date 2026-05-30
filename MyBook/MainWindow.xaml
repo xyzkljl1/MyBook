@@ -266,7 +266,7 @@
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
                         <DockPanel Margin="0,0,0,12">
-                            <TextBlock Text="账户整体资金净出入" FontSize="15" FontWeight="SemiBold" Foreground="#334155"/>
+                            <TextBlock Text="账户资金" FontSize="15" FontWeight="SemiBold" Foreground="#334155"/>
                         </DockPanel>
                         <DataGrid Grid.Row="1"
                                   ItemsSource="{Binding AccountNetFlows}"
@@ -276,14 +276,34 @@
                                   HeadersVisibility="Column"
                                   GridLinesVisibility="None"
                                   SelectionUnit="CellOrRowHeader">
+                            <DataGrid.RowStyle>
+                                <Style TargetType="DataGridRow">
+                                    <Setter Property="FontWeight" Value="{Binding RowFontWeight}"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsGroup}" Value="True">
+                                            <Setter Property="Background" Value="#F8FAFC"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </DataGrid.RowStyle>
                             <DataGrid.Columns>
-                                <DataGridTemplateColumn Header="账户整体" Width="180">
+                                <DataGridTemplateColumn Header="账户" Width="220">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
-                                            <TextBox Style="{StaticResource SelectableText}"
-                                                     Text="{Binding DisplayName}"
-                                                     FontSize="13"
-                                                     Foreground="#334155"/>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Border Width="{Binding IndentWidth}"/>
+                                                <TextBlock Text="{Binding TreeGlyph}"
+                                                           Width="18"
+                                                           FontSize="12"
+                                                           Foreground="#64748B"
+                                                           VerticalAlignment="Center"
+                                                           TextAlignment="Center"/>
+                                                <TextBox Style="{StaticResource SelectableText}"
+                                                         Text="{Binding DisplayName}"
+                                                         FontSize="13"
+                                                         FontWeight="{Binding RowFontWeight}"
+                                                         Foreground="#334155"/>
+                                            </StackPanel>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
@@ -321,7 +341,7 @@
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
-                                <DataGridTemplateColumn Header="原币净额" Width="*">
+                                <DataGridTemplateColumn Header="原币余额" Width="*">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBox Style="{StaticResource SelectableText}"
@@ -660,7 +680,6 @@
                                 <DataGridTextColumn Header="Provider" Binding="{Binding ProviderText}" Width="190"/>
                                 <DataGridTextColumn Header="最新日期" Binding="{Binding TimeText}" SortMemberPath="Time" Width="180"/>
                                 <DataGridTextColumn Header="Statement Key" Binding="{Binding StatementKeyText}" SortMemberPath="StatementKey" Width="*"/>
-                                <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="72"/>
                             </DataGrid.Columns>
                         </DataGrid>
                     </Grid>

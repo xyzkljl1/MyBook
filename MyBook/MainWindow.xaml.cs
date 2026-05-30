@@ -1977,6 +1977,11 @@ namespace MyBook
     public class AccountNetFlowStatisticsViewModel
     {
         public string DisplayName { get; set; } = "";
+        public bool IsGroup { get; set; }
+        public int TreeLevel { get; set; }
+        public double IndentWidth => TreeLevel * 18;
+        public string TreeGlyph => IsGroup ? "▾" : "└";
+        public FontWeight RowFontWeight => IsGroup ? FontWeights.SemiBold : FontWeights.Normal;
         public decimal NetRmb { get; set; }
         public string NetRmbText { get; set; } = "";
         public string CurrentBalanceText { get; set; } = "";
@@ -1991,10 +1996,12 @@ namespace MyBook
             return new AccountNetFlowStatisticsViewModel
             {
                 DisplayName = statistics.DisplayName,
+                IsGroup = statistics.IsGroup,
+                TreeLevel = statistics.TreeLevel,
                 NetRmb = statistics.NetRmb,
                 NetRmbText = $"{FormatSignedMoney(statistics.NetRmb, "¥")}{missingRateText}",
                 CurrentBalanceText = $"{FormatMoney(statistics.CurrentBalanceRmb, "¥")}{missingBalanceRateText}",
-                CurrencyDetails = String.Join("、", statistics.CurrencyTotals.Select(FormatCurrencyTotal)),
+                CurrencyDetails = String.Join("、", statistics.CurrentBalanceCurrencyTotals.Select(FormatCurrencyTotal)),
             };
         }
 

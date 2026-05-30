@@ -63,11 +63,14 @@ namespace MyBook
     {
         public string AccountPrefix { get; set; } = "";
         public string DisplayName { get; set; } = "";
+        public bool IsGroup { get; set; }
+        public int TreeLevel { get; set; }
         public decimal NetRmb { get; set; }
         public decimal CurrentBalanceRmb { get; set; }
         public bool HasMissingExchangeRate { get; set; }
         public bool HasMissingCurrentBalanceExchangeRate { get; set; }
-        public List<AccountNetFlowCurrencyTotal> CurrencyTotals { get; set; } = [];
+        public List<AccountNetFlowCurrencyTotal> NetFlowCurrencyTotals { get; set; } = [];
+        public List<AccountNetFlowCurrencyTotal> CurrentBalanceCurrencyTotals { get; set; } = [];
     }
 
     public class AccountNetFlowCurrencyTotal
