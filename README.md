@@ -67,7 +67,7 @@ Notable configuration keys:
 - `ib_gateway_port` - Interactive Brokers gateway port.
 - `ocbc_statement_passwords` - local list of OCBC statement passwords.
 - `nexus_api_key` - legacy/personal Nexus API key fallback.
-- `nexus_oauth_client_id`, `nexus_oauth_client_secret` - Nexus OAuth token refresh settings.
+- `nexus_oauth_client_id` - Nexus OAuth PKCE token refresh client id. `nexus_oauth_client_secret` is retained for local compatibility but is not sent by the PKCE refresh flow.
 
 When adding, removing, or renaming configuration keys, update `MyBook/config.json.example` at the same time and keep all example values blank or zero.
 
@@ -132,14 +132,12 @@ Nexus API requests include the application headers required by the Nexus API Acc
 - `Application-Version: <assembly version>`
 
 OAuth token storage uses the local database table `OAuthTokens`. Tokens are not stored in `config.json`.
-
-The current Nexus OAuth token refresh module is marked TODO because it has not been remotely verified with a valid client id.
+Nexus OAuth uses the PKCE public-client flow; token refresh sends `client_id` and `refresh_token` without `client_secret`.
 
 ## TODO Modules
 
 The following modules are intentionally present as placeholders or not-yet-complete integrations:
 
-- `GraphQLUtil.NexusOAuth.TODO.cs`
 - `FileUtil.WeChat.TODO.cs`
 - `MailUtil.Steam.TODO.cs`
 - `WebUtil.Bilibili.TODO.cs`

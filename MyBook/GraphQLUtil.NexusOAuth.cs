@@ -5,7 +5,6 @@ using System.Net.Http;
 
 namespace MyBook
 {
-    // TODO: Nexus OAuth token refresh is implemented but not remotely verified until a valid client id is available.
     partial class GraphQLUtil
     {
         private const string NexusOAuthTokenEndpoint = "https://users.nexusmods.com/oauth/token";
@@ -43,9 +42,6 @@ namespace MyBook
                 ["grant_type"] = "refresh_token",
                 ["refresh_token"] = refreshToken
             };
-            var clientSecret = OptionalConfig("nexus_oauth_client_secret");
-            if (!String.IsNullOrWhiteSpace(clientSecret))
-                form["client_secret"] = clientSecret;
 
             var refreshed = await RequestNexusOAuthTokens(form);
             return String.IsNullOrWhiteSpace(refreshed.RefreshToken)
