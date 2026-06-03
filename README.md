@@ -134,6 +134,14 @@ Nexus API requests include the application headers required by the Nexus API Acc
 OAuth token storage uses the local database table `OAuthTokens`. Tokens are not stored in `config.json`.
 Nexus OAuth uses the PKCE public-client flow; token refresh sends `client_id` and `refresh_token` without `client_secret`.
 
+Authorize or refresh the local Nexus OAuth token:
+
+```powershell
+dotnet run --project MyBook\MyBook.csproj -- --debug-authorize-nexus-oauth
+```
+
+This opens the Nexus authorization page in the browser and listens for the callback on `http://127.0.0.1:4700/callback`. The command does not print the authorization URL or OAuth tokens.
+
 ## TODO Modules
 
 The following modules are intentionally present as placeholders or not-yet-complete integrations:
