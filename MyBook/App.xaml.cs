@@ -8,8 +8,25 @@ namespace MyBook
     /// </summary>
     public partial class App : Application
     {
+        private const string SingleInstanceMutexName = @"Local\MyBook.SingleInstance";
+        private Mutex? singleInstanceMutex;
+
         private void Application_Startup(object sender, StartupEventArgs e)
         {
+            singleInstanceMutex = new Mutex(true, SingleInstanceMutexName, out var createdNew);
+            if (!createdNew)
+            {
+                singleInstanceMutex.Dispose();
+                singleInstanceMutex = null;
+                Console.WriteLine("MyBook is already running.");
+                if (e.Args.Length == 0)
+                    MessageBox.Show("MyBook is already running.", "MyBook", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                Shutdown(1);
+                Environment.Exit(1);
+                return;
+            }
+
             if (e.Args.Any(arg => arg.Equals("--export-bootstrap-sql", StringComparison.OrdinalIgnoreCase)))
             {
                 var exitCode = 0;
@@ -97,6 +114,24 @@ namespace MyBook
             Console.WriteLine($"Bootstrap schema changed: {result.BootstrapChanged}");
             Console.WriteLine($"Bootstrap fixed-data changed: {result.FixedDataChanged}");
             Console.WriteLine($"Backup written: {result.BackupWritten}");
+        }
+
+        protected override void OnExit(ExitEventArgs e)
+        {
+            try
+            {
+                singleInstanceMutex?.ReleaseMutex();
+            }
+            catch (ApplicationException)
+            {
+            }
+            finally
+            {
+                singleInstanceMutex?.Dispose();
+                singleInstanceMutex = null;
+            }
+
+            base.OnExit(e);
         }
     }
 }
