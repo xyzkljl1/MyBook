@@ -43,6 +43,7 @@ Expected files:
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly summaries through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
 - `FileUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
+- `SIMUtil.TODO` will fetch SMS messages from a SIM modem.
 - `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
 - `WebUtil.Meituan.TODO` will fetch Meituan account balance information.
 
@@ -148,6 +149,7 @@ The following modules are intentionally present as placeholders or not-yet-compl
 
 - `FileUtil.WeChat.TODO.cs`
 - `MailUtil.Steam.TODO.cs`
+- `SIMUtil.TODO.cs`
 - `WebUtil.Bilibili.TODO.cs`
 - `WebUtil.Meituan.TODO.cs`
 
