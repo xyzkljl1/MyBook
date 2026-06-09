@@ -12,11 +12,15 @@ namespace MyBook
         PubWebUtil? pubWeb;
         GraphQLUtil? graphQL;
         DatabaseUtil? database;
+        SIMUtil? sim;
         Timer? dailyTimer;
+        Timer? simTimer;
         readonly SemaphoreSlim fetchLock = new(1, 1);
+        readonly SemaphoreSlim simPollLock = new(1, 1);
         const int MonthlyFetchIntervalDays = 27;
         const int ICBCHistoryDetailFetchIntervalDays = 90;
         const int ICBCHistoryDetailSearchWindowMonths = 5;
+        const int DefaultSIMPollIntervalMinutes = 5;
 
         public void RunSchedule()
         {
@@ -31,13 +35,16 @@ namespace MyBook
             mail = new(config, database);
             pubWeb = new(config, database);
             graphQL = new(config, database);
+            sim = new();
             dailyTimer?.Dispose();
+            simTimer?.Dispose();
             RunDailyFetchInBackground();
             dailyTimer = new Timer(
                 _ => RunDailyFetchInBackground(),
                 null,
                 GetDelayUntilNextDailyRun(),
                 TimeSpan.FromDays(1));
+            StartSIMPolling();
             //pubWeb.Fetch(new Finance("QQQ", HoldingType.NASDAQ));
             //pubWeb.Fetch(new Finance("021282", HoldingType.CNFUND));
         }
@@ -111,6 +118,76 @@ namespace MyBook
             }
         }
 
+        private void StartSIMPolling()
+        {
+            if (config is null)
+                return;
+
+            if (String.IsNullOrWhiteSpace(config["sim_imsi"]))
+            {
+                Console.WriteLine("skip scheduled SIM SMS polling: missing sim_imsi in config.json");
+                return;
+            }
+
+            var interval = GetSIMPollInterval();
+            Console.WriteLine($"scheduled SIM SMS polling every {interval.TotalMinutes:0} minute(s)");
+            RunSIMPollInBackground();
+            simTimer = new Timer(
+                _ => RunSIMPollInBackground(),
+                null,
+                interval,
+                interval);
+        }
+
+        private TimeSpan GetSIMPollInterval()
+        {
+            if (config is not null
+                && Int32.TryParse(config["sim_poll_interval_minutes"], out var configuredMinutes)
+                && configuredMinutes > 0)
+                return TimeSpan.FromMinutes(Math.Max(1, configuredMinutes));
+
+            return TimeSpan.FromMinutes(DefaultSIMPollIntervalMinutes);
+        }
+
+        private void RunSIMPollInBackground()
+        {
+            _ = Task.Run(RunSIMPollAsync);
+        }
+
+        private async Task RunSIMPollAsync()
+        {
+            if (config is null || sim is null)
+                return;
+
+            if (!await simPollLock.WaitAsync(0).ConfigureAwait(false))
+            {
+                Console.WriteLine("skip scheduled SIM SMS polling: previous poll is still running");
+                return;
+            }
+
+            try
+            {
+                var expectedImsi = config["sim_imsi"];
+                if (String.IsNullOrWhiteSpace(expectedImsi))
+                {
+                    Console.WriteLine("skip scheduled SIM SMS polling: missing sim_imsi in config.json");
+                    return;
+                }
+
+                var result = await sim.PollConfiguredSIMMessages(expectedImsi).ConfigureAwait(false);
+                foreach (var line in result.LogLines)
+                    Console.WriteLine(line);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"scheduled SIM SMS polling fail: {e.Message}");
+            }
+            finally
+            {
+                simPollLock.Release();
+            }
+        }
+
         private bool ShouldFetchMonthlyProvider(string name, StatementImportProvider provider)
         {
             return ShouldFetchProviderAfterDays(name, provider, MonthlyFetchIntervalDays);
@@ -170,8 +247,10 @@ namespace MyBook
         public void Dispose()
         {
             dailyTimer?.Dispose();
+            simTimer?.Dispose();
             pubWeb?.Dispose();
             fetchLock.Dispose();
+            simPollLock.Dispose();
         }
     }
 }
