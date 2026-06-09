@@ -44,7 +44,7 @@ Expected files:
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly summaries through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
 - `FileUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
-- `SIMUtil` polls a USB SIM modem through a Windows COM port, verifies the SIM IMSI against local configuration, dispatches stored SMS messages by sender, and deletes processed messages.
+- `SIMUtil` polls a USB SIM modem through a Windows COM port, verifies the SIM IMSI against local configuration, combines complete long SMS messages before dispatching by sender, and deletes processed messages.
 - `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
 - `WebUtil.Meituan.TODO` will fetch Meituan account balance information.
 
@@ -120,7 +120,7 @@ During scheduled fetches:
 - Mail fetches share Yahoo/Gmail IMAP sessions within each fetch cycle or standalone mail import, use the configured `mail_proxy` when set, and reconnect once after connection-level failures.
 - Public web market-data fetches use the configured `pubweb_proxy` when set; exchange-rate pages are requested concurrently and saved after all requests finish.
 - Nexus DP imports use the monthly summary API first and fall back to per-month reports only for missing months or summary failures.
-- SIM SMS polling runs on its own interval when `sim_imsi` is configured. The first poll must find exactly one responsive modem, later polls reuse the cached port and rescan only if it disappears. Each poll verifies IMSI, dispatches received SMS messages by sender, currently routes ICBC `95588` messages to `SIMUtil.ICBC`, deletes processed stored items including unsupported senders, and logs every reason that no SMS was fetched or deleted.
+- SIM SMS polling runs on its own interval when `sim_imsi` is configured. The first poll must find exactly one responsive modem, later polls reuse the cached port and rescan only if it disappears. Each poll verifies IMSI, dispatches complete received SMS messages by sender, keeps incomplete long-SMS fragments until all parts arrive, currently routes ICBC messages to `SIMUtil.ICBC`, deletes processed stored items including unsupported senders, and logs every reason that no SMS was fetched or deleted.
 - IBKR, Wise, and OCBC attachment imports search the missing date/month range in batches, then group downloaded attachments by statement date or month.
 - Attachment-based mail imports first filter IMAP summaries and body structures, then download only matching attachment body parts instead of full messages.
 - Imported records pass through one shared automatic expense-allocation judgment function after internal-transfer matching and before allocated-expense cache generation.

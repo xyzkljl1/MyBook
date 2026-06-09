@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 namespace MyBook
 {
     // Reads already-stored SMS messages from a USB SIM modem through GSM AT commands.
+    // Developed/tested with Quectel EC200A-CNDA (firmware EC200ACNDAR01A19M16).
     partial class SIMUtil
     {
         private static readonly int[] CandidateBaudRates = [115200, 9600, 57600, 38400, 19200];
@@ -155,10 +156,10 @@ namespace MyBook
 
         private static SIMPollResult ProcessMatchingSIMMessages(SerialPort port, string portName, List<string> logLines)
         {
-            List<SIMMessage> messages;
+            ReadStoredMessagesResult readResult;
             try
             {
-                messages = ReadStoredMessages(port, portName, ProcessingMessageStores);
+                readResult = ReadStoredMessagesForProcessing(port, portName);
             }
             catch (Exception exception) when (IsProbeException(exception) || exception is FormatException)
             {
@@ -166,9 +167,20 @@ namespace MyBook
                 return new SIMPollResult(0, 0, logLines);
             }
 
+            foreach (var incompleteMessage in readResult.IncompleteConcatMessages)
+            {
+                logLines.Add(
+                    $"SIM SMS poll kept incomplete long SMS from {incompleteMessage.Sender}: "
+                    + $"{incompleteMessage.PresentParts}/{incompleteMessage.TotalParts} parts, "
+                    + $"stored indexes {String.Join(", ", incompleteMessage.StoredIndexes)}.");
+            }
+
+            var messages = readResult.Messages;
             if (messages.Count == 0)
             {
-                logLines.Add("SIM SMS poll found no received messages.");
+                logLines.Add(readResult.IncompleteConcatMessages.Count == 0
+                    ? "SIM SMS poll found no received messages."
+                    : "SIM SMS poll found no complete received messages.");
                 return new SIMPollResult(0, 0, logLines);
             }
 
@@ -308,6 +320,20 @@ namespace MyBook
 
         private static List<SIMMessage> ReadStoredMessages(SerialPort port, string portName, IReadOnlyList<string> messageStores)
         {
+            return ReadStoredMessagesCore(port, portName, messageStores, keepIncompleteConcatParts: true).Messages;
+        }
+
+        private static ReadStoredMessagesResult ReadStoredMessagesForProcessing(SerialPort port, string portName)
+        {
+            return ReadStoredMessagesCore(port, portName, ProcessingMessageStores, keepIncompleteConcatParts: false);
+        }
+
+        private static ReadStoredMessagesResult ReadStoredMessagesCore(
+            SerialPort port,
+            string portName,
+            IReadOnlyList<string> messageStores,
+            bool keepIncompleteConcatParts)
+        {
             var parsedMessages = new List<ParsedSIMMessage>();
             var pduModeWorked = false;
             foreach (var store in messageStores)
@@ -334,7 +360,7 @@ namespace MyBook
                 }
             }
 
-            return CombineAndDeduplicate(parsedMessages);
+            return CombineAndDeduplicate(parsedMessages, keepIncompleteConcatParts);
         }
 
         private static void DeleteStoredMessage(SerialPort port, string store, int index)
@@ -905,9 +931,10 @@ namespace MyBook
                 : value;
         }
 
-        private static List<SIMMessage> CombineAndDeduplicate(List<ParsedSIMMessage> messages)
+        private static ReadStoredMessagesResult CombineAndDeduplicate(List<ParsedSIMMessage> messages, bool keepIncompleteConcatParts)
         {
             var combined = new List<SIMMessage>();
+            var incompleteMessages = new List<IncompleteConcatMessage>();
             var singleMessages = messages.Where(message => message.Concat is null);
             combined.AddRange(singleMessages.Select(ToSIMMessage));
 
@@ -917,7 +944,8 @@ namespace MyBook
             {
                 var ordered = group.OrderBy(message => message.Concat!.Sequence).ToList();
                 var expectedTotal = ordered[0].Concat!.Total;
-                if (ordered.Count == expectedTotal && ordered.Select(message => message.Concat!.Sequence).Distinct().Count() == expectedTotal)
+                var presentSequences = ordered.Select(message => message.Concat!.Sequence).Distinct().ToList();
+                if (ordered.Count == expectedTotal && presentSequences.Count == expectedTotal)
                 {
                     combined.Add(new SIMMessage(
                         ordered.Min(message => message.Time),
@@ -931,14 +959,23 @@ namespace MyBook
                 }
                 else
                 {
-                    combined.AddRange(ordered.Select(ToSIMMessage));
+                    incompleteMessages.Add(new IncompleteConcatMessage(
+                        ordered[0].Sender,
+                        expectedTotal,
+                        presentSequences.Count,
+                        ordered.Select(message => message.Index).Distinct().OrderBy(index => index).ToArray()));
+
+                    if (keepIncompleteConcatParts)
+                        combined.AddRange(ordered.Select(ToSIMMessage));
                 }
             }
 
-            return combined
+            var deduplicatedMessages = combined
                 .GroupBy(message => $"{message.Time:O}|{message.Sender}|{message.Text}")
                 .Select(group => group.First())
                 .ToList();
+
+            return new ReadStoredMessagesResult(deduplicatedMessages, incompleteMessages);
         }
 
         private static SIMMessage ToSIMMessage(ParsedSIMMessage message)
@@ -967,6 +1004,8 @@ namespace MyBook
         private sealed record DecodedUserData(string Text, SmsConcatInfo? Concat);
         private sealed record SmsConcatInfo(string Reference, int Sequence, int Total);
         private sealed record ParsedSIMMessage(DateTime Time, string Sender, string Text, int Index, string Status, string PortName, string Storage, SmsConcatInfo? Concat);
+        private sealed record IncompleteConcatMessage(string Sender, int TotalParts, int PresentParts, IReadOnlyList<int> StoredIndexes);
+        private sealed record ReadStoredMessagesResult(List<SIMMessage> Messages, List<IncompleteConcatMessage> IncompleteConcatMessages);
         private sealed record SIMModemInfo(string PortName, int BaudRate);
     }
 
