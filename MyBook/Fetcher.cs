@@ -35,7 +35,7 @@ namespace MyBook
             mail = new(config, database);
             pubWeb = new(config, database);
             graphQL = new(config, database);
-            sim = new();
+            sim = new(database);
             dailyTimer?.Dispose();
             simTimer?.Dispose();
             RunDailyFetchInBackground();

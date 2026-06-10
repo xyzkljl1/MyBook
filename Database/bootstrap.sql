@@ -55,7 +55,7 @@ CREATE TABLE `finance` (
 
 CREATE TABLE `statementimports` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `provider` enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','PayPalMail','Manual') NOT NULL DEFAULT 'Manual',
+  `provider` enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','PayPalMail','Manual') NOT NULL DEFAULT 'Manual',
   `time` datetime(6) NOT NULL,
   `statementKey` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`Id`),

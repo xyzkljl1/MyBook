@@ -13,11 +13,22 @@ namespace MyBook
         private static readonly int[] CandidateBaudRates = [115200, 9600, 57600, 38400, 19200];
         private static readonly string[] CandidateMessageStores = ["", "MT", "SM", "ME"];
         private static readonly string[] ProcessingMessageStores = ["ME", "SM", "MT", ""];
+        private static readonly bool DeleteProcessedMessages = false; // Temporarily disabled while developing SMS parsers.
         private static readonly TimeSpan DefaultCommandTimeout = TimeSpan.FromSeconds(4);
         private static readonly TimeSpan ListMessagesTimeout = TimeSpan.FromSeconds(20);
+        private readonly DatabaseUtil? database;
         private string? cachedPortName;
         private int cachedBaudRate;
         private bool hasFoundSIMModem;
+
+        public SIMUtil()
+        {
+        }
+
+        public SIMUtil(DatabaseUtil database)
+        {
+            this.database = database;
+        }
 
         public Task<List<SIMMessage>> FetchSIMMessages(string? portName = null)
         {
@@ -113,10 +124,40 @@ namespace MyBook
                 return new SIMPollResult(0, 0, logLines);
             }
 
-            if (modems.Count > 1)
-                throw new InvalidOperationException("SIM SMS poll found multiple responsive SIM modems: " + String.Join(", ", modems.Select(modem => $"{modem.PortName}@{modem.BaudRate}")));
+            var probes = ProbeSIMModemIMSIs(modems, failures);
+            var distinctIMSIs = probes
+                .Select(probe => probe.IMSI)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (distinctIMSIs.Count > 1)
+                throw new InvalidOperationException("SIM SMS poll found multiple SIM cards: " + String.Join(", ", probes.Select(probe => $"{probe.Modem.PortName}@{probe.Modem.BaudRate}")));
 
-            var modem = modems.Single();
+            var matchingProbes = probes
+                .Where(probe => String.Equals(probe.IMSI, expectedImsi, StringComparison.Ordinal))
+                .OrderBy(probe => GetPortSortNumber(probe.Modem.PortName))
+                .ThenBy(probe => probe.Modem.PortName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(probe => probe.Modem.BaudRate)
+                .ToList();
+            if (matchingProbes.Count == 0)
+            {
+                var message = failures.Count == 0
+                    ? "SIM SMS poll found no modem with matching IMSI."
+                    : "SIM SMS poll found no modem with matching IMSI. Tried: " + String.Join("; ", failures.Take(8));
+                if (hasFoundSIMModem)
+                    throw new InvalidOperationException(message);
+
+                logLines.Add(message);
+                return new SIMPollResult(0, 0, logLines);
+            }
+
+            if (matchingProbes.Count > 1)
+            {
+                logLines.Add(
+                    "SIM SMS poll found multiple responsive ports for the configured SIM; using "
+                    + $"{matchingProbes[0].Modem.PortName}@{matchingProbes[0].Modem.BaudRate}.");
+            }
+
+            var modem = matchingProbes[0].Modem;
             cachedPortName = modem.PortName;
             cachedBaudRate = modem.BaudRate;
             hasFoundSIMModem = true;
@@ -126,7 +167,7 @@ namespace MyBook
             return ProcessConfiguredSIMPort(port, modem.PortName, modem.BaudRate, expectedImsi, logLines);
         }
 
-        private static SIMPollResult ProcessConfiguredSIMPort(
+        private SIMPollResult ProcessConfiguredSIMPort(
             SerialPort port,
             string portName,
             int baudRate,
@@ -154,7 +195,7 @@ namespace MyBook
             return ProcessMatchingSIMMessages(port, portName, logLines);
         }
 
-        private static SIMPollResult ProcessMatchingSIMMessages(SerialPort port, string portName, List<string> logLines)
+        private SIMPollResult ProcessMatchingSIMMessages(SerialPort port, string portName, List<string> logLines)
         {
             ReadStoredMessagesResult readResult;
             try
@@ -188,14 +229,27 @@ namespace MyBook
             var deletedCount = 0;
             foreach (var message in messages.OrderBy(message => message.Time).ThenBy(message => message.Index))
             {
+                SIMMessageProcessResult result;
                 try
                 {
-                    ProcessSIMMessage(message, logLines);
+                    result = ProcessSIMMessage(message, logLines);
                     parsedCount++;
                 }
                 catch (Exception exception)
                 {
                     logLines.Add($"SIM SMS poll failed to process message index {message.Index} from {message.Sender}: {exception.Message}");
+                    continue;
+                }
+
+                if (!result.CanDelete)
+                {
+                    logLines.Add($"SIM SMS poll retained message index {message.Index} from {message.Sender}: {result.Description}.");
+                    continue;
+                }
+
+                if (!DeleteProcessedMessages)
+                {
+                    logLines.Add($"SIM SMS poll retained message index {message.Index} from {message.Sender}: deletion is temporarily disabled.");
                     continue;
                 }
 
@@ -218,16 +272,19 @@ namespace MyBook
             return new SIMPollResult(parsedCount, deletedCount, logLines);
         }
 
-        private static void ProcessSIMMessage(SIMMessage message, List<string> logLines)
+        private SIMMessageProcessResult ProcessSIMMessage(SIMMessage message, List<string> logLines)
         {
             if (IsICBCSender(message.Sender))
             {
-                ParseICBCSIMMessage(message);
-                logLines.Add($"SIM SMS poll processed ICBC message index {message.Index} from {message.Sender}.");
-                return;
+                var result = ParseICBCSIMMessage(message);
+                logLines.Add($"SIM SMS poll processed ICBC message index {message.Index} from {message.Sender}: {result.Description}.");
+                return result;
             }
 
-            logLines.Add($"SIM SMS poll has no parser for sender {message.Sender}; message index {message.Index} will be deleted.");
+            logLines.Add(DeleteProcessedMessages
+                ? $"SIM SMS poll has no parser for sender {message.Sender}; message index {message.Index} will be deleted."
+                : $"SIM SMS poll has no parser for sender {message.Sender}; message index {message.Index} is retained because deletion is temporarily disabled.");
+            return new SIMMessageProcessResult("unsupported sender", true);
         }
 
         private static string ReadIMSI(SerialPort port)
@@ -279,6 +336,26 @@ namespace MyBook
             }
 
             return modems;
+        }
+
+        private static List<SIMModemProbe> ProbeSIMModemIMSIs(List<SIMModemInfo> modems, List<string> failures)
+        {
+            var probes = new List<SIMModemProbe>();
+            foreach (var modem in modems)
+            {
+                try
+                {
+                    using var port = OpenPort(modem.PortName, modem.BaudRate);
+                    InitializeModem(port);
+                    probes.Add(new SIMModemProbe(modem, ReadIMSI(port)));
+                }
+                catch (Exception exception) when (IsProbeException(exception))
+                {
+                    failures.Add($"{modem.PortName}@{modem.BaudRate}: unable to read IMSI: {exception.Message}");
+                }
+            }
+
+            return probes;
         }
 
         private static int GetPortSortNumber(string portName)
@@ -1006,7 +1083,9 @@ namespace MyBook
         private sealed record ParsedSIMMessage(DateTime Time, string Sender, string Text, int Index, string Status, string PortName, string Storage, SmsConcatInfo? Concat);
         private sealed record IncompleteConcatMessage(string Sender, int TotalParts, int PresentParts, IReadOnlyList<int> StoredIndexes);
         private sealed record ReadStoredMessagesResult(List<SIMMessage> Messages, List<IncompleteConcatMessage> IncompleteConcatMessages);
+        private sealed record SIMMessageProcessResult(string Description, bool CanDelete);
         private sealed record SIMModemInfo(string PortName, int BaudRate);
+        private sealed record SIMModemProbe(SIMModemInfo Modem, string IMSI);
     }
 
     public sealed record SIMMessage(
