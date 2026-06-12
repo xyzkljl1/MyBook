@@ -24,7 +24,7 @@ namespace MyBook
         private const string ICBCHistoryDetailSubjectKeyword = "工商银行历史明细";
         private const string ICBCHistoryDetailRowCodePrefix = "ICBCHistory-";
         private const string ICBCHistoryDetailReplacementCodePrefix = "ICBCHistoryReplacement-";
-        private const string ICBCHistoryDetailInitializationReplacementCodePrefix = "ICBCHistoryInitializationReplacement-";
+        private const string ICBCHistoryDetailInitializationConfirmationCodePrefix = "ICBCHistoryInitializationConfirmation-";
         private const decimal ICBCSmallTransactionThreshold = 10m;
         private static readonly Regex ICBCHistoryDetailSubjectRegex = new(
             @"^工商银行历史明细（申请单号：(?<applicationNo>\d+)）\s*$",
@@ -54,24 +54,42 @@ namespace MyBook
 
                 var importedCount = 0;
                 var skippedUnreadableCount = 0;
+                var parsedStatements = new List<ICBCHistoryDetailParsedStatement>();
                 foreach (var message in messages)
                 {
                     var parsedAttachments = ParseICBCHistoryDetailAttachments(message);
                     skippedUnreadableCount += parsedAttachments.SkippedUnreadableCount;
                     foreach (var attachment in parsedAttachments.Statements)
                     {
-                        var parsed = ParseICBCHistoryDetailPdfText(
+                        parsedStatements.Add(ParseICBCHistoryDetailPdfText(
                             attachment.Text,
                             attachment.FileName,
-                            attachment.FileHash);
-                        if (ImportICBCHistoryDetail(parsed))
-                            importedCount++;
+                            attachment.FileHash));
                     }
+                }
+
+                foreach (var parsed in OrderICBCHistoryDetailStatementsForImport(parsedStatements))
+                {
+                    if (ImportICBCHistoryDetail(parsed))
+                        importedCount++;
                 }
 
                 Console.WriteLine($"Imported remote ICBC history detail statements: {importedCount}, skippedUnreadable={skippedUnreadableCount}");
                 return importedCount;
             }).ConfigureAwait(false);
+        }
+
+        private static List<ICBCHistoryDetailParsedStatement> OrderICBCHistoryDetailStatementsForImport(
+            List<ICBCHistoryDetailParsedStatement> statements)
+        {
+            return statements
+                .OrderBy(statement => statement.AccountName, StringComparer.Ordinal)
+                .ThenBy(statement => statement.IsCredit ? 1 : 0)
+                .ThenByDescending(statement => statement.EndDate)
+                .ThenByDescending(statement => statement.StartDate)
+                .ThenByDescending(statement => statement.ImportTime)
+                .ThenBy(statement => statement.StatementKey, StringComparer.Ordinal)
+                .ToList();
         }
 
         private static bool IsICBCHistoryDetailSummary(IMessageSummary summary)
@@ -390,6 +408,9 @@ namespace MyBook
 
             var simResolution = ResolveICBCSIMRecordsForHistoryDetail(parsed, account, newCandidates, stats);
             var records = simResolution.RecordsToSave;
+            var preserveCurrentBalances = database.HasAccountRecordsOnOrAfter(
+                account,
+                parsed.EndDate.Date.AddDays(1));
             var saved = database.SaveStatementRecordsOnce(
                 ICBCHistoryDetailProvider,
                 parsed.ImportTime,
@@ -399,10 +420,12 @@ namespace MyBook
                 simResolution.BeginningBalances,
                 internalCardNos: parsed.InternalCardNos,
                 afterSaveInTransaction: _ => database.AppendRecordSourceSupplements(simResolution.Supplements),
-                forceValidateBeginningBalances: existingRecords.Count > 0 || simResolution.HasExistingSIMRecords);
+                forceValidateBeginningBalances: existingRecords.Count > 0 || simResolution.HasExistingSIMRecords,
+                preserveCurrentAccountBalances: preserveCurrentBalances,
+                validateCurrentBalancesRolledBackTo: preserveCurrentBalances ? parsed.EndDate.Date : null);
             stats.Imported = saved ? records.Count : 0;
             Console.WriteLine(saved
-                ? $"Import ICBC history detail {parsed.StatementKey}, imported={stats.Imported}, confirmedSIM={stats.ConfirmedSIMRecords}, reversedSIM={stats.ReversedSIMRecords}, replacedSIMInitializations={stats.ReplacedSIMInitializations}, overlap={stats.Overlap}, balanceUpdates={simResolution.EndingBalances.Count}, ignored={stats.FormatIgnored()}"
+                ? $"Import ICBC history detail {parsed.StatementKey}, imported={stats.Imported}, confirmedSIM={stats.ConfirmedSIMRecords}, confirmedSIMInitializations={stats.ConfirmedSIMInitializations}, reversedSIM={stats.ReversedSIMRecords}, overlap={stats.Overlap}, balanceUpdates={simResolution.EndingBalances.Count}, backfill={preserveCurrentBalances}, ignored={stats.FormatIgnored()}"
                 : $"Skip imported ICBC history detail {parsed.StatementKey}, ignored={stats.FormatIgnored()}");
             return saved;
         }
@@ -418,6 +441,7 @@ namespace MyBook
                     account,
                     parsed.StartDate.Date,
                     parsed.EndDate.Date.AddDays(1))
+                .Where(record => !DatabaseUtil.IsInitializationRecord(record))
                 .Where(IsICBCSIMRecordConfirmedByHistory);
 
             return historyRecords
@@ -456,15 +480,16 @@ namespace MyBook
             var supplements = new List<RecordSourceSupplement>();
             foreach (var simInitializationRecord in simInitializationRecords)
             {
-                var replacement = BuildICBCSIMInitializationReplacement(
+                var confirmation = BuildICBCSIMInitializationConfirmation(
                     parsed,
                     account,
                     simInitializationRecord,
                     candidates);
-                recordsToSave.Add(replacement.InitialRecord);
-                recordsToSave.Add(replacement.ReversalRecord);
-                supplements.Add(replacement.Supplement);
-                stats.ReplacedSIMInitializations++;
+                foreach (var candidateIndex in confirmation.PreInitializationCandidateIndexes)
+                    confirmedCandidateIndexes.Add(candidateIndex);
+
+                supplements.Add(confirmation.Supplement);
+                stats.ConfirmedSIMInitializations++;
             }
 
             foreach (var simRecord in simRecords)
@@ -498,10 +523,12 @@ namespace MyBook
                 {
                     var candidate = exactMatches[0];
                     confirmedCandidateIndexes.Add(candidate.Index);
+                    var fieldSupplement = BuildICBCHistoryDetailSIMFieldSupplement(simRecord, candidate);
                     supplements.Add(new RecordSourceSupplement(
                         simRecord.Id,
                         candidate.RowCode,
-                        BuildICBCHistoryDetailSIMConfirmationSource(parsed, candidate)));
+                        BuildICBCHistoryDetailSIMConfirmationSource(parsed, candidate, fieldSupplement),
+                        fieldSupplement));
                     stats.ConfirmedSIMRecords++;
                     continue;
                 }
@@ -542,53 +569,61 @@ namespace MyBook
                 || record.Source.Contains("supersededBy=ICBCHistoryDetail", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static ICBCHistoryDetailSIMInitializationReplacement BuildICBCSIMInitializationReplacement(
+        private static ICBCHistoryDetailSIMInitializationConfirmation BuildICBCSIMInitializationConfirmation(
             ICBCHistoryDetailParsedStatement parsed,
             Account account,
             Record simRecord,
             List<ICBCHistoryDetailDebitCandidate> candidates)
         {
-            var beginningBalance = BuildICBCHistoryDetailBeginningBalances(account, candidates)
-                .SingleOrDefault(balance => balance.t == simRecord.t)
-                ?? throw new InvalidOperationException(
-                    $"ICBC SIM initialization replacement missing history beginning balance: statement={parsed.StatementKey}; recordId={simRecord.Id}; currency={simRecord.t}");
-            var replacementCode = BuildICBCHistoryDetailInitializationReplacementCode(parsed, simRecord, beginningBalance);
-            var initialRecordDate = parsed.StartDate.Date;
-            var initialRecord = new Record
+            var initializationTime = simRecord.postingDate ?? simRecord.date;
+            var sameCurrencyCandidates = candidates
+                .Where(candidate => candidate.Row.Amount.t == simRecord.t)
+                .OrderBy(candidate => candidate.Row.PostingDate)
+                .ThenBy(candidate => candidate.Index)
+                .ToList();
+            if (sameCurrencyCandidates.Count == 0)
             {
-                Account = account,
-                date = initialRecordDate,
-                postingDate = initialRecordDate,
-                updateTime = DateTime.Now,
-                isInternal = true,
-                DestAccount = beginningBalance.t.ToString(),
-                Source = BuildICBCHistoryDetailInitialBalanceSource(parsed, simRecord, beginningBalance, replacementCode),
-                Reason = "Initial cash balance"
-            };
-            initialRecord.CopyFrom(beginningBalance);
+                throw new InvalidOperationException(
+                    $"ICBC SIM initialization confirmation missing history rows for currency: statement={parsed.StatementKey}; recordId={simRecord.Id}; currency={simRecord.t}");
+            }
 
-            var reversal = new Record
+            var preInitializationSameCurrency = sameCurrencyCandidates
+                .Where(candidate => candidate.Row.PostingDate < initializationTime)
+                .ToList();
+            var historyBalance = preInitializationSameCurrency.Count == 0
+                ? BuildICBCHistoryDetailBeginningBalances(account, candidates)
+                    .Single(balance => balance.t == simRecord.t)
+                    .v
+                : preInitializationSameCurrency[^1].Row.Balance
+                    ?? throw new InvalidOperationException(
+                        $"ICBC SIM initialization confirmation missing pre-initialization balance: statement={parsed.StatementKey}; recordId={simRecord.Id}");
+            if (historyBalance != simRecord.v)
             {
-                Account = account,
-                date = simRecord.date,
-                postingDate = simRecord.postingDate ?? simRecord.date,
-                updateTime = DateTime.Now,
-                isInternal = simRecord.isInternal,
-                DestAccount = simRecord.DestAccount,
-                Reason = simRecord.Reason,
-                Source = BuildICBCHistoryDetailSIMInitializationReversalSource(parsed, simRecord, replacementCode)
-            };
-            reversal.CopyFrom(new Currency(-simRecord.v, simRecord.t));
-            if (simRecord.DescCurrency is not null)
-                reversal.DescCurrency = new Currency(-simRecord.DescCurrency.v, simRecord.DescCurrency.t);
+                throw new InvalidOperationException(
+                    $"ICBC SIM initialization balance mismatch: statement={parsed.StatementKey}; recordId={simRecord.Id}; initializationTime={initializationTime:yyyy-MM-dd HH:mm:ss}; historyBalance={historyBalance}; simInitialization={simRecord.v} {simRecord.t}");
+            }
 
-            return new ICBCHistoryDetailSIMInitializationReplacement(
-                initialRecord,
-                reversal,
+            var preInitializationCandidateIndexes = candidates
+                .Where(candidate => candidate.Row.Amount.t == simRecord.t)
+                .Where(candidate => candidate.Row.PostingDate < initializationTime)
+                .Select(candidate => candidate.Index)
+                .ToList();
+            var confirmationCode = BuildICBCHistoryDetailInitializationConfirmationCode(
+                parsed,
+                simRecord,
+                new Currency(historyBalance, simRecord.t),
+                preInitializationCandidateIndexes.Count);
+            return new ICBCHistoryDetailSIMInitializationConfirmation(
                 new RecordSourceSupplement(
                     simRecord.Id,
-                    replacementCode,
-                    BuildICBCHistoryDetailSIMInitializationReplacementSource(parsed, replacementCode)));
+                    confirmationCode,
+                    BuildICBCHistoryDetailSIMInitializationConfirmationSource(
+                        parsed,
+                        simRecord,
+                        historyBalance,
+                        preInitializationCandidateIndexes.Count,
+                        confirmationCode)),
+                preInitializationCandidateIndexes);
         }
 
         private static bool IsICBCHistoryDetailSIMRecordExactMatch(
@@ -612,6 +647,86 @@ namespace MyBook
                 return false;
 
             return true;
+        }
+
+        private static RecordFieldSupplement? BuildICBCHistoryDetailSIMFieldSupplement(
+            Record simRecord,
+            ICBCHistoryDetailDebitCandidate candidate)
+        {
+            DateTime? date = null;
+            DateTime? postingDate = null;
+            var historyDate = candidate.Row.PostingDate;
+            if (IsSameICBCHistoryDetailMinute(simRecord.date, historyDate) && simRecord.date != historyDate)
+                date = historyDate;
+            if (!simRecord.postingDate.HasValue
+                || (IsSameICBCHistoryDetailMinute(simRecord.postingDate.Value, historyDate)
+                    && simRecord.postingDate.Value != historyDate))
+            {
+                postingDate = historyDate;
+            }
+
+            var destAccount = MergeICBCHistoryDetailSIMDestAccount(
+                simRecord.DestAccount,
+                candidate.Record.DestAccount);
+            var reason = IsMoreSpecificICBCHistoryReason(simRecord.Reason, candidate.Record.Reason)
+                ? candidate.Record.Reason
+                : null;
+            var descCurrency = simRecord.DescCurrency is null && candidate.Row.DescCurrency is not null
+                ? candidate.Row.DescCurrency
+                : null;
+            var isInternal = !simRecord.isInternal && candidate.Record.isInternal
+                ? true
+                : (bool?)null;
+
+            return date.HasValue
+                || postingDate.HasValue
+                || destAccount is not null
+                || reason is not null
+                || descCurrency is not null
+                || isInternal.HasValue
+                ? new RecordFieldSupplement(date, postingDate, destAccount, reason, descCurrency, isInternal)
+                : null;
+        }
+
+        private static string? MergeICBCHistoryDetailSIMDestAccount(string simDestAccount, string historyDestAccount)
+        {
+            var sim = NormalizeICBCHistoryText(simDestAccount);
+            var history = NormalizeICBCHistoryText(historyDestAccount);
+            if (String.IsNullOrWhiteSpace(history))
+                return null;
+            if (String.IsNullOrWhiteSpace(sim))
+                return LimitICBCHistoryDetailDestAccountText(history);
+
+            var normalizedSIM = NormalizeICBCHistoryComparableText(sim);
+            var normalizedHistory = NormalizeICBCHistoryComparableText(history);
+            if (String.IsNullOrWhiteSpace(normalizedHistory)
+                || normalizedSIM.Contains(normalizedHistory, StringComparison.Ordinal)
+                || normalizedHistory.Contains(normalizedSIM, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            return LimitICBCHistoryDetailDestAccountText($"{sim}; {history}");
+        }
+
+        private static string LimitICBCHistoryDetailDestAccountText(string text)
+        {
+            const int maxLength = 255;
+            var normalized = NormalizeICBCHistoryText(text);
+            return normalized.Length <= maxLength ? normalized : normalized[..maxLength];
+        }
+
+        private static bool IsMoreSpecificICBCHistoryReason(string simReason, string historyReason)
+        {
+            var sim = NormalizeICBCHistoryText(simReason);
+            var history = NormalizeICBCHistoryText(historyReason);
+            if (String.IsNullOrWhiteSpace(history) || sim == history)
+                return false;
+            if (String.IsNullOrWhiteSpace(sim))
+                return true;
+
+            return history.Length > sim.Length
+                && history.Contains(sim, StringComparison.Ordinal);
         }
 
         private static bool IsSameICBCHistoryDetailMinute(DateTime left, DateTime right)
@@ -667,7 +782,8 @@ namespace MyBook
 
         private static string BuildICBCHistoryDetailSIMConfirmationSource(
             ICBCHistoryDetailParsedStatement parsed,
-            ICBCHistoryDetailDebitCandidate candidate)
+            ICBCHistoryDetailDebitCandidate candidate,
+            RecordFieldSupplement? fieldSupplement)
         {
             var parts = new List<string>
             {
@@ -678,8 +794,34 @@ namespace MyBook
             if (candidate.Row.Balance.HasValue)
                 parts.Add($"historyBalance={candidate.Row.Amount.t}:{candidate.Row.Balance.Value.ToString(CultureInfo.InvariantCulture)}");
 
+            var updatedFields = FormatICBCHistoryDetailFieldSupplementFields(fieldSupplement);
+            if (!String.IsNullOrWhiteSpace(updatedFields))
+                parts.Add($"updatedFields={updatedFields}");
+
             parts.Add($"row={candidate.Row.RawText}");
             return LimitICBCHistoryDetailRecordText(String.Join("; ", parts));
+        }
+
+        private static string FormatICBCHistoryDetailFieldSupplementFields(RecordFieldSupplement? supplement)
+        {
+            if (supplement is null)
+                return "";
+
+            var fields = new List<string>();
+            if (supplement.Date.HasValue)
+                fields.Add("date");
+            if (supplement.PostingDate.HasValue)
+                fields.Add("postingDate");
+            if (supplement.DestAccount is not null)
+                fields.Add("DestAccount");
+            if (supplement.Reason is not null)
+                fields.Add("Reason");
+            if (supplement.DescCurrency is not null)
+                fields.Add("DescCurrency");
+            if (supplement.IsInternal.HasValue)
+                fields.Add("isInternal");
+
+            return String.Join(",", fields);
         }
 
         private static bool TryBuildICBCSIMCompensationReplacement(
@@ -800,56 +942,36 @@ namespace MyBook
             return ICBCHistoryDetailReplacementCodePrefix + ComputeSha256(Encoding.UTF8.GetBytes(canonical))[..24];
         }
 
-        private static string BuildICBCHistoryDetailInitializationReplacementCode(
+        private static string BuildICBCHistoryDetailInitializationConfirmationCode(
             ICBCHistoryDetailParsedStatement parsed,
             Record simRecord,
-            AccountBalance beginningBalance)
+            Currency historyBalance,
+            int preInitializationRowCount)
         {
             var canonical = String.Join("|",
                 parsed.StatementKey,
                 simRecord.Id.ToString(CultureInfo.InvariantCulture),
-                beginningBalance.t,
-                beginningBalance.v.ToString(CultureInfo.InvariantCulture));
-            return ICBCHistoryDetailInitializationReplacementCodePrefix + ComputeSha256(Encoding.UTF8.GetBytes(canonical))[..24];
+                historyBalance.t,
+                historyBalance.v.ToString(CultureInfo.InvariantCulture),
+                preInitializationRowCount.ToString(CultureInfo.InvariantCulture));
+            return ICBCHistoryDetailInitializationConfirmationCodePrefix + ComputeSha256(Encoding.UTF8.GetBytes(canonical))[..24];
         }
 
-        private static string BuildICBCHistoryDetailInitialBalanceSource(
+        private static string BuildICBCHistoryDetailSIMInitializationConfirmationSource(
             ICBCHistoryDetailParsedStatement parsed,
             Record simRecord,
-            AccountBalance beginningBalance,
-            string replacementCode)
+            decimal historyBalance,
+            int preInitializationRowCount,
+            string confirmationCode)
         {
             return LimitICBCHistoryDetailRecordText(String.Join("; ",
-                "InitialRecord/ICBCHistoryDetailMail",
-                $"code={replacementCode}",
+                $"code={confirmationCode}",
+                "confirmedBy=ICBCHistoryDetail",
+                "confirmedSIMInitialization",
                 $"statementKey={parsed.StatementKey}",
-                $"replacesSIMInitializationRecordId={simRecord.Id}",
-                $"currency={beginningBalance.t}",
-                $"amount={beginningBalance.v.ToString(CultureInfo.InvariantCulture)}"));
-        }
-
-        private static string BuildICBCHistoryDetailSIMInitializationReversalSource(
-            ICBCHistoryDetailParsedStatement parsed,
-            Record simRecord,
-            string replacementCode)
-        {
-            return LimitICBCHistoryDetailRecordText(String.Join("; ",
-                $"code={replacementCode}",
-                "ICBCHistoryDetail",
-                "reversesSIMInitialization",
-                $"reversesRecordId={simRecord.Id}",
-                $"replacementStatementKey={parsed.StatementKey}"));
-        }
-
-        private static string BuildICBCHistoryDetailSIMInitializationReplacementSource(
-            ICBCHistoryDetailParsedStatement parsed,
-            string replacementCode)
-        {
-            return LimitICBCHistoryDetailRecordText(String.Join("; ",
-                $"code={replacementCode}",
-                "supersededBy=ICBCHistoryDetail",
-                "replacedByHistoryInitialBalance",
-                $"statementKey={parsed.StatementKey}"));
+                $"initializationRecordId={simRecord.Id}",
+                $"historyBalance={simRecord.t}:{historyBalance.ToString(CultureInfo.InvariantCulture)}",
+                $"validatedPreInitializationRows={preInitializationRowCount}"));
         }
 
         private static string BuildICBCHistoryDetailSIMReversalSource(
@@ -2064,10 +2186,9 @@ namespace MyBook
         private sealed record ICBCHistoryDetailSIMCompensationReplacement(
             Record ReversalRecord,
             RecordSourceSupplement Supplement);
-        private sealed record ICBCHistoryDetailSIMInitializationReplacement(
-            Record InitialRecord,
-            Record ReversalRecord,
-            RecordSourceSupplement Supplement);
+        private sealed record ICBCHistoryDetailSIMInitializationConfirmation(
+            RecordSourceSupplement Supplement,
+            List<int> PreInitializationCandidateIndexes);
         private sealed record ICBCMonthlyStatementPeriod(
             StatementImport StatementImport,
             DateTime StartDate,
@@ -2092,8 +2213,8 @@ namespace MyBook
             public int Imported { get; set; }
             public int Overlap { get; set; }
             public int ConfirmedSIMRecords { get; set; }
+            public int ConfirmedSIMInitializations { get; set; }
             public int ReversedSIMRecords { get; set; }
-            public int ReplacedSIMInitializations { get; set; }
             public int MissingMonthlyRows { get; set; }
 
             public void Ignore(string reason, int count)

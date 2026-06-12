@@ -40,24 +40,27 @@ namespace MyBook
             if (IsMatchingICBCRecordAlreadyImported(postingAccount, transaction))
                 return new SIMMessageProcessResult("matching ICBC transaction already exists", true);
 
-            var currentBalance = database.GetAccountBalance(postingAccount, transaction.Amount.t);
+            var hasCurrentBalance = database.TryGetAccountBalance(
+                postingAccount,
+                transaction.Amount.t,
+                out var currentBalance);
             var requiredBeginningBalance = new Currency(transaction.Balance.v - transaction.Amount.v, transaction.Balance.t);
-            var hasAccountHistory = database.HasAccountHistory(postingAccount);
             var record = BuildICBCSIMRecord(postingAccount, transaction, statementKey, message);
             var records = new List<Record>();
-            var compensation = BuildICBCSIMCompensationRecordIfNeeded(
-                postingAccount,
-                transaction,
-                statementKey,
-                message,
-                currentBalance,
-                requiredBeginningBalance,
-                hasAccountHistory);
+            var compensation = hasCurrentBalance
+                ? BuildICBCSIMCompensationRecordIfNeeded(
+                    postingAccount,
+                    transaction,
+                    statementKey,
+                    message,
+                    currentBalance,
+                    requiredBeginningBalance)
+                : null;
             if (compensation is not null)
                 records.Add(compensation);
 
             records.Add(record);
-            var beginningBalance = new AccountBalance(postingAccount, hasAccountHistory ? currentBalance : requiredBeginningBalance);
+            var beginningBalance = new AccountBalance(postingAccount, hasCurrentBalance ? currentBalance : requiredBeginningBalance);
             var endingBalance = new AccountBalance(postingAccount, transaction.Balance);
             var saved = database.SaveStatementRecordsOnce(
                 ICBCSIMProvider,
@@ -66,7 +69,7 @@ namespace MyBook
                 [endingBalance],
                 statementKey,
                 [beginningBalance],
-                forceValidateBeginningBalances: true);
+                forceValidateBeginningBalances: hasCurrentBalance);
 
             return saved
                 ? new SIMMessageProcessResult(compensation is null
@@ -180,8 +183,7 @@ namespace MyBook
             string statementKey,
             SIMMessage message,
             Currency currentBalance,
-            Currency requiredBeginningBalance,
-            bool hasAccountHistory)
+            Currency requiredBeginningBalance)
         {
             if (currentBalance.t != requiredBeginningBalance.t)
                 throw new InvalidOperationException(
@@ -189,8 +191,6 @@ namespace MyBook
 
             var compensationAmount = requiredBeginningBalance.v - currentBalance.v;
             if (compensationAmount == 0)
-                return null;
-            if (!hasAccountHistory)
                 return null;
 
             var compensation = new Currency(compensationAmount, requiredBeginningBalance.t);

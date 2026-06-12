@@ -874,7 +874,9 @@ namespace MyBook
             IEnumerable<AccountBalance>? beginningAccountBalances = null,
             IEnumerable<AccountInternalId>? internalCardNos = null,
             Action<int>? afterSaveInTransaction = null,
-            bool forceValidateBeginningBalances = false)
+            bool forceValidateBeginningBalances = false,
+            bool preserveCurrentAccountBalances = false,
+            DateTime? validateCurrentBalancesRolledBackTo = null)
         {
             var recordList = records.ToList();
             var accountBalanceList = accountBalances?.ToList() ?? [];
@@ -891,9 +893,12 @@ namespace MyBook
                         recordList,
                         accountBalanceList,
                         beginningAccountBalanceList,
-                        forceValidateBeginningBalances || ShouldValidateBeginningAccountBalances(provider),
+                        !preserveCurrentAccountBalances
+                            && (forceValidateBeginningBalances || ShouldValidateBeginningAccountBalances(provider)),
                         internalCardNos: internalCardNoList,
-                        afterSaveInTransaction: afterSaveInTransaction);
+                        afterSaveInTransaction: afterSaveInTransaction,
+                        preserveCurrentAccountBalances: preserveCurrentAccountBalances,
+                        validateCurrentBalancesRolledBackTo: validateCurrentBalancesRolledBackTo);
                     if (!statementImportId.HasValue)
                         return false;
 
@@ -1000,10 +1005,14 @@ namespace MyBook
             List<Holding>? holdings = null,
             List<Holding>? beginningHoldings = null,
             List<AccountInternalId>? internalCardNos = null,
-            Action<int>? afterSaveInTransaction = null)
+            Action<int>? afterSaveInTransaction = null,
+            bool preserveCurrentAccountBalances = false,
+            DateTime? validateCurrentBalancesRolledBackTo = null)
         {
             if (IsStatementImported(provider, time, statementKey))
                 return null;
+            if (preserveCurrentAccountBalances && (holdingAccount is not null || holdings is not null))
+                throw new InvalidOperationException($"Preserving current account balances is not supported for holding imports: {provider}.");
 
             var hasExternalBalances = accountBalances.Count > 0 || beginningAccountBalances.Count > 0;
             if (hasExternalBalances)
@@ -1013,6 +1022,15 @@ namespace MyBook
                     beginningAccountBalances,
                     shouldValidateBeginningBalances);
                 ValidateRecordBalanceChanges(provider, records, beginningAccountBalances, accountBalances);
+                if (preserveCurrentAccountBalances)
+                {
+                    if (!validateCurrentBalancesRolledBackTo.HasValue)
+                        throw new InvalidOperationException($"Backfilled account balance validation date is required for {provider}.");
+                    ValidateCurrentAccountBalancesRolledBackTo(
+                        provider,
+                        accountBalances,
+                        validateCurrentBalancesRolledBackTo.Value);
+                }
             }
             else
             {
@@ -1036,7 +1054,7 @@ namespace MyBook
                 ValidateSavedAccountHoldingQuantities(provider, statementKey, holdingAccount, holdings);
             }
 
-            if (hasExternalBalances)
+            if (hasExternalBalances && !preserveCurrentAccountBalances)
                 SaveCashHoldingsFromAccountBalances(accountBalances, holdingAccount);
 
             var recordsToSave = initializationRecords.Count == 0
@@ -1143,8 +1161,8 @@ namespace MyBook
                 return (importTime.Date, importTime.Date);
 
             return (
-                records.Min(record => record.date).Date,
-                records.Min(record => record.postingDate ?? record.date).Date);
+                records.Min(record => record.date),
+                records.Min(record => record.postingDate ?? record.date));
         }
 
         public bool HasAccountHistory(Account account)
@@ -1152,15 +1170,23 @@ namespace MyBook
             return AccountHasHistory(account);
         }
 
+        public bool HasAccountRecordsOnOrAfter(Account account, DateTime start)
+        {
+            account = GetPostingAccount(account);
+            return db.Queryable<Record>()
+                .Where(record => record._account_Id == account.Id)
+                .ToList()
+                .Any(record => GetHistoricalBalanceRecordDate(
+                    record,
+                    HistoricalBalanceDateBasis.PostingDate) >= start.Date);
+        }
+
         private bool AccountHasHistory(Account account)
         {
             account = GetPostingAccount(account);
             return db.Queryable<Record>()
-                    .Where(record => record._account_Id == account.Id)
-                    .Any()
-                || db.Queryable<Holding>()
-                    .Where(holding => holding._account_Id == account.Id)
-                    .Any();
+                .Where(record => record._account_Id == account.Id)
+                .Any();
         }
 
         private static Record CreateInitialHoldingRecord(
@@ -2406,11 +2432,41 @@ namespace MyBook
 
         public Currency GetAccountBalance(Account account, CurrencyType currencyType)
         {
+            return TryGetAccountBalance(account, currencyType, out var balance)
+                ? balance
+                : new Currency(0, currencyType);
+        }
+
+        public bool TryGetAccountBalance(Account account, CurrencyType currencyType, out Currency balance)
+        {
             account = GetPostingAccount(account);
-            var balance = db.Queryable<AccountBalance>()
-                .Where(it => it._account_Id == account.Id && it.t == currencyType)
+            var code = currencyType.ToString();
+            var holding = db.Queryable<Holding>()
+                .Where(it => it._account_Id == account.Id
+                    && it.code == code
+                    && it.holdingType == HoldingType.Cash)
                 .First();
-            return new Currency(balance?.v ?? 0, currencyType);
+            if (holding is null)
+            {
+                balance = new Currency(0, currencyType);
+                return false;
+            }
+
+            if (holding.currentPrice.t != currencyType)
+            {
+                throw new InvalidOperationException(
+                    $"Cash holding currency mismatch: account={account.name}, code={holding.code}, priceCurrency={holding.currentPrice.t}, requested={currencyType}");
+            }
+
+            if (holding.currentPrice.v == 0
+                && !db.Queryable<Record>().Where(it => it._account_Id == account.Id && it.t == currencyType).Any())
+            {
+                balance = new Currency(0, currencyType);
+                return false;
+            }
+
+            balance = new Currency(holding.currentPrice.v, currencyType);
+            return true;
         }
 
         private Account? FindAccountByName(string accountName)
@@ -2586,6 +2642,37 @@ namespace MyBook
             if (records.Count == 0)
                 return;
 
+            ApplyAutomaticExpenseAllocationForRecordsCore(records, importsById);
+        }
+
+        private void ApplyAutomaticExpenseAllocationForRecords(IEnumerable<int> recordIds)
+        {
+            var recordIdList = recordIds.Where(id => id > 0).Distinct().ToList();
+            if (recordIdList.Count == 0)
+                return;
+
+            var records = db.Queryable<Record>()
+                .Where(record => recordIdList.Contains(record.Id))
+                .ToList();
+            if (records.Count == 0)
+                return;
+
+            var statementImportIds = records
+                .Select(record => record._statementImport_Id)
+                .Distinct()
+                .ToList();
+            var importsById = db.Queryable<StatementImport>()
+                .Where(import => statementImportIds.Contains(import.Id))
+                .ToList()
+                .ToDictionary(import => import.Id);
+
+            ApplyAutomaticExpenseAllocationForRecordsCore(records, importsById);
+        }
+
+        private void ApplyAutomaticExpenseAllocationForRecordsCore(
+            List<Record> records,
+            Dictionary<int, StatementImport> importsById)
+        {
             var accountIds = records.Select(record => record._account_Id).Distinct().ToList();
             var accountsById = db.Queryable<Account>()
                 .Where(account => accountIds.Contains(account.Id))
@@ -2733,6 +2820,53 @@ namespace MyBook
                 {
                     throw new InvalidOperationException(
                         $"Record balance mismatch for {provider}: accountId={key.AccountId}, currency={key.Currency}, beginning={beginning}, records={change}, ending={ending}");
+                }
+            }
+        }
+
+        private void ValidateCurrentAccountBalancesRolledBackTo(
+            StatementImportProvider provider,
+            List<AccountBalance> expectedBalances,
+            DateTime date)
+        {
+            if (expectedBalances.Count == 0)
+                throw new InvalidOperationException($"Backfilled account balance validation requires ending account balances for {provider}.");
+
+            var targetEnd = date.Date.AddDays(1);
+            var balances = db.Queryable<AccountBalance>()
+                .ToList()
+                .GroupBy(balance => (balance._account_Id, balance.t))
+                .ToDictionary(group => group.Key, group => group.Sum(balance => balance.v));
+            var futureRecords = db.Queryable<Record>()
+                .ToList()
+                .Where(record => GetHistoricalBalanceRecordDate(
+                    record,
+                    HistoricalBalanceDateBasis.PostingDate) >= targetEnd)
+                .ToList();
+            foreach (var record in futureRecords)
+            {
+                var key = (record._account_Id, record.t);
+                balances[key] = balances.TryGetValue(key, out var current)
+                    ? current - record.v
+                    : -record.v;
+            }
+
+            var expected = BuildAccountBalanceMap(expectedBalances, "Backfilled ending account balance");
+            var accountIds = expected.Keys.Select(key => key.AccountId).Distinct().ToList();
+            var accountsById = db.Queryable<Account>()
+                .Where(account => accountIds.Contains(account.Id))
+                .ToList()
+                .ToDictionary(account => account.Id);
+            foreach (var item in expected)
+            {
+                var actual = balances.TryGetValue(item.Key, out var actualValue) ? actualValue : 0;
+                if (actual != item.Value)
+                {
+                    var accountName = accountsById.TryGetValue(item.Key.AccountId, out var account)
+                        ? account.name
+                        : item.Key.AccountId.ToString(CultureInfo.InvariantCulture);
+                    throw new InvalidOperationException(
+                        $"Backfilled ending balance mismatch for {provider}: {accountName}/{item.Key.Currency}, rolledBackAt={date:yyyy-MM-dd}, currentRolledBack={actual}, ending={item.Value}");
                 }
             }
         }
@@ -5080,6 +5214,7 @@ namespace MyBook
                 return;
 
             var now = DateTime.Now;
+            var fieldSupplementRecordIds = new List<int>();
             foreach (var supplement in supplementList)
             {
                 var record = db.Queryable<Record>()
@@ -5093,10 +5228,85 @@ namespace MyBook
 
                 record.Source = AppendLimitedRecordText(record.Source, supplement.SourceAppend);
                 record.updateTime = now;
-                db.Updateable(record)
-                    .UpdateColumns(it => new { it.Source, it.updateTime })
-                    .ExecuteCommand();
+                var fieldsUpdated = ApplyRecordFieldSupplement(record, supplement.FieldSupplement);
+                if (fieldsUpdated)
+                {
+                    record.allocatedExpenseCacheDirty = true;
+                    fieldSupplementRecordIds.Add(record.Id);
+                    db.Updateable(record)
+                        .UpdateColumns(it => new
+                        {
+                            it.Source,
+                            it.updateTime,
+                            it.date,
+                            it.postingDate,
+                            it.DestAccount,
+                            it.Reason,
+                            it.isInternal,
+                            it._descCurrency_v,
+                            it._descCurrency_t,
+                            it.allocatedExpenseCacheDirty
+                        })
+                        .ExecuteCommand();
+                }
+                else
+                {
+                    db.Updateable(record)
+                        .UpdateColumns(it => new { it.Source, it.updateTime })
+                        .ExecuteCommand();
+                }
             }
+
+            if (fieldSupplementRecordIds.Count > 0)
+            {
+                ApplyAutomaticExpenseAllocationForRecords(fieldSupplementRecordIds);
+                ProcessAllocatedExpenseDirtyRecordsCore();
+            }
+        }
+
+        private static bool ApplyRecordFieldSupplement(Record record, RecordFieldSupplement? supplement)
+        {
+            if (supplement is null)
+                return false;
+
+            var updated = false;
+            if (supplement.Date.HasValue && record.date != supplement.Date.Value)
+            {
+                record.date = supplement.Date.Value;
+                updated = true;
+            }
+
+            if (supplement.PostingDate.HasValue && record.postingDate != supplement.PostingDate.Value)
+            {
+                record.postingDate = supplement.PostingDate.Value;
+                updated = true;
+            }
+
+            if (supplement.DestAccount is not null && record.DestAccount != supplement.DestAccount)
+            {
+                record.DestAccount = supplement.DestAccount;
+                updated = true;
+            }
+
+            if (supplement.Reason is not null && record.Reason != supplement.Reason)
+            {
+                record.Reason = supplement.Reason;
+                updated = true;
+            }
+
+            if (supplement.DescCurrency is not null && record.DescCurrency != supplement.DescCurrency)
+            {
+                record.DescCurrency = supplement.DescCurrency;
+                updated = true;
+            }
+
+            if (supplement.IsInternal.HasValue && record.isInternal != supplement.IsInternal.Value)
+            {
+                record.isInternal = supplement.IsInternal.Value;
+                updated = true;
+            }
+
+            return updated;
         }
 
         public void MarkRecordsAsRefundMatched(IEnumerable<Record> records)
@@ -5724,7 +5934,16 @@ namespace MyBook
     record RecordSourceSupplement(
         int RecordId,
         string SourceCode,
-        string SourceAppend);
+        string SourceAppend,
+        RecordFieldSupplement? FieldSupplement = null);
+
+    record RecordFieldSupplement(
+        DateTime? Date = null,
+        DateTime? PostingDate = null,
+        string? DestAccount = null,
+        string? Reason = null,
+        Currency? DescCurrency = null,
+        bool? IsInternal = null);
 
     class DatabaseCleanupResult
     {
