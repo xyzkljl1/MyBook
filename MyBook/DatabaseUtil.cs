@@ -5057,24 +5057,7 @@ namespace MyBook
                         return false;
 
                     InsertStatementImport(provider, time, statementKey);
-                    var now = DateTime.Now;
-                    foreach (var supplement in supplementList)
-                    {
-                        var record = db.Queryable<Record>()
-                            .Where(it => it.Id == supplement.RecordId)
-                            .First();
-                        if (record is null)
-                            throw new InvalidOperationException($"Supplement target record not found: {supplement.RecordId}");
-
-                        if (record.Source.Contains($"code={supplement.SourceCode}", StringComparison.OrdinalIgnoreCase))
-                            continue;
-
-                        record.Source = AppendLimitedRecordText(record.Source, supplement.SourceAppend);
-                        record.updateTime = now;
-                        db.Updateable(record)
-                            .UpdateColumns(it => new { it.Source, it.updateTime })
-                            .ExecuteCommand();
-                    }
+                    AppendRecordSourceSupplements(supplementList);
 
                     if (internalCardNoList.Count > 0)
                         EnsureAccountInternalCardNos(internalCardNoList);
@@ -5087,6 +5070,32 @@ namespace MyBook
                 if (IsDuplicateKeyException(e) && IsStatementImported(provider, time, statementKey))
                     return false;
                 throw;
+            }
+        }
+
+        public void AppendRecordSourceSupplements(IEnumerable<RecordSourceSupplement> supplements)
+        {
+            var supplementList = supplements.ToList();
+            if (supplementList.Count == 0)
+                return;
+
+            var now = DateTime.Now;
+            foreach (var supplement in supplementList)
+            {
+                var record = db.Queryable<Record>()
+                    .Where(it => it.Id == supplement.RecordId)
+                    .First();
+                if (record is null)
+                    throw new InvalidOperationException($"Supplement target record not found: {supplement.RecordId}");
+
+                if (record.Source.Contains($"code={supplement.SourceCode}", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                record.Source = AppendLimitedRecordText(record.Source, supplement.SourceAppend);
+                record.updateTime = now;
+                db.Updateable(record)
+                    .UpdateColumns(it => new { it.Source, it.updateTime })
+                    .ExecuteCommand();
             }
         }
 
