@@ -44,7 +44,7 @@ Expected files:
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly summaries through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
 - `FileUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
-- `SIMUtil` polls a USB SIM modem through a Windows COM port, verifies the SIM IMSI against local configuration, combines complete long SMS messages before dispatching by sender, and can import supported ICBC debit-card transaction SMS messages with balance validation.
+- `SIMUtil` polls a USB SIM modem through a Windows COM port, verifies the SIM IMSI against local configuration, combines complete long SMS messages before dispatching by sender, and can import supported ICBC debit-card transaction SMS messages with balance validation. If an ICBC SMS balance proves that earlier unreported activity changed the debit-account balance, it writes an `ICBCSIMCompensation` record in the same atomic import so later history-detail rows can reverse and replace it.
 - `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
 - `WebUtil.Meituan.TODO` will fetch Meituan account balance information.
 

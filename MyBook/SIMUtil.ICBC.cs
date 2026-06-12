@@ -10,6 +10,7 @@ namespace MyBook
         private const string ICBCSIMAccountType = "ICBC";
         private const StatementImportProvider ICBCSIMProvider = StatementImportProvider.ICBCSIMSMS;
         private const string ICBCSIMRowCodePrefix = "ICBCSIM-";
+        private const string ICBCSIMCompensationCodePrefix = "ICBCSIMCompensation-";
         private static readonly Regex ICBCSIMTransactionRegex = new(
             @"尾号(?<cardTail>\d{4})卡(?<month>\d{1,2})月(?<day>\d{1,2})日(?<hour>\d{1,2}):(?<minute>\d{2})(?<direction>支出|收入)[(（](?<summary>[^)）]+)[)）](?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]\s*余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)元",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -39,22 +40,36 @@ namespace MyBook
             if (IsMatchingICBCRecordAlreadyImported(postingAccount, transaction))
                 return new SIMMessageProcessResult("matching ICBC transaction already exists", true);
 
+            var currentBalance = database.GetAccountBalance(postingAccount, transaction.Amount.t);
+            var requiredBeginningBalance = new Currency(transaction.Balance.v - transaction.Amount.v, transaction.Balance.t);
             var record = BuildICBCSIMRecord(postingAccount, transaction, statementKey, message);
-            var beginningBalance = new AccountBalance(
+            var records = new List<Record>();
+            var compensation = BuildICBCSIMCompensationRecordIfNeeded(
                 postingAccount,
-                new Currency(transaction.Balance.v - transaction.Amount.v, transaction.Balance.t));
+                transaction,
+                statementKey,
+                message,
+                currentBalance,
+                requiredBeginningBalance);
+            if (compensation is not null)
+                records.Add(compensation);
+
+            records.Add(record);
+            var beginningBalance = new AccountBalance(postingAccount, currentBalance);
             var endingBalance = new AccountBalance(postingAccount, transaction.Balance);
             var saved = database.SaveStatementRecordsOnce(
                 ICBCSIMProvider,
                 message.Time,
-                [record],
+                records,
                 [endingBalance],
                 statementKey,
                 [beginningBalance],
                 forceValidateBeginningBalances: true);
 
             return saved
-                ? new SIMMessageProcessResult("imported ICBC SMS transaction", true)
+                ? new SIMMessageProcessResult(compensation is null
+                    ? "imported ICBC SMS transaction"
+                    : "imported ICBC SMS transaction with balance compensation", true)
                 : new SIMMessageProcessResult("duplicate ICBC SMS transaction", true);
         }
 
@@ -157,6 +172,49 @@ namespace MyBook
             return record;
         }
 
+        private Record? BuildICBCSIMCompensationRecordIfNeeded(
+            Account postingAccount,
+            ICBCSIMTransaction transaction,
+            string statementKey,
+            SIMMessage message,
+            Currency currentBalance,
+            Currency requiredBeginningBalance)
+        {
+            if (currentBalance.t != requiredBeginningBalance.t)
+                throw new InvalidOperationException(
+                    $"ICBC SIM balance currency mismatch: current={currentBalance.t}, required={requiredBeginningBalance.t}");
+
+            var compensationAmount = requiredBeginningBalance.v - currentBalance.v;
+            if (compensationAmount == 0)
+                return null;
+            if (!database!.HasAccountHistory(postingAccount))
+            {
+                throw new InvalidOperationException(
+                    $"ICBC SIM compensation requires existing account history: account={postingAccount.name}, current={currentBalance.v}, requiredBeginning={requiredBeginningBalance.v}");
+            }
+
+            var compensation = new Currency(compensationAmount, requiredBeginningBalance.t);
+            var record = new Record
+            {
+                Account = postingAccount,
+                date = transaction.TransactionTime.AddSeconds(-1),
+                postingDate = transaction.TransactionTime.AddSeconds(-1),
+                updateTime = DateTime.Now,
+                DestAccount = "Inferred from SMS balance",
+                Source = BuildICBCSIMCompensationSource(
+                    transaction,
+                    statementKey,
+                    message,
+                    currentBalance,
+                    requiredBeginningBalance,
+                    compensation),
+                Reason = "Missing small transactions",
+                DescCurrency = compensation
+            };
+            record.CopyFrom(compensation);
+            return record;
+        }
+
         private static string BuildICBCSIMStatementKey(Account postingAccount, ICBCSIMTransaction transaction)
         {
             var canonical = String.Join("|",
@@ -182,6 +240,50 @@ namespace MyBook
                 $"smsBalance={transaction.Balance.t}:{transaction.Balance.v.ToString(CultureInfo.InvariantCulture)}",
                 $"row={NormalizeICBCSIMText(message.Text)}");
             return LimitICBCSIMRecordText(source);
+        }
+
+        private static string BuildICBCSIMCompensationSource(
+            ICBCSIMTransaction transaction,
+            string statementKey,
+            SIMMessage message,
+            Currency currentBalance,
+            Currency requiredBeginningBalance,
+            Currency compensation)
+        {
+            var compensationCode = BuildICBCSIMCompensationCode(
+                statementKey,
+                currentBalance,
+                requiredBeginningBalance,
+                compensation);
+            var source = String.Join("; ",
+                $"code={compensationCode}",
+                "ICBCSIMSMS",
+                "ICBCSIMCompensation",
+                $"generatedFrom={statementKey}",
+                $"smsTime={message.Time:yyyy-MM-dd HH:mm:ss}",
+                $"currentBalance={currentBalance.t}:{currentBalance.v.ToString(CultureInfo.InvariantCulture)}",
+                $"smsRequiredBeginning={requiredBeginningBalance.t}:{requiredBeginningBalance.v.ToString(CultureInfo.InvariantCulture)}",
+                $"smsBalance={requiredBeginningBalance.t}:{requiredBeginningBalance.v.ToString(CultureInfo.InvariantCulture)}",
+                $"smsFinalBalance={transaction.Balance.t}:{transaction.Balance.v.ToString(CultureInfo.InvariantCulture)}",
+                $"row={NormalizeICBCSIMText(message.Text)}");
+            return LimitICBCSIMRecordText(source);
+        }
+
+        private static string BuildICBCSIMCompensationCode(
+            string statementKey,
+            Currency currentBalance,
+            Currency requiredBeginningBalance,
+            Currency compensation)
+        {
+            var canonical = String.Join("|",
+                statementKey,
+                currentBalance.v.ToString(CultureInfo.InvariantCulture),
+                currentBalance.t,
+                requiredBeginningBalance.v.ToString(CultureInfo.InvariantCulture),
+                requiredBeginningBalance.t,
+                compensation.v.ToString(CultureInfo.InvariantCulture),
+                compensation.t);
+            return ICBCSIMCompensationCodePrefix + ComputeICBCSIMSha256(Encoding.UTF8.GetBytes(canonical))[..24];
         }
 
         private static bool TryParseICBCSIMSourceBalance(string source, out Currency balance)

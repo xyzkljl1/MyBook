@@ -440,7 +440,7 @@ namespace MyBook
                     start,
                     end)
                 .Where(record => !DatabaseUtil.IsInitializationRecord(record))
-                .Where(record => !IsICBCSIMRecordConfirmedByHistory(record))
+                .Where(record => !IsICBCSIMRecordResolvedByHistory(record))
                 .OrderBy(record => record.postingDate ?? record.date)
                 .ThenBy(record => record.Id)
                 .ToList();
@@ -450,6 +450,23 @@ namespace MyBook
             var supplements = new List<RecordSourceSupplement>();
             foreach (var simRecord in simRecords)
             {
+                if (IsICBCSIMCompensationRecord(simRecord))
+                {
+                    if (TryBuildICBCSIMCompensationReplacement(
+                            parsed,
+                            account,
+                            simRecord,
+                            candidates,
+                            confirmedCandidateIndexes,
+                            out var replacement))
+                    {
+                        recordsToSave.Add(replacement.ReversalRecord);
+                        supplements.Add(replacement.Supplement);
+                        stats.ReversedSIMRecords++;
+                        continue;
+                    }
+                }
+
                 var exactMatches = candidates
                     .Where(candidate => !confirmedCandidateIndexes.Contains(candidate.Index))
                     .Where(candidate => IsICBCHistoryDetailSIMRecordExactMatch(candidate, simRecord))
@@ -467,20 +484,6 @@ namespace MyBook
                         candidate.RowCode,
                         BuildICBCHistoryDetailSIMConfirmationSource(parsed, candidate)));
                     stats.ConfirmedSIMRecords++;
-                    continue;
-                }
-
-                if (TryBuildICBCSIMCompensationReplacement(
-                        parsed,
-                        account,
-                        simRecord,
-                        candidates,
-                        confirmedCandidateIndexes,
-                        out var replacement))
-                {
-                    recordsToSave.Add(replacement.ReversalRecord);
-                    supplements.Add(replacement.Supplement);
-                    stats.ReversedSIMRecords++;
                     continue;
                 }
 
@@ -511,7 +514,12 @@ namespace MyBook
 
         private static bool IsICBCSIMRecordConfirmedByHistory(Record record)
         {
-            return record.Source.Contains("confirmedBy=ICBCHistoryDetail", StringComparison.OrdinalIgnoreCase)
+            return record.Source.Contains("confirmedBy=ICBCHistoryDetail", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsICBCSIMRecordResolvedByHistory(Record record)
+        {
+            return IsICBCSIMRecordConfirmedByHistory(record)
                 || record.Source.Contains("supersededBy=ICBCHistoryDetail", StringComparison.OrdinalIgnoreCase);
         }
 
