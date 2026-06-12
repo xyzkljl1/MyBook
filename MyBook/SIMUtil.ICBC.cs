@@ -42,6 +42,7 @@ namespace MyBook
 
             var currentBalance = database.GetAccountBalance(postingAccount, transaction.Amount.t);
             var requiredBeginningBalance = new Currency(transaction.Balance.v - transaction.Amount.v, transaction.Balance.t);
+            var hasAccountHistory = database.HasAccountHistory(postingAccount);
             var record = BuildICBCSIMRecord(postingAccount, transaction, statementKey, message);
             var records = new List<Record>();
             var compensation = BuildICBCSIMCompensationRecordIfNeeded(
@@ -50,12 +51,13 @@ namespace MyBook
                 statementKey,
                 message,
                 currentBalance,
-                requiredBeginningBalance);
+                requiredBeginningBalance,
+                hasAccountHistory);
             if (compensation is not null)
                 records.Add(compensation);
 
             records.Add(record);
-            var beginningBalance = new AccountBalance(postingAccount, currentBalance);
+            var beginningBalance = new AccountBalance(postingAccount, hasAccountHistory ? currentBalance : requiredBeginningBalance);
             var endingBalance = new AccountBalance(postingAccount, transaction.Balance);
             var saved = database.SaveStatementRecordsOnce(
                 ICBCSIMProvider,
@@ -178,7 +180,8 @@ namespace MyBook
             string statementKey,
             SIMMessage message,
             Currency currentBalance,
-            Currency requiredBeginningBalance)
+            Currency requiredBeginningBalance,
+            bool hasAccountHistory)
         {
             if (currentBalance.t != requiredBeginningBalance.t)
                 throw new InvalidOperationException(
@@ -187,11 +190,8 @@ namespace MyBook
             var compensationAmount = requiredBeginningBalance.v - currentBalance.v;
             if (compensationAmount == 0)
                 return null;
-            if (!database!.HasAccountHistory(postingAccount))
-            {
-                throw new InvalidOperationException(
-                    $"ICBC SIM compensation requires existing account history: account={postingAccount.name}, current={currentBalance.v}, requiredBeginning={requiredBeginningBalance.v}");
-            }
+            if (!hasAccountHistory)
+                return null;
 
             var compensation = new Currency(compensationAmount, requiredBeginningBalance.t);
             var record = new Record
