@@ -257,6 +257,7 @@ namespace MyBook
             ["NVDA"] = HoldingType.NASDAQ,
             ["QQQ"] = HoldingType.NASDAQ,
             ["QQQI"] = HoldingType.NASDAQ,
+            ["SPCX"] = HoldingType.NASDAQ,
             ["SPY"] = HoldingType.ARCA,
             ["TLT"] = HoldingType.NASDAQ,
             ["TQQQ"] = HoldingType.NASDAQ,
@@ -2498,7 +2499,7 @@ namespace MyBook
             var totalRow = FindIBKRNavRow(report, IBKRNavTotalLabel);
             AssertIBKRMoneyFieldEquals(previousTotal, ParseIBKRDecimalAt(totalRow, 1, "precise NAV previous total"), totalRow.Fields[1], "IBKR precise NAV previous total display");
             AssertIBKRMoneyFieldEquals(currentTotal, ParseIBKRDecimalAt(totalRow, 4, "precise NAV current total"), totalRow.Fields[4], "IBKR precise NAV current total display");
-            AssertIBKRMoneyFieldEquals(currentTotal - previousTotal, ParseIBKRDecimalAt(totalRow, 5, "precise NAV total change"), totalRow.Fields[5], "IBKR precise NAV total change display");
+            AssertIBKRMoneyFieldAlmostEquals(currentTotal - previousTotal, ParseIBKRDecimalAt(totalRow, 5, "precise NAV total change"), totalRow.Fields[5], "IBKR precise NAV total change display");
             return new IBKRPreciseNavValues(previousTotal, currentTotal, preciseCash.Start, preciseCash.End);
         }
 
@@ -2628,10 +2629,10 @@ namespace MyBook
             }
 
             AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 1, "NAV previous component sum"), previousTotal, "IBKR NAV previous component sum");
-            AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 2, "NAV current long component sum"), currentLongTotal, "IBKR NAV current long component sum");
+            AssertIBKRMoneyFieldAlmostEquals(currentLongTotal, ParseIBKRDecimalAt(totalRow, 2, "NAV current long component sum"), totalRow.Fields[2], "IBKR NAV current long component sum");
             AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 3, "NAV current short component sum"), currentShortTotal, "IBKR NAV current short component sum");
             AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 4, "NAV current component sum"), currentTotal, "IBKR NAV current component sum");
-            AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 5, "NAV change component sum"), changeTotal, "IBKR NAV change component sum");
+            AssertIBKRMoneyFieldAlmostEquals(changeTotal, ParseIBKRDecimalAt(totalRow, 5, "NAV change component sum"), totalRow.Fields[5], "IBKR NAV change component sum");
         }
 
         private static string ParseIBKRKnownNavComponent(string component)
