@@ -1130,19 +1130,20 @@ namespace MyBook
             var lastText = status.LastFetchTime.HasValue
                 ? status.LastFetchTime.Value.ToString("MM-dd HH:mm", CultureInfo.InvariantCulture)
                 : "无";
+            var failurePrefix = status.HasImportFailureMarker ? "导入失败；" : "";
             if (!String.IsNullOrWhiteSpace(status.CurrentTaskName))
             {
-                ImportRuntimeText = $"导入：{status.CurrentTaskName}{FormatElapsedSuffix(status.CurrentTaskStartedAt, now)}；上次：{lastText}";
+                ImportRuntimeText = $"{failurePrefix}导入：{status.CurrentTaskName}{FormatElapsedSuffix(status.CurrentTaskStartedAt, now)}；上次：{lastText}";
             }
             else if (status.IsScheduledFetchEnabled && status.NextFetchTime.HasValue)
             {
-                ImportRuntimeText = $"上次：{lastText}；下次：{status.NextFetchTime.Value:MM-dd HH:mm}";
+                ImportRuntimeText = $"{failurePrefix}上次：{lastText}；下次：{status.NextFetchTime.Value:MM-dd HH:mm}";
             }
             else
             {
                 ImportRuntimeText = status.IsScheduledFetchEnabled
-                    ? $"上次：{lastText}；下次：待定"
-                    : $"上次：{lastText}；导入未启用";
+                    ? $"{failurePrefix}上次：{lastText}；下次：待定"
+                    : $"{failurePrefix}上次：{lastText}；导入未启用";
             }
             OnPropertyChanged(nameof(ImportRuntimeText));
         }

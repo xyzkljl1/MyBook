@@ -1,5 +1,8 @@
 using Microsoft.Extensions.Configuration;
 using System;
+using System.Globalization;
+using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -23,6 +26,8 @@ namespace MyBook
         const int ICBCHistoryDetailFetchIntervalDays = 90;
         const int ICBCHistoryDetailSearchWindowMonths = 5;
         const int DefaultSIMPollIntervalMinutes = 5;
+        const string ImportFailureMarkerFileName = "MyBook.import-failed.tmp";
+        static readonly UTF8Encoding ImportFailureMarkerEncoding = new(false);
 
         public void RunSchedule()
         {
@@ -83,6 +88,7 @@ namespace MyBook
                 }
                 catch (Exception e)
                 {
+                    CreateImportFailureMarker("scheduled fetch", e);
                     Console.WriteLine($"scheduled fetch fail: {e.Message}");
                 }
             });
@@ -268,6 +274,7 @@ namespace MyBook
             }
             catch (Exception e)
             {
+                CreateImportFailureMarker(name, e);
                 Console.WriteLine($"scheduled {name} fetch fail: {e.Message}");
             }
             finally
@@ -280,7 +287,33 @@ namespace MyBook
         {
             lock (runtimeStatusLock)
             {
-                return runtimeStatus.Clone();
+                var status = runtimeStatus.Clone();
+                status.HasImportFailureMarker = File.Exists(GetImportFailureMarkerPath());
+                return status;
+            }
+        }
+
+        private static string GetImportFailureMarkerPath()
+        {
+            return Path.Combine(Path.GetTempPath(), ImportFailureMarkerFileName);
+        }
+
+        private static void CreateImportFailureMarker(string taskName, Exception exception)
+        {
+            try
+            {
+                var content = String.Join(
+                    Environment.NewLine,
+                    "MyBook import failed",
+                    DateTime.Now.ToString("O", CultureInfo.InvariantCulture),
+                    taskName,
+                    exception.GetType().FullName ?? exception.GetType().Name)
+                    + Environment.NewLine;
+                File.WriteAllText(GetImportFailureMarkerPath(), content, ImportFailureMarkerEncoding);
+            }
+            catch (Exception markerException)
+            {
+                Console.WriteLine($"write import failure marker fail: {markerException.Message}");
             }
         }
 
@@ -341,6 +374,7 @@ namespace MyBook
         public DateTime? CurrentTaskStartedAt { get; set; }
         public DateTime? LastFetchTime { get; set; }
         public DateTime? NextFetchTime { get; set; }
+        public bool HasImportFailureMarker { get; set; }
 
         public FetchRuntimeStatus Clone()
         {

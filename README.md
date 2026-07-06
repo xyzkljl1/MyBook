@@ -126,6 +126,7 @@ During scheduled fetches:
 - Imported records pass through one shared automatic expense-allocation judgment function after internal-transfer matching and before allocated-expense cache generation.
 - Exchange rates are refreshed every cycle.
 - A daily snapshot is created after the fetch cycle.
+- If any scheduled import step fails, the app writes `%TEMP%\MyBook.import-failed.tmp`; while that file exists, the top summary area shows an import failure. Successful imports do not remove it, so it must be cleared manually after checking the failure.
 
 The top summary area shows whether a scheduled import is currently running, the active step name when available, the last completed daily fetch time, and the next scheduled daily fetch time.
 
