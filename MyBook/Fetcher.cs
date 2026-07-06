@@ -147,6 +147,7 @@ namespace MyBook
             }
             finally
             {
+                UpdateRuntimeStatus(status => status.LastFetchTime = DateTime.Now);
                 SetCurrentTask(null);
                 fetchLock.Release();
             }
@@ -338,6 +339,7 @@ namespace MyBook
         public bool IsScheduledFetchEnabled { get; set; }
         public string? CurrentTaskName { get; set; }
         public DateTime? CurrentTaskStartedAt { get; set; }
+        public DateTime? LastFetchTime { get; set; }
         public DateTime? NextFetchTime { get; set; }
 
         public FetchRuntimeStatus Clone()

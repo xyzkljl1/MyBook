@@ -667,8 +667,7 @@ namespace MyBook
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
         public List<StatementImportSummaryViewModel> LatestStatementImports { get; set; } = [];
-        public string ImportRuntimeStatusText { get; private set; } = "当前没有导入任务";
-        public string ImportRuntimeScheduleText { get; private set; } = "";
+        public string ImportRuntimeText { get; private set; } = "导入未启用";
         public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
         public ObservableCollection<AccountBalanceRowViewModel> DetailAccountBalances { get; } = [];
         public ObservableCollection<AllocatedExpenseBucketViewModel> AllocatedExpenseBuckets { get; } = [];
@@ -971,7 +970,7 @@ namespace MyBook
                 : data.InvestmentAccounts;
             var viewModel = new DashboardViewModel
             {
-                SnapshotTimeText = $"更新于 {DateTime.Now:yyyy-MM-dd HH:mm}",
+                SnapshotTimeText = "最新",
                 ReasonTabHeader = "分类",
                 TotalAssets = TotalAssetsViewModel.From(data.TotalAssetsRmb),
                 MonthlyFlowStartMonth = data.MonthlyFlowStartMonth,
@@ -1128,22 +1127,24 @@ namespace MyBook
         public void SetImportRuntimeStatus(FetchRuntimeStatus status)
         {
             var now = DateTime.Now;
+            var lastText = status.LastFetchTime.HasValue
+                ? status.LastFetchTime.Value.ToString("MM-dd HH:mm", CultureInfo.InvariantCulture)
+                : "无";
             if (!String.IsNullOrWhiteSpace(status.CurrentTaskName))
             {
-                ImportRuntimeStatusText = $"正在导入：{status.CurrentTaskName}{FormatElapsedSuffix(status.CurrentTaskStartedAt, now)}";
+                ImportRuntimeText = $"导入：{status.CurrentTaskName}{FormatElapsedSuffix(status.CurrentTaskStartedAt, now)}；上次：{lastText}";
+            }
+            else if (status.IsScheduledFetchEnabled && status.NextFetchTime.HasValue)
+            {
+                ImportRuntimeText = $"上次：{lastText}；下次：{status.NextFetchTime.Value:MM-dd HH:mm}";
             }
             else
             {
-                ImportRuntimeStatusText = "当前没有导入任务";
+                ImportRuntimeText = status.IsScheduledFetchEnabled
+                    ? $"上次：{lastText}；下次：待定"
+                    : $"上次：{lastText}；导入未启用";
             }
-
-            ImportRuntimeScheduleText = status.IsScheduledFetchEnabled
-                ? status.NextFetchTime.HasValue
-                    ? $"下次每日导入：{status.NextFetchTime.Value:yyyy-MM-dd HH:mm}"
-                    : "下次每日导入：待定"
-                : "定时导入未启用";
-            OnPropertyChanged(nameof(ImportRuntimeStatusText));
-            OnPropertyChanged(nameof(ImportRuntimeScheduleText));
+            OnPropertyChanged(nameof(ImportRuntimeText));
         }
 
         private static string FormatElapsedSuffix(DateTime? startedAt, DateTime now)
@@ -1155,7 +1156,7 @@ namespace MyBook
             if (elapsed < TimeSpan.Zero)
                 elapsed = TimeSpan.Zero;
             var totalHours = (int)elapsed.TotalHours;
-            return $"，已运行 {totalHours:D2}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}";
+            return $" {totalHours:D2}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}";
         }
 
         public void SetDetailAccountFilters(IEnumerable<Account> accounts, string? preferredFilterKey, string defaultAccountName)
@@ -1464,7 +1465,7 @@ namespace MyBook
             return new AssetSummaryViewModel
             {
                 DateLabel = DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                StatusText = $"更新于 {DateTime.Now:yyyy-MM-dd HH:mm}",
+                StatusText = "最新",
                 TotalAssets = TotalAssetsViewModel.From(totalAssetsRmb),
                 CurrencySummaries = currencySummaries.Select(CurrencySummaryViewModel.From).ToList()
             };
@@ -1476,10 +1477,10 @@ namespace MyBook
                 return $"{dateLabel} 缺少快照";
 
             if (point.IsToday)
-                return $"更新于 {DateTime.Now:yyyy-MM-dd HH:mm}";
+                return "最新";
 
             var snapshotTime = point.SnapshotTime ?? point.Date;
-            return $"快照 {snapshotTime:yyyy-MM-dd HH:mm}";
+            return $"基于 {snapshotTime:yyyy-MM-dd} 快照计算";
         }
     }
 
