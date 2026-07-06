@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:MyBook"
         mc:Ignorable="d"
         Title="MyBook" Height="760" Width="1180" MinHeight="620" MinWidth="920"
-        Icon="Assets/AppIcon.ico"
+        Icon="pack://application:,,,/Assets/AppIcon.ico"
         Background="#F5F7FA"
         FontFamily="Microsoft YaHei UI, Segoe UI">
     <Window.Resources>
