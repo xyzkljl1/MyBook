@@ -9,6 +9,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Drawing = System.Drawing;
 using Forms = System.Windows.Forms;
 
@@ -23,6 +24,7 @@ namespace MyBook
         private static extern bool AllocConsole();
 
         readonly Fetcher fetcher = new();
+        readonly DispatcherTimer importStatusTimer = new() { Interval = TimeSpan.FromSeconds(1) };
         Forms.NotifyIcon? trayIcon;
         Drawing.Icon? trayIconImage;
         bool isExitRequested;
@@ -38,7 +40,10 @@ namespace MyBook
 #endif
             InitializeComponent();
             InitializeTrayIcon();
+            importStatusTimer.Tick += ImportStatusTimer_Tick;
             fetcher.RunSchedule();
+            RefreshImportRuntimeStatus();
+            importStatusTimer.Start();
             _ = LoadDashboardAsync();
         }
 
@@ -394,12 +399,14 @@ namespace MyBook
                 if (detailEndDate.HasValue)
                     viewModel.DetailEndDate = detailEndDate.Value;
                 DataContext = viewModel;
+                RefreshImportRuntimeStatus(viewModel);
                 await LoadRecordDetailsAsync(viewModel, detailAccountFilterKey);
                 await LoadAllocatedExpensesAsync(viewModel);
             }
             catch (Exception e)
             {
                 DataContext = DashboardViewModel.FromError(e.Message);
+                RefreshImportRuntimeStatus();
             }
         }
 
@@ -524,6 +531,17 @@ namespace MyBook
                 (endExclusive.Year - startInclusive.Year) * 12 + endExclusive.Month - startInclusive.Month);
         }
 
+        private void ImportStatusTimer_Tick(object? sender, EventArgs e)
+        {
+            RefreshImportRuntimeStatus();
+        }
+
+        private void RefreshImportRuntimeStatus(DashboardViewModel? viewModel = null)
+        {
+            viewModel ??= DataContext as DashboardViewModel;
+            viewModel?.SetImportRuntimeStatus(fetcher.GetRuntimeStatus());
+        }
+
         private static void LoadDetailAccountBalances(DashboardViewModel viewModel, DatabaseUtil database)
         {
             if (String.IsNullOrWhiteSpace(viewModel.SelectedDetailAccountName))
@@ -605,6 +623,7 @@ namespace MyBook
 
         protected override void OnClosed(EventArgs e)
         {
+            importStatusTimer.Stop();
             trayIcon?.Dispose();
             trayIconImage?.Dispose();
             fetcher.Dispose();
@@ -648,6 +667,8 @@ namespace MyBook
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
         public List<StatementImportSummaryViewModel> LatestStatementImports { get; set; } = [];
+        public string ImportRuntimeStatusText { get; private set; } = "当前没有导入任务";
+        public string ImportRuntimeScheduleText { get; private set; } = "";
         public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
         public ObservableCollection<AccountBalanceRowViewModel> DetailAccountBalances { get; } = [];
         public ObservableCollection<AllocatedExpenseBucketViewModel> AllocatedExpenseBuckets { get; } = [];
@@ -1102,6 +1123,39 @@ namespace MyBook
         private void OnPropertyChanged(string propertyName)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        public void SetImportRuntimeStatus(FetchRuntimeStatus status)
+        {
+            var now = DateTime.Now;
+            if (!String.IsNullOrWhiteSpace(status.CurrentTaskName))
+            {
+                ImportRuntimeStatusText = $"正在导入：{status.CurrentTaskName}{FormatElapsedSuffix(status.CurrentTaskStartedAt, now)}";
+            }
+            else
+            {
+                ImportRuntimeStatusText = "当前没有导入任务";
+            }
+
+            ImportRuntimeScheduleText = status.IsScheduledFetchEnabled
+                ? status.NextFetchTime.HasValue
+                    ? $"下次每日导入：{status.NextFetchTime.Value:yyyy-MM-dd HH:mm}"
+                    : "下次每日导入：待定"
+                : "定时导入未启用";
+            OnPropertyChanged(nameof(ImportRuntimeStatusText));
+            OnPropertyChanged(nameof(ImportRuntimeScheduleText));
+        }
+
+        private static string FormatElapsedSuffix(DateTime? startedAt, DateTime now)
+        {
+            if (!startedAt.HasValue)
+                return "";
+
+            var elapsed = now - startedAt.Value;
+            if (elapsed < TimeSpan.Zero)
+                elapsed = TimeSpan.Zero;
+            var totalHours = (int)elapsed.TotalHours;
+            return $"，已运行 {totalHours:D2}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}";
         }
 
         public void SetDetailAccountFilters(IEnumerable<Account> accounts, string? preferredFilterKey, string defaultAccountName)

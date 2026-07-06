@@ -656,14 +656,43 @@
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <TextBlock Text="最新导入"
+                        <TextBlock Text="导入状态"
                                    FontSize="15"
                                    FontWeight="SemiBold"
                                    Foreground="#334155"
                                    Margin="0,0,0,12"/>
-                        <DataGrid Grid.Row="1"
+                        <Border Grid.Row="1"
+                                Background="#F8FAFC"
+                                BorderBrush="#E2E8F0"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Padding="12"
+                                Margin="0,0,0,16">
+                            <StackPanel>
+                                <TextBox Style="{StaticResource SelectableText}"
+                                         Text="{Binding ImportRuntimeStatusText}"
+                                         FontSize="14"
+                                         FontWeight="SemiBold"
+                                         Foreground="#0F766E"/>
+                                <TextBox Style="{StaticResource SelectableText}"
+                                         Text="{Binding ImportRuntimeScheduleText}"
+                                         TextWrapping="Wrap"
+                                         FontSize="12"
+                                         Foreground="#64748B"
+                                         Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Grid.Row="2"
+                                   Text="最新导入"
+                                   FontSize="15"
+                                   FontWeight="SemiBold"
+                                   Foreground="#334155"
+                                   Margin="0,0,0,12"/>
+                        <DataGrid Grid.Row="3"
                                   ItemsSource="{Binding LatestStatementImports}"
                                   AutoGenerateColumns="False"
                                   IsReadOnly="True"

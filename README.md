@@ -127,6 +127,8 @@ During scheduled fetches:
 - Exchange rates are refreshed every cycle.
 - A daily snapshot is created after the fetch cycle.
 
+The Import Records tab shows whether a scheduled import is currently running, the active step name when available, and the next scheduled daily fetch time.
+
 Debug builds do not run scheduled fetch tasks. The app prints `skip scheduled fetch in DEBUG`.
 
 ## Nexus OAuth

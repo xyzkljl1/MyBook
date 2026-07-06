@@ -17,6 +17,8 @@ namespace MyBook
         Timer? simTimer;
         readonly SemaphoreSlim fetchLock = new(1, 1);
         readonly SemaphoreSlim simPollLock = new(1, 1);
+        readonly object runtimeStatusLock = new();
+        FetchRuntimeStatus runtimeStatus = new();
         const int MonthlyFetchIntervalDays = 27;
         const int ICBCHistoryDetailFetchIntervalDays = 90;
         const int ICBCHistoryDetailSearchWindowMonths = 5;
@@ -27,6 +29,7 @@ namespace MyBook
             if (IsDebugBuild())
             {
                 Console.WriteLine("skip scheduled fetch in DEBUG");
+                ResetRuntimeStatus();
                 return;
             }
 
@@ -38,11 +41,17 @@ namespace MyBook
             sim = new(database);
             dailyTimer?.Dispose();
             simTimer?.Dispose();
+            var nextDailyRun = GetNextDailyRunTime();
+            UpdateRuntimeStatus(status =>
+            {
+                status.IsScheduledFetchEnabled = true;
+                status.NextFetchTime = nextDailyRun;
+            });
             RunDailyFetchInBackground();
             dailyTimer = new Timer(
                 _ => RunDailyFetchInBackground(),
                 null,
-                GetDelayUntilNextDailyRun(),
+                GetDueTime(nextDailyRun),
                 TimeSpan.FromDays(1));
             StartSIMPolling();
             //pubWeb.Fetch(new Finance("QQQ", HoldingType.NASDAQ));
@@ -60,6 +69,12 @@ namespace MyBook
 
         private void RunDailyFetchInBackground()
         {
+            UpdateRuntimeStatus(status =>
+            {
+                if (status.IsScheduledFetchEnabled)
+                    status.NextFetchTime = GetNextDailyRunTime();
+            });
+
             _ = Task.Run(async () =>
             {
                 try
@@ -80,40 +95,59 @@ namespace MyBook
             if (!await fetchLock.WaitAsync(0).ConfigureAwait(false))
                 return;
 
+            SetCurrentTask("每日导入");
             try
             {
                 await mail.RunWithMailSessionScope(async () =>
                 {
-                    if (ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail))
-                        await TryFetchAsync("ICBC", mail.FetchICBCBills).ConfigureAwait(false);
-                    if (ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays))
-                        await TryFetchAsync("ICBC history detail", FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
-                    await TryFetchAsync("IBKR", mail.FetchIBKRReports).ConfigureAwait(false);
-                    if (ShouldFetchMonthlyProvider("Wise", StatementImportProvider.WiseMail))
-                        await TryFetchAsync("Wise", mail.FetchWiseReports).ConfigureAwait(false);
-                    if (ShouldFetchMonthlyProvider("OCBC", StatementImportProvider.OCBCStatementMail))
-                        await TryFetchAsync("OCBC", mail.FetchOCBCReports).ConfigureAwait(false);
+                    await RunImportTaskAsync(
+                        "ICBC",
+                        () => ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail),
+                        mail.FetchICBCBills).ConfigureAwait(false);
+                    await RunImportTaskAsync(
+                        "ICBC history detail",
+                        () => ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays),
+                        FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
+                    await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
+                    await RunImportTaskAsync(
+                        "Wise",
+                        () => ShouldFetchMonthlyProvider("Wise", StatementImportProvider.WiseMail),
+                        mail.FetchWiseReports).ConfigureAwait(false);
+                    await RunImportTaskAsync(
+                        "OCBC",
+                        () => ShouldFetchMonthlyProvider("OCBC", StatementImportProvider.OCBCStatementMail),
+                        mail.FetchOCBCReports).ConfigureAwait(false);
                 }).ConfigureAwait(false);
-                if (graphQL is not null && ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport))
-                    await TryFetchAsync("Nexus DP", graphQL.FetchNexusDpMonthlyReports).ConfigureAwait(false);
+                if (graphQL is not null)
+                    await RunImportTaskAsync(
+                        "Nexus DP",
+                        () => ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport),
+                        graphQL.FetchNexusDpMonthlyReports).ConfigureAwait(false);
                 if (pubWeb is not null)
-                    await TryFetchAsync("exchange rate", pubWeb.FetchExchangeRates).ConfigureAwait(false);
+                    await RunImportTaskAsync("exchange rate", () => true, pubWeb.FetchExchangeRates).ConfigureAwait(false);
                 if (database is not null)
                 {
-                    await TryFetchAsync("allocated expense cache", () =>
-                    {
-                        database.ProcessAllocatedExpenseDirtyRecords();
-                        return Task.CompletedTask;
-                    }).ConfigureAwait(false);
-                    await TryFetchAsync("snapshot", () =>
-                    {
-                        database.CreateDailySnapshot();
-                        return Task.CompletedTask;
-                    }).ConfigureAwait(false);
+                    await RunImportTaskAsync(
+                        "allocated expense cache",
+                        () => true,
+                        () =>
+                        {
+                            database.ProcessAllocatedExpenseDirtyRecords();
+                            return Task.CompletedTask;
+                        }).ConfigureAwait(false);
+                    await RunImportTaskAsync(
+                        "snapshot",
+                        () => true,
+                        () =>
+                        {
+                            database.CreateDailySnapshot();
+                            return Task.CompletedTask;
+                        }).ConfigureAwait(false);
                 }
             }
             finally
             {
+                SetCurrentTask(null);
                 fetchLock.Release();
             }
         }
@@ -223,25 +257,70 @@ namespace MyBook
                 $"scheduled-empty-import-{today:yyyyMMdd}");
         }
 
-        private static async Task TryFetchAsync(string name, Func<Task> fetch)
+        private async Task RunImportTaskAsync(string name, Func<bool> shouldRun, Func<Task> fetch)
         {
+            SetCurrentTask(name);
             try
             {
-                await fetch().ConfigureAwait(false);
+                if (shouldRun())
+                    await fetch().ConfigureAwait(false);
             }
             catch (Exception e)
             {
                 Console.WriteLine($"scheduled {name} fetch fail: {e.Message}");
             }
+            finally
+            {
+                SetCurrentTask("每日导入");
+            }
         }
 
-        private static TimeSpan GetDelayUntilNextDailyRun()
+        public FetchRuntimeStatus GetRuntimeStatus()
+        {
+            lock (runtimeStatusLock)
+            {
+                return runtimeStatus.Clone();
+            }
+        }
+
+        private void UpdateRuntimeStatus(Action<FetchRuntimeStatus> update)
+        {
+            lock (runtimeStatusLock)
+            {
+                update(runtimeStatus);
+            }
+        }
+
+        private void SetCurrentTask(string? name)
+        {
+            UpdateRuntimeStatus(status =>
+            {
+                status.CurrentTaskName = name;
+                status.CurrentTaskStartedAt = name is null ? null : DateTime.Now;
+            });
+        }
+
+        private void ResetRuntimeStatus()
+        {
+            lock (runtimeStatusLock)
+            {
+                runtimeStatus = new FetchRuntimeStatus();
+            }
+        }
+
+        private static DateTime GetNextDailyRunTime()
         {
             var now = DateTime.Now;
             var nextRun = DateTime.Today.AddDays(1).AddMinutes(5);
             if (now >= nextRun)
                 nextRun = nextRun.AddDays(1);
-            return nextRun - now;
+            return nextRun;
+        }
+
+        private static TimeSpan GetDueTime(DateTime runTime)
+        {
+            var dueTime = runTime - DateTime.Now;
+            return dueTime > TimeSpan.Zero ? dueTime : TimeSpan.Zero;
         }
 
         public void Dispose()
@@ -251,6 +330,19 @@ namespace MyBook
             pubWeb?.Dispose();
             fetchLock.Dispose();
             simPollLock.Dispose();
+        }
+    }
+
+    public class FetchRuntimeStatus
+    {
+        public bool IsScheduledFetchEnabled { get; set; }
+        public string? CurrentTaskName { get; set; }
+        public DateTime? CurrentTaskStartedAt { get; set; }
+        public DateTime? NextFetchTime { get; set; }
+
+        public FetchRuntimeStatus Clone()
+        {
+            return (FetchRuntimeStatus)MemberwiseClone();
         }
     }
 }
