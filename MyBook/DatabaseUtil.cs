@@ -18,8 +18,10 @@ namespace MyBook
         private const int CurrentSnapshotSchemaVersion = 1;
         private const int InternalTransferMatchWindowDays = 14;
         private const string InitializationRecordSourcePrefix = "InitialRecord/";
+        private const string BeginningHoldingRestatementSourcePrefix = "BeginningHoldingRestatement/";
         private const string InitialHoldingReason = "Initial holding";
         private const string InitialCashBalanceReason = "Initial cash balance";
+        private const string BeginningHoldingRestatementReason = "期初估值重述";
         private const int BootstrapBackupRetention = 3;
         private const string BootstrapSqlRelativePath = "Database/bootstrap.sql";
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
@@ -971,7 +973,8 @@ namespace MyBook
                         import.HoldingAccount,
                         import.Holdings,
                         import.BeginningHoldings,
-                        import.InternalCardNos);
+                        import.InternalCardNos,
+                        recordDate: import.RecordDate);
                     if (!statementImportId.HasValue)
                     {
                         saved.Add(false);
@@ -1007,20 +1010,29 @@ namespace MyBook
             List<AccountInternalId>? internalCardNos = null,
             Action<int>? afterSaveInTransaction = null,
             bool preserveCurrentAccountBalances = false,
-            DateTime? validateCurrentBalancesRolledBackTo = null)
+            DateTime? validateCurrentBalancesRolledBackTo = null,
+            DateTime? recordDate = null)
         {
             if (IsStatementImported(provider, time, statementKey))
                 return null;
             if (preserveCurrentAccountBalances && (holdingAccount is not null || holdings is not null))
                 throw new InvalidOperationException($"Preserving current account balances is not supported for holding imports: {provider}.");
 
+            var beginningHoldingRestatementRecords = BuildBeginningHoldingRestatementRecords(
+                provider,
+                statementKey,
+                recordDate?.Date ?? GetStatementRecordDate(records, time),
+                holdingAccount,
+                beginningHoldings,
+                shouldValidateBeginningBalances);
             var hasExternalBalances = accountBalances.Count > 0 || beginningAccountBalances.Count > 0;
             if (hasExternalBalances)
             {
                 ValidateBeginningAccountBalances(
                     provider,
                     beginningAccountBalances,
-                    shouldValidateBeginningBalances);
+                    shouldValidateBeginningBalances,
+                    beginningHoldingRestatementRecords);
                 ValidateRecordBalanceChanges(provider, records, beginningAccountBalances, accountBalances);
                 if (preserveCurrentAccountBalances)
                 {
@@ -1058,8 +1070,8 @@ namespace MyBook
                 SaveCashHoldingsFromAccountBalances(accountBalances, holdingAccount);
 
             var recordsToSave = initializationRecords.Count == 0
-                ? records
-                : initializationRecords.Concat(records).ToList();
+                ? beginningHoldingRestatementRecords.Concat(records).ToList()
+                : initializationRecords.Concat(beginningHoldingRestatementRecords).Concat(records).ToList();
             SaveRecordsCore(recordsToSave, statementImportId);
             if (!hasExternalBalances)
                 ApplyRecordDeltasToHoldings(recordsToSave);
@@ -1074,6 +1086,120 @@ namespace MyBook
         public static bool IsInitializationRecord(Record record)
         {
             return record.Source.StartsWith(InitializationRecordSourcePrefix, StringComparison.Ordinal);
+        }
+
+        private static DateTime GetStatementRecordDate(List<Record> records, DateTime importTime)
+        {
+            return records.Count == 0
+                ? importTime.Date
+                : records.Min(record => record.date).Date;
+        }
+
+        private List<Record> BuildBeginningHoldingRestatementRecords(
+            StatementImportProvider provider,
+            string statementKey,
+            DateTime recordDate,
+            Account? holdingAccount,
+            List<Holding>? beginningHoldings,
+            bool shouldValidateBeginningBalances)
+        {
+            if (!shouldValidateBeginningBalances
+                || provider != StatementImportProvider.IBKRReportMail
+                || holdingAccount is null
+                || beginningHoldings is null
+                || beginningHoldings.Count == 0)
+                return [];
+
+            var account = GetPostingAccount(holdingAccount);
+            var existingHoldings = db.Queryable<Holding>()
+                .Where(holding => holding._account_Id == account.Id)
+                .ToList();
+            if (existingHoldings.Count == 0)
+                return [];
+
+            var existingByKey = BuildRestatableHoldingValueMap(existingHoldings, "current holdings");
+            var beginningByKey = BuildRestatableHoldingValueMap(beginningHoldings, "beginning holdings");
+            var result = new List<Record>();
+            foreach (var key in existingByKey.Keys.Union(beginningByKey.Keys, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!existingByKey.TryGetValue(key, out var existing)
+                    || !beginningByKey.TryGetValue(key, out var beginning)
+                    || existing.Holding.quantity != beginning.Holding.quantity)
+                    continue;
+
+                var existingTotal = existing.Holding.totalPrice;
+                var beginningTotal = beginning.Holding.totalPrice;
+                if (existingTotal.t != beginningTotal.t)
+                {
+                    throw new InvalidOperationException(
+                        $"Beginning holding restatement currency mismatch for {provider}: statementKey={statementKey}, account={account.name}, holding={beginning.Holding.code}/{beginning.Holding.holdingType}, current={existingTotal.t}, beginning={beginningTotal.t}");
+                }
+
+                var adjustment = new Currency(beginningTotal.v - existingTotal.v, beginningTotal.t);
+                if (adjustment.v == 0)
+                    continue;
+
+                result.Add(CreateBeginningHoldingRestatementRecord(
+                    provider,
+                    statementKey,
+                    account,
+                    existing.Holding,
+                    beginning.Holding,
+                    adjustment,
+                    recordDate));
+            }
+
+            return result;
+        }
+
+        private static Dictionary<string, HoldingValueRestatementItem> BuildRestatableHoldingValueMap(
+            IEnumerable<Holding> holdings,
+            string context)
+        {
+            var result = new Dictionary<string, HoldingValueRestatementItem>(StringComparer.OrdinalIgnoreCase);
+            foreach (var holding in holdings)
+            {
+                if (Holding.IsSingleValueAsset(holding.holdingType))
+                    continue;
+
+                NormalizeHolding(holding);
+                var key = GetHoldingKey(holding);
+                if (!result.TryAdd(key, new HoldingValueRestatementItem(holding)))
+                    throw new InvalidOperationException($"Duplicate {context}: {holding.code}/{holding.holdingType}");
+            }
+
+            return result;
+        }
+
+        private static Record CreateBeginningHoldingRestatementRecord(
+            StatementImportProvider provider,
+            string statementKey,
+            Account account,
+            Holding existingHolding,
+            Holding beginningHolding,
+            Currency adjustment,
+            DateTime recordDate)
+        {
+            var record = new Record
+            {
+                Account = account,
+                Holding = new Holding(beginningHolding.code, beginningHolding.holdingType)
+                {
+                    Account = account,
+                    desc = beginningHolding.desc,
+                    displayText = beginningHolding.displayText
+                },
+                date = recordDate.Date,
+                postingDate = recordDate.Date,
+                updateTime = DateTime.Now,
+                HoldingQuantity = 0,
+                DestAccount = beginningHolding.displayText,
+                Source = LimitRecordText(
+                    $"{BeginningHoldingRestatementSourcePrefix}{provider}; statementKey={statementKey}; holding={beginningHolding.code}/{beginningHolding.holdingType}; quantity={beginningHolding.quantity}; current={existingHolding.totalPrice.v} {existingHolding.totalPrice.t}; beginning={beginningHolding.totalPrice.v} {beginningHolding.totalPrice.t}"),
+                Reason = BeginningHoldingRestatementReason
+            };
+            record.CopyFrom(adjustment);
+            return record;
         }
 
         private List<Record> BuildInitializationRecords(
@@ -2752,22 +2878,28 @@ namespace MyBook
         private void ValidateBeginningAccountBalances(
             StatementImportProvider provider,
             List<AccountBalance> beginningAccountBalances,
-            bool shouldValidate)
+            bool shouldValidate,
+            List<Record>? beginningAdjustmentRecords = null)
         {
             if (!shouldValidate || beginningAccountBalances.Count == 0)
                 return;
 
+            var beginningAdjustments = SumRecordAmountsByAccountAndCurrency(beginningAdjustmentRecords ?? []);
             foreach (var beginningAccountBalance in beginningAccountBalances)
             {
                 if (beginningAccountBalance.Account is null)
                     throw new InvalidOperationException("Beginning account balance account is required.");
 
                 var account = GetPostingAccount(beginningAccountBalance.Account);
+                var key = (account.Id, beginningAccountBalance.t);
+                var adjustment = beginningAdjustments.TryGetValue(key, out var adjustmentValue) ? adjustmentValue : 0;
                 var existing = db.Queryable<AccountBalance>()
                     .Where(it => it._account_Id == account.Id && it.t == beginningAccountBalance.t)
                     .First();
                 if (existing is null)
                 {
+                    if (adjustment == beginningAccountBalance.v)
+                        continue;
                     if (beginningAccountBalance.v == 0 || !HasAccountCurrencyHistory(account.Id, beginningAccountBalance.t))
                         continue;
 
@@ -2775,10 +2907,11 @@ namespace MyBook
                         $"Missing current account balance for {provider}: {account.name}/{beginningAccountBalance.t}");
                 }
 
-                if (existing.v != beginningAccountBalance.v)
+                var adjustedExisting = existing.v + adjustment;
+                if (adjustedExisting != beginningAccountBalance.v)
                 {
                     throw new InvalidOperationException(
-                        $"Beginning account balance mismatch for {provider}: {account.name}/{beginningAccountBalance.t}, current={existing.v}, beginning={beginningAccountBalance.v}");
+                        $"Beginning account balance mismatch for {provider}: {account.name}/{beginningAccountBalance.t}, current={existing.v}, adjustment={adjustment}, adjusted={adjustedExisting}, beginning={beginningAccountBalance.v}");
                 }
             }
         }
@@ -5784,6 +5917,8 @@ namespace MyBook
             string DisplayText,
             string Description);
 
+        private sealed record HoldingValueRestatementItem(Holding Holding);
+
         private sealed record RecordBackupPayloadV1(
             int SchemaVersion,
             int Id,
@@ -5988,7 +6123,8 @@ namespace MyBook
             List<AccountBalance> accountBalances,
             List<AccountBalance> beginningAccountBalances,
             List<Holding>? beginningHoldings = null,
-            List<AccountInternalId>? internalCardNos = null)
+            List<AccountInternalId>? internalCardNos = null,
+            DateTime? recordDate = null)
         {
             Provider = provider;
             Time = time;
@@ -6000,6 +6136,7 @@ namespace MyBook
             BeginningAccountBalances = beginningAccountBalances;
             BeginningHoldings = beginningHoldings ?? [];
             InternalCardNos = internalCardNos ?? [];
+            RecordDate = recordDate;
         }
 
         public StatementImportProvider Provider { get; }
@@ -6012,5 +6149,6 @@ namespace MyBook
         public List<AccountBalance> BeginningAccountBalances { get; }
         public List<Holding> BeginningHoldings { get; }
         public List<AccountInternalId> InternalCardNos { get; }
+        public DateTime? RecordDate { get; }
     }
 }

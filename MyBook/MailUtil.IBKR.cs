@@ -460,7 +460,8 @@ namespace MyBook
                     report.AccountBalances,
                     report.BeginningAccountBalances,
                     report.BeginningHoldings,
-                    report.InternalCardNos);
+                    report.InternalCardNos,
+                    report.ReportDate);
             }));
 
             for (var i = 0; i < saveItems.Count; i++)
