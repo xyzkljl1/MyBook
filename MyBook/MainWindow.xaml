@@ -674,12 +674,12 @@
                                 Margin="0,0,0,16">
                             <StackPanel>
                                 <TextBox Style="{StaticResource SelectableText}"
-                                         Text="{Binding ImportRuntimeStatusText}"
+                                         Text="{Binding ImportRuntimeStatusText, Mode=OneWay}"
                                          FontSize="14"
                                          FontWeight="SemiBold"
                                          Foreground="#0F766E"/>
                                 <TextBox Style="{StaticResource SelectableText}"
-                                         Text="{Binding ImportRuntimeScheduleText}"
+                                         Text="{Binding ImportRuntimeScheduleText, Mode=OneWay}"
                                          TextWrapping="Wrap"
                                          FontSize="12"
                                          Foreground="#64748B"
