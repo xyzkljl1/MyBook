@@ -27,7 +27,7 @@ Local statements, downloaded reports, `config.json`, database backups, and other
 
 ## Local Initial Reports
 
-`initialReports/` is an ignored private directory for account history that predates normal recurring imports. When an IBKR or Wise account has no imported history, the importer first reads matching local files from this directory, validates that the initial statement starts from zero and that multi-part statements connect by balance, then continues with normal mailbox fetching.
+`initialReports/` is an ignored private directory for account history that predates normal recurring imports. When an IBKR account has no imported history, the importer first reads matching local files from this directory, validates that the initial statement starts from zero and that multi-part statements connect by balance, then continues with normal mailbox fetching. Wise initial XML statements can still be parsed from this directory when Wise has no imported history.
 
 Expected files:
 
@@ -39,7 +39,7 @@ Expected files:
 - `MailUtil.ICBC` fetches ICBC credit-card statements monthly from mailbox messages and imports card balances plus RMB and foreign-currency transaction details.
 - `MailUtil.ICBCHistory` fetches ICBC historical-detail PDF mail attachments on demand, by date range, or by low-frequency scheduled scans, and imports debit-account history details and credit-card history supplements when the statement balance chain and overlap checks pass. Older debit history can be backfilled before newer existing records by validating the statement ending balance against the current balance rolled back through later records, without moving the current cash balance backward. For debit history that overlaps previously imported ICBC SIM SMS records, exact transaction matches are confirmed by source supplements instead of duplicated, more specific history-detail fields can fill the existing SMS record, and only explicitly marked small-transaction compensation records may be reversed and replaced by history-detail rows. If a SIM import created the account's initial cash-balance record, history-detail rows before that initialization point are used only to validate the initialization balance and are not imported or reversed.
 - `MailUtil.IBKR` fetches Interactive Brokers `DailyMyBook` CSV reports daily from mailbox attachments and imports cash, NAV, positions, trades, commissions, transfers, cash/bond interest, accrued cash/bond interest, dividends, withholding tax, FX translation, and end-of-day holdings. It can also read local initial reports before daily reports exist.
-- `MailUtil.Wise` imports local initial Wise XML statements from `initialReports` when the Wise account has no history, then fetches monthly Wise XML statements from mailbox attachments and imports per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers.
+- `MailUtil.Wise` imports local initial Wise XML statements from `initialReports` when the Wise account has no history, and keeps the XML parser for per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers. Recurring mailbox downloads for monthly Wise statements are disabled because Wise no longer sends the statement files as mail attachments.
 - `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines; if an old month is missing, it can also import a self-sent supplemental statement mail with the original subject and PDF attachment.
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly summaries through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
@@ -115,13 +115,13 @@ When the desktop app starts in a non-debug build, `Fetcher.RunSchedule()` starts
 During scheduled fetches:
 
 - IBKR reports are checked every cycle.
-- ICBC monthly bills, Wise reports, OCBC statements, and Nexus DP monthly reports are checked only when the latest import is more than 27 days old.
+- ICBC monthly bills, OCBC statements, and Nexus DP monthly reports are checked only when the latest import is more than 27 days old.
 - ICBC historical-detail attachments are checked only when the latest history-detail import or scheduled empty-import checkpoint is more than 90 days old. Each scheduled scan searches the last 5 months and writes a `scheduled-empty-import-yyyyMMdd` checkpoint even if no statement is imported, so empty scans are not retried every day.
 - Mail fetches share Yahoo/Gmail IMAP sessions within each fetch cycle or standalone mail import, use the configured `mail_proxy` when set, and reconnect once after connection-level failures.
 - Public web market-data fetches use the configured `pubweb_proxy` when set; exchange-rate pages are requested concurrently and saved after all requests finish.
 - Nexus DP imports use the monthly summary API first and fall back to per-month reports only for missing months or summary failures.
 - SIM SMS polling runs on its own interval when `sim_imsi` is configured. The first poll must find exactly one responsive modem, later polls reuse the cached port and rescan only if it disappears. Each poll verifies IMSI, dispatches complete received SMS messages by sender, keeps incomplete long-SMS fragments until all parts arrive, currently routes ICBC messages to `SIMUtil.ICBC`, can initialize a debit account from the first trusted SMS balance, and logs every reason that no SMS was fetched, imported, retained, or deleted.
-- IBKR, Wise, and OCBC attachment imports search the missing date/month range in batches, then group downloaded attachments by statement date or month.
+- IBKR and OCBC attachment imports search the missing date/month range in batches, then group downloaded attachments by statement date or month.
 - Attachment-based mail imports first filter IMAP summaries and body structures, then download only matching attachment body parts instead of full messages.
 - Imported records pass through one shared automatic expense-allocation judgment function after internal-transfer matching and before allocated-expense cache generation.
 - Exchange rates are refreshed every cycle.

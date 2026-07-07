@@ -116,10 +116,6 @@ namespace MyBook
                         FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
                     await RunImportTaskAsync(
-                        "Wise",
-                        () => ShouldFetchMonthlyProvider("Wise", StatementImportProvider.WiseMail),
-                        mail.FetchWiseReports).ConfigureAwait(false);
-                    await RunImportTaskAsync(
                         "OCBC",
                         () => ShouldFetchMonthlyProvider("OCBC", StatementImportProvider.OCBCStatementMail),
                         mail.FetchOCBCReports).ConfigureAwait(false);

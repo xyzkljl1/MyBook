@@ -6,18 +6,14 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Xml.Linq;
-using MailKit;
-using MailKit.Search;
-using MimeKit;
 
 namespace MyBook
 {
-    // Wise monthly XML statement discovery and parsing. XML statements contain exact
-    // opening/closing balances, so imports validate Records against statement balances.
+    // Wise XML statements contain exact opening/closing balances, so imports validate
+    // Records against statement balances.
     partial class MailUtil
     {
         private const StatementImportProvider WiseProvider = StatementImportProvider.WiseMail;
-        private const string WiseMailSender = "noreply@wise.com";
         private const string WiseAccountName = "WISE";
         private static readonly XNamespace WiseCamtNamespace = "urn:iso:std:iso:20022:tech:xsd:camt.053.001.10";
         private static readonly Regex WiseStatementFileNameRegex = new(
@@ -39,15 +35,10 @@ namespace MyBook
             @"^Paid to\s+(?<counterparty>.+)$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
-        public async Task FetchWiseReports()
+        public Task FetchWiseReports()
         {
             ImportWiseInitialReportsIfNeeded();
-            await RunWithMailSessionScope(FetchWiseReportsBatch).ConfigureAwait(false);
-        }
-
-        public async Task FetchWiseReports(DateTime date)
-        {
-            await FetchWiseReport(date);
+            return Task.CompletedTask;
         }
 
         private bool ImportWiseInitialReportsIfNeeded()
@@ -82,123 +73,6 @@ namespace MyBook
                 .ToList();
             ValidateWiseInitialStatementChain(statements);
             return statements;
-        }
-
-        private async Task<bool> FetchWiseReport(DateTime date)
-        {
-            var statementMonth = FirstDayOfMonth(date);
-            var messages = await SearchWiseStatementMails(statementMonth);
-            var attachments = messages
-                .SelectMany(ReadWiseStatementAttachments)
-                .ToList();
-            if (attachments.Count == 0)
-                return false;
-
-            var statements = ParseWiseStatementAttachments(attachments)
-                .Where(statement => FirstDayOfMonth(statement.StatementEndDate) == statementMonth)
-                .OrderBy(statement => statement.StatementEndDate)
-                .ToList();
-            if (statements.Count == 0)
-                return false;
-            if (statements.Count > 1)
-                throw new MailParseException($"Found multiple Wise XML statements for {statementMonth:yyyy-MM}");
-
-            var saved = SaveWiseParsedStatement(statements[0]);
-            PrintWiseParsedStatementSummary($"Wise XML {statementMonth:yyyy-MM}", statements[0], saved);
-            return true;
-        }
-
-        private async Task FetchWiseReportsBatch()
-        {
-            var startMonth = GetNextMonthlyStatementDate(WiseProvider);
-            var currentMonth = FirstDayOfMonth(DateTime.Today);
-            if (startMonth > currentMonth)
-                return;
-
-            var messages = await SearchWiseStatementMails(startMonth, currentMonth).ConfigureAwait(false);
-            var attachments = messages
-                .SelectMany(ReadWiseStatementAttachments)
-                .ToList();
-            var statementsByMonth = attachments.Count == 0
-                ? new Dictionary<DateTime, List<WiseParsedStatement>>()
-                : ParseWiseStatementAttachments(attachments)
-                    .Where(statement =>
-                        FirstDayOfMonth(statement.StatementEndDate) >= startMonth
-                        && FirstDayOfMonth(statement.StatementEndDate) <= currentMonth)
-                    .GroupBy(statement => FirstDayOfMonth(statement.StatementEndDate))
-                    .ToDictionary(
-                        group => group.Key,
-                        group => group
-                            .OrderBy(statement => statement.StatementEndDate)
-                            .ThenBy(statement => statement.StatementKey, StringComparer.Ordinal)
-                            .ToList());
-
-            var month = startMonth;
-            while (month <= currentMonth)
-            {
-                if (!statementsByMonth.TryGetValue(month, out var statements) || statements.Count == 0)
-                {
-                    if (DateTime.Today >= month.AddMonths(1))
-                        throw new InvalidOperationException($"Missing Wise statement for {month:yyyy-MM}");
-                    return;
-                }
-
-                if (statements.Count > 1)
-                    throw new MailParseException($"Found multiple Wise XML statements for {month:yyyy-MM}");
-
-                var saved = SaveWiseParsedStatement(statements[0]);
-                PrintWiseParsedStatementSummary($"Wise XML {month:yyyy-MM}", statements[0], saved);
-                month = month.AddMonths(1);
-            }
-        }
-
-        private async Task<List<MailAttachmentMessage>> SearchWiseStatementMails(DateTime statementMonth)
-        {
-            var query = SearchQuery.FromContains(WiseMailSender)
-                .And(SearchQuery.SentSince(statementMonth.Date))
-                .And(SearchQuery.SentBefore(statementMonth.AddMonths(2).Date));
-            return await SearchAttachmentMessages(
-                $"Wise XML statement {statementMonth:yyyy-MM}",
-                query,
-                IsWiseStatementSummary,
-                IsWiseXmlStatementAttachment,
-                GetMailDateTime);
-        }
-
-        private async Task<List<MailAttachmentMessage>> SearchWiseStatementMails(DateTime startMonth, DateTime endMonth)
-        {
-            var query = SearchQuery.FromContains(WiseMailSender)
-                .And(SearchQuery.SentSince(startMonth.Date))
-                .And(SearchQuery.SentBefore(endMonth.AddMonths(2).Date));
-            return await SearchAttachmentMessages(
-                $"Wise XML statement {startMonth:yyyy-MM}..{endMonth:yyyy-MM}",
-                query,
-                IsWiseStatementSummary,
-                IsWiseXmlStatementAttachment,
-                GetMailDateTime).ConfigureAwait(false);
-        }
-
-        private static bool IsWiseStatementSummary(IMessageSummary summary)
-        {
-            return SummaryIsFrom(summary, WiseMailSender)
-                && SummaryHasMatchingAttachment(summary, IsWiseXmlStatementAttachment);
-        }
-
-        private static bool IsWiseXmlStatementAttachment(string fileName)
-        {
-            return fileName.StartsWith("statement_", StringComparison.OrdinalIgnoreCase)
-                && Path.GetExtension(fileName).Equals(".xml", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static List<InMemoryWiseStatementAttachment> ReadWiseStatementAttachments(MailAttachmentMessage message)
-        {
-            return ReadMatchingAttachments(message, (attachment, fileName) =>
-                IsWiseXmlStatementAttachment(fileName)
-                    ? new InMemoryWiseStatementAttachment(
-                        fileName,
-                        GetMailDate(message),
-                        attachment.Content)
-                    : null);
         }
 
         private List<WiseParsedStatement> ParseWiseStatementFiles(List<string> files)
