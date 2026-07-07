@@ -38,6 +38,7 @@ namespace MyBook
         private const string IBKRCreditInterestSection = "贷方利息细节";
         private const string IBKRCommissionAdjustmentSection = "佣金调整";
         private const string IBKRStatementPeriodPnlSection = "账单期间的总损益";
+        private const string IBKRFinancialInstrumentInformationSection = "金融产品信息";
 
         private static readonly HashSet<string> IBKRAssetGroups = new(StringComparer.Ordinal)
         {
@@ -51,6 +52,7 @@ namespace MyBook
         private static readonly string[] IBKRStockYieldEnhancementLoanFullHeader = ["资产分类", "货币", "代码", "日期", "描述", "", "交易号码", "数量", "抵押品金额"];
         private static readonly string[] IBKRStockYieldEnhancementLoanShortHeader = ["资产分类", "货币", "代码", "交易号码", "数量", "客户抵押品的股票收益提升计划利率 (%)", "抵押品金额"];
         private static readonly string[] IBKRStockYieldEnhancementCollateralHeldHeader = ["资产分类", "货币", "代码", "数量", "价格", "价值"];
+        private static readonly string[] IBKRFinancialInstrumentInformationHeader = ["资产分类", "代码", "描述", "合约编号", "证券号码", "底层", "上市交易所", "乘数", "类型", "代码"];
 
         private static readonly HashSet<string> IBKRCsvSections = new(StringComparer.Ordinal)
         {
@@ -85,7 +87,8 @@ namespace MyBook
             IBKRWithholdingTaxSection,
             IBKRCreditInterestSection,
             IBKRCommissionAdjustmentSection,
-            IBKRStatementPeriodPnlSection
+            IBKRStatementPeriodPnlSection,
+            IBKRFinancialInstrumentInformationSection
         };
 
         private static readonly Dictionary<string, string[][]> IBKRCsvHeaders = new(StringComparer.Ordinal)
@@ -217,6 +220,10 @@ namespace MyBook
             ],
             [IBKRStatementPeriodPnlSection] =
             [
+            ],
+            [IBKRFinancialInstrumentInformationSection] =
+            [
+                IBKRFinancialInstrumentInformationHeader
             ]
         };
 
@@ -248,19 +255,6 @@ namespace MyBook
                 IBKRStockYieldEnhancementLoanShortHeader,
                 IBKRStockYieldEnhancementCollateralHeldHeader
             ]
-        };
-
-        private static readonly Dictionary<string, HoldingType> IBKRFallbackHoldingTypes = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["DIA"] = HoldingType.ARCA,
-            ["NVDL"] = HoldingType.NASDAQ,
-            ["NVDA"] = HoldingType.NASDAQ,
-            ["QQQ"] = HoldingType.NASDAQ,
-            ["QQQI"] = HoldingType.NASDAQ,
-            ["SPCX"] = HoldingType.NASDAQ,
-            ["SPY"] = HoldingType.ARCA,
-            ["TLT"] = HoldingType.NASDAQ,
-            ["TQQQ"] = HoldingType.NASDAQ,
         };
 
         private static string ReadIBKRLocalCsv(string path)
@@ -846,6 +840,16 @@ namespace MyBook
         private static Dictionary<string, IBKRContractInfo> BuildIBKRContractInfos(IBKRCsvReport report)
         {
             var contracts = new Dictionary<string, IBKRContractInfo>(StringComparer.OrdinalIgnoreCase);
+            var financialInstrumentInfos = ParseIBKRFinancialInstrumentInfos(report);
+            foreach (var info in financialInstrumentInfos.Values)
+            {
+                AddIBKRContractInfo(contracts, new IBKRContractInfo(
+                    info.Code,
+                    info.Description,
+                    info.HoldingType,
+                    info.Code));
+            }
+
             foreach (var row in report.OptionalDataRows("持仓与以市值计的盈亏"))
             {
                 if (!IsIBKRPositionSummaryRow(row))
@@ -857,7 +861,7 @@ namespace MyBook
 
                 var code = row.Fields[3];
                 var description = row.Fields[4];
-                AddIBKRContractInfo(contracts, CreateIBKRContractInfo(group, code, description));
+                AddIBKRContractInfo(contracts, CreateIBKRContractInfo(group, code, description, financialInstrumentInfos));
             }
 
             foreach (var row in report.OptionalDataRows("净股票持仓总结"))
@@ -866,7 +870,7 @@ namespace MyBook
                 if (row.Fields[0] != "股票")
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Stock Position Group: {FormatIBKRCsvRow(row)}");
 
-                AddIBKRContractInfo(contracts, CreateIBKRContractInfo(row.Fields[0], row.Fields[2], row.Fields[3]));
+                AddIBKRContractInfo(contracts, CreateIBKRContractInfo(row.Fields[0], row.Fields[2], row.Fields[3], financialInstrumentInfos));
             }
 
             foreach (var row in report.OptionalDataRows("按市值计算的表现总结"))
@@ -876,7 +880,7 @@ namespace MyBook
                     continue;
                 if (row.Fields[0] == "外汇")
                     continue;
-                AddIBKRContractInfo(contracts, CreateIBKRContractInfo(row.Fields[0], row.Fields[1], row.Fields[1]));
+                AddIBKRContractInfo(contracts, CreateIBKRContractInfo(row.Fields[0], row.Fields[1], row.Fields[1], financialInstrumentInfos));
             }
 
             return contracts;
@@ -890,15 +894,74 @@ namespace MyBook
             contracts[contract.Code] = contract;
         }
 
-        private static IBKRContractInfo CreateIBKRContractInfo(string group, string rawCode, string description)
+        private static Dictionary<string, IBKRFinancialInstrumentInfo> ParseIBKRFinancialInstrumentInfos(IBKRCsvReport report)
+        {
+            var result = new Dictionary<string, IBKRFinancialInstrumentInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in report.OptionalDataRows(IBKRFinancialInstrumentInformationSection))
+            {
+                AssertIBKRFieldCount(row, 10);
+                var assetClass = row.Fields[0];
+                if (!IBKRAssetGroups.Contains(assetClass))
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Financial Instrument Asset Class: {FormatIBKRCsvRow(row)}");
+                if (assetClass != "股票")
+                    continue;
+
+                var code = row.Fields[1];
+                var description = row.Fields[2];
+                var listingExchange = row.Fields[6];
+                if (String.IsNullOrWhiteSpace(code)
+                    || String.IsNullOrWhiteSpace(description)
+                    || String.IsNullOrWhiteSpace(listingExchange))
+                {
+                    throw new MailParseException($"Parse IBKR Report Fail, Invalid Financial Instrument Information Row: {FormatIBKRCsvRow(row)}");
+                }
+
+                var info = new IBKRFinancialInstrumentInfo(
+                    code,
+                    description,
+                    ParseIBKRFinancialInstrumentStockExchange(listingExchange, row),
+                    listingExchange);
+                if (result.TryGetValue(code, out var existing)
+                    && (existing.HoldingType != info.HoldingType
+                        || !String.Equals(existing.ListingExchange, info.ListingExchange, StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new MailParseException(
+                        $"Parse IBKR Report Fail, Conflicting Financial Instrument Information: {code}, {existing.ListingExchange}/{existing.HoldingType} vs {info.ListingExchange}/{info.HoldingType}");
+                }
+
+                result[code] = info;
+            }
+
+            return result;
+        }
+
+        private static HoldingType ParseIBKRFinancialInstrumentStockExchange(string listingExchange, IBKRCsvRow row)
+        {
+            return listingExchange.Trim().ToUpperInvariant() switch
+            {
+                "NASDAQ" => HoldingType.NASDAQ,
+                "ARCA" => HoldingType.ARCA,
+                _ => throw new MailParseException($"Parse IBKR Report Fail, Unsupported Stock Exchange: {FormatIBKRCsvRow(row)}")
+            };
+        }
+
+        private static IBKRContractInfo CreateIBKRContractInfo(
+            string group,
+            string rawCode,
+            string description,
+            IReadOnlyDictionary<string, IBKRFinancialInstrumentInfo>? financialInstrumentInfos = null)
         {
             var code = rawCode.Trim();
             if (group == "股票")
             {
-                if (!IBKRFallbackHoldingTypes.TryGetValue(code, out var holdingType))
-                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Stock Exchange: {code}/{description}");
+                if (financialInstrumentInfos is null || !financialInstrumentInfos.TryGetValue(code, out var info))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Financial Instrument Information for stock: {code}/{description}");
 
-                return new IBKRContractInfo(code, description, holdingType, code);
+                return new IBKRContractInfo(
+                    code,
+                    String.IsNullOrWhiteSpace(description) ? info.Description : description,
+                    info.HoldingType,
+                    code);
             }
 
             if (group == "债券")
@@ -2816,6 +2879,27 @@ namespace MyBook
             ValidateIBKRCommissionAdjustmentSection(report);
             ValidateIBKRCreditInterestDetails(report);
             ValidateIBKRStatementPeriodPnlSection(report);
+            ValidateIBKRFinancialInstrumentInformationSection(report);
+        }
+
+        private static void ValidateIBKRFinancialInstrumentInformationSection(IBKRCsvReport report)
+        {
+            foreach (var row in report.OptionalDataRows(IBKRFinancialInstrumentInformationSection))
+            {
+                AssertIBKRFieldCount(row, 10);
+                if (!IBKRAssetGroups.Contains(row.Fields[0]))
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Financial Instrument Asset Class: {FormatIBKRCsvRow(row)}");
+                if (row.Fields[0] != "股票")
+                    continue;
+                if (String.IsNullOrWhiteSpace(row.Fields[1])
+                    || String.IsNullOrWhiteSpace(row.Fields[2])
+                    || String.IsNullOrWhiteSpace(row.Fields[6]))
+                {
+                    throw new MailParseException($"Parse IBKR Report Fail, Invalid Financial Instrument Information Row: {FormatIBKRCsvRow(row)}");
+                }
+
+                _ = ParseIBKRFinancialInstrumentStockExchange(row.Fields[6], row);
+            }
         }
 
         private static void ValidateIBKRStockYieldEnhancementLoanSection(IBKRCsvReport report, string sectionName)
@@ -3607,6 +3691,8 @@ namespace MyBook
         private sealed record IBKRStatementPeriod(DateTime StartDate, DateTime EndDate);
 
         private sealed record IBKRHoldingSnapshotValue(int Quantity, Currency TotalPrice);
+
+        private sealed record IBKRFinancialInstrumentInfo(string Code, string Description, HoldingType HoldingType, string ListingExchange);
 
         private sealed record IBKRContractInfo(string Code, string Description, HoldingType HoldingType, string DisplayText);
 
