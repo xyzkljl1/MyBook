@@ -3,7 +3,6 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Text;
 
 namespace MyBook
@@ -33,19 +32,14 @@ namespace MyBook
             using HttpClient client = new();
             client.Timeout = RequestTimeout;
             ApplyNexusApplicationHeaders(client);
-            var accessToken = await GetNexusOAuthAccessToken();
-            if (!String.IsNullOrWhiteSpace(accessToken))
-            {
-                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-            }
-            else if (!String.IsNullOrWhiteSpace(nexusApiKey))
+            if (!String.IsNullOrWhiteSpace(nexusApiKey))
             {
                 client.DefaultRequestHeaders.Add("apikey", nexusApiKey);
             }
             else
             {
                 throw new InvalidOperationException(
-                    "Missing Nexus credentials. Authorize Nexus OAuth token in database or configure nexus_api_key.");
+                    "Missing nexus_api_key. Nexus OAuth is temporarily disabled for imports.");
             }
 
             var requestBody = JsonConvert.SerializeObject(new

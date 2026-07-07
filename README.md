@@ -141,6 +141,7 @@ Nexus API requests include the application headers required by the Nexus API Acc
 
 OAuth token storage uses the local database table `OAuthTokens`. Tokens are not stored in `config.json`.
 Nexus OAuth uses the PKCE public-client flow; token refresh sends `client_id` and `refresh_token` without `client_secret`.
+Nexus imports currently use `nexus_api_key`; stored OAuth tokens are not used by scheduled imports while OAuth is disabled.
 
 Authorize or refresh the local Nexus OAuth token:
 
