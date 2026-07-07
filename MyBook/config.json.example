@@ -7,6 +7,8 @@
     "mail_proxy":  "",
     "pubweb_proxy":  "",
     "nexus_api_key":  "",
+    "plaid_client_id":  "",
+    "plaid_sandbox_secret":  "",
     "sim_imsi":  "",
     "sim_poll_interval_minutes":  0,
     "gmail_user":  "",

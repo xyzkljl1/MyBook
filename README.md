@@ -43,6 +43,7 @@ Expected files:
 - `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines; if an old month is missing, it can also import a self-sent supplemental statement mail with the original subject and PDF attachment.
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly summaries through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
+- `PlaidUtil.TODO` will evaluate Plaid-based account imports; it currently only verifies Plaid Sandbox credentials and searches supported institutions without creating Plaid Items or importing account data.
 - `FileUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
 - `SIMUtil` polls a USB SIM modem through a Windows COM port, verifies the SIM IMSI against local configuration, combines complete long SMS messages before dispatching by sender, and can import supported ICBC debit-card transaction SMS messages with balance validation. The first trusted ICBC SMS balance reuses the shared initial cash-balance record mechanism when no current cash balance exists. If an ICBC SMS balance proves that earlier unreported activity changed an already initialized debit-account balance, it writes an `ICBCSIMCompensation` record in the same atomic import so later history-detail rows can reverse and replace it.
 - `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
@@ -70,6 +71,7 @@ Notable configuration keys:
 - `ocbc_statement_passwords` - local list of OCBC statement passwords.
 - `nexus_api_key` - legacy/personal Nexus API key fallback.
 - `nexus_oauth_client_id` - Nexus OAuth PKCE token refresh client id. `nexus_oauth_client_secret` is retained for local compatibility but is not sent by the PKCE refresh flow.
+- `plaid_client_id` / `plaid_sandbox_secret` - Plaid Sandbox credentials for evaluating Plaid-based account imports.
 - `sim_imsi` - expected IMSI for the local USB SIM modem. Leave empty to disable scheduled SMS polling.
 - `sim_poll_interval_minutes` - optional SMS polling interval. Values less than 1 use the built-in default of 5 minutes.
 
