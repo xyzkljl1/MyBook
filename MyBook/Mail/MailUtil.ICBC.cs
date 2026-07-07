@@ -200,38 +200,78 @@ namespace MyBook
                     record.isInternal = true;
                 }
 
-                if (line[3] == "消费" || line[3] == "跨行消费" || line[3] == "境外消费" || line[3] == "缴费" || line[3] == "直接分期扣款")
+                var transactionType = line[3];
+                if (IsICBCExpenseTransactionType(transactionType))
                 {
-                    record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。
+                    if (record.v >= 0)
+                        throw new MailParseException($"Parse ICBC Bill Fail, Invalid Expense: {transactionType}");
+                    record.Reason = GetICBCExpenseReason(transactionType, cardAccount);
                     records.Add(record);
                 }
-                else if (line[3] == "退款" || line[3] == "境外退货" || line[3] == "消费返利")
+                else if (IsICBCRefundTransactionType(transactionType))
                 {
                     if (record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid In");
                     record.Reason = cardAccount.desc; // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。
                     records.Add(record);
                 }
-                else if (line[3] == "人民币自动转账还款" || line[3] == "自动购汇还款" || line[3] == "转账")
+                else if (IsICBCPaymentTransactionType(transactionType))
                 {
-                    if (line[3] == "转账" && record.v <= 0)
+                    if (transactionType == "转账" && record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid Transfer");
                     record.isInternal = true;
                     record.Reason = "信用卡还款";
                     records.Add(record);
                 }
-                else if (line[3] == "年费减免")
+                else if (transactionType == "年费减免")
                 {
                     if (record.v != 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid Annual Fee Waiver");
                 }
                 else
                 {
-                    throw new MailParseException($"Parse ICBC Bill Fail, Unknown Transaction Type: {line[3]}");
+                    throw new MailParseException($"Parse ICBC Bill Fail, Unknown Transaction Type: {transactionType}");
                 }
             }
 
             return records;
+        }
+
+        private static bool IsICBCExpenseTransactionType(string transactionType)
+        {
+            return transactionType is "消费"
+                or "跨行消费"
+                or "境外消费"
+                or "缴费"
+                or "直接分期扣款"
+                or "分期付款到期扣收"
+                or "境外取现"
+                or "跨境手续费"
+                or "透支利息";
+        }
+
+        private static string GetICBCExpenseReason(string transactionType, Account cardAccount)
+        {
+            return transactionType switch
+            {
+                "跨境手续费" => "手续费",
+                "透支利息" => "利息",
+                _ => cardAccount.desc // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。
+            };
+        }
+
+        private static bool IsICBCRefundTransactionType(string transactionType)
+        {
+            return transactionType is "退款"
+                or "境外退货"
+                or "消费返利";
+        }
+
+        private static bool IsICBCPaymentTransactionType(string transactionType)
+        {
+            return transactionType is "人民币自动转账还款"
+                or "自动购汇还款"
+                or "转账";
         }
 
         private int OffsetMatchedICBCRefundRecords(int targetStatementImportId)
