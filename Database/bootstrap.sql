@@ -45,7 +45,7 @@ CREATE TABLE `oauthtokens` (
 CREATE TABLE `finance` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `code` varchar(255) NOT NULL DEFAULT '',
-  `holdingType` enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued') NOT NULL DEFAULT 'NASDAQ',
+  `holdingType` enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto') NOT NULL DEFAULT 'NASDAQ',
   `currentPriceTime` bigint NOT NULL DEFAULT '0',
   `_currentPrice_v` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
   `_currentPrice_t` enum('RMB','USD','JPY','SGD','HKD') NOT NULL DEFAULT 'RMB',
@@ -55,7 +55,7 @@ CREATE TABLE `finance` (
 
 CREATE TABLE `statementimports` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `provider` enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','PayPalMail','Manual') NOT NULL DEFAULT 'Manual',
+  `provider` enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','PayPalMail','Manual') NOT NULL DEFAULT 'Manual',
   `time` datetime(6) NOT NULL,
   `statementKey` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`Id`),
@@ -69,7 +69,7 @@ CREATE TABLE `holdings` (
   `_currentPrice_v` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
   `desc` varchar(255) NOT NULL DEFAULT '',
   `_account_Id` int NOT NULL DEFAULT '0',
-  `holdingType` enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued') NOT NULL DEFAULT 'NASDAQ',
+  `holdingType` enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto') NOT NULL DEFAULT 'NASDAQ',
   `_currentPrice_t` enum('RMB','USD','JPY','SGD','HKD') NOT NULL DEFAULT 'RMB',
   `displayText` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`Id`),
@@ -154,6 +154,26 @@ CREATE TABLE `snapshotitems` (
   KEY `fk_SnapshotItems_account` (`_account_Id`),
   CONSTRAINT `fk_SnapshotItems_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`),
   CONSTRAINT `fk_SnapshotItems_snapshot` FOREIGN KEY (`_snapshot_Id`) REFERENCES `snapshots` (`Id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `krakenassetsnapshots` (
+  `Id` int NOT NULL AUTO_INCREMENT,
+  `asset` varchar(32) NOT NULL DEFAULT '',
+  `displayAsset` varchar(32) NOT NULL DEFAULT '',
+  `balance` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
+  `availableBalance` decimal(30,18) DEFAULT NULL,
+  `credit` decimal(30,18) DEFAULT NULL,
+  `creditUsed` decimal(30,18) DEFAULT NULL,
+  `holdTrade` decimal(30,18) DEFAULT NULL,
+  `usdPrice` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
+  `usdMarketValue` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
+  `_statementImport_Id` int NOT NULL,
+  `_account_Id` int NOT NULL,
+  PRIMARY KEY (`Id`),
+  UNIQUE KEY `unique_KrakenAssetSnapshots_statement_asset` (`_statementImport_Id`,`asset`),
+  KEY `fk_KrakenAssetSnapshots_account` (`_account_Id`),
+  CONSTRAINT `fk_KrakenAssetSnapshots_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`),
+  CONSTRAINT `fk_KrakenAssetSnapshots_statementImport` FOREIGN KEY (`_statementImport_Id`) REFERENCES `statementimports` (`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `accountbalances` AS select cast(row_number() OVER (ORDER BY `grouped`.`_account_Id`,`grouped`.`currency_type` )  as signed) AS `Id`,`grouped`.`accountName` AS `accountName`,`grouped`.`amount` AS `amount`,`grouped`.`currency_type` AS `currency_type`,`grouped`.`_account_Id` AS `_account_Id` from (select `holdings`.`_account_Id` AS `_account_Id`,`accounts`.`name` AS `accountName`,`holdings`.`_currentPrice_t` AS `currency_type`,sum((case when (`holdings`.`holdingType` = 'UST') then round((`holdings`.`quantity` * `holdings`.`_currentPrice_v`),2) else (`holdings`.`quantity` * `holdings`.`_currentPrice_v`) end)) AS `amount` from (`holdings` join `accounts` on((`accounts`.`Id` = `holdings`.`_account_Id`))) group by `holdings`.`_account_Id`,`accounts`.`name`,`holdings`.`_currentPrice_t` having (`amount` <> 0)) `grouped`;

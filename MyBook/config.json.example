@@ -7,6 +7,8 @@
     "mail_proxy":  "",
     "pubweb_proxy":  "",
     "nexus_api_key":  "",
+    "kraken_api_key":  "",
+    "kraken_api_secret":  "",
     "plaid_client_id":  "",
     "plaid_sandbox_secret":  "",
     "sim_imsi":  "",

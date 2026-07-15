@@ -30,8 +30,8 @@ namespace MyBook
         private static readonly Regex BootstrapBackupFileRegex = new(
             @"^(?<prefix>bootstrap-\d{8}-\d{6}-\d{6}-(?<hash>[0-9a-f]{12}))\.(?<kind>schema|fixed-data)\.sql$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
-        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(AllocatedExpenseItem), typeof(Snapshot), typeof(SnapshotItem)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport), typeof(KrakenAssetSnapshot)];
+        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(AllocatedExpenseItem), typeof(Snapshot), typeof(SnapshotItem), typeof(KrakenAssetSnapshot)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -44,7 +44,9 @@ namespace MyBook
             new("fk_Records_matchedRecord", "Records", "matchedRecordId", "Records", "Id"),
             new("fk_AllocatedExpenseItems_record", "AllocatedExpenseItems", "_record_Id", "Records", "Id"),
             new("fk_SnapshotItems_snapshot", "SnapshotItems", "_snapshot_Id", "Snapshots", "Id"),
-            new("fk_SnapshotItems_account", "SnapshotItems", "_account_Id", "Accounts", "Id")
+            new("fk_SnapshotItems_account", "SnapshotItems", "_account_Id", "Accounts", "Id"),
+            new("fk_KrakenAssetSnapshots_statementImport", "KrakenAssetSnapshots", "_statementImport_Id", "StatementImports", "Id"),
+            new("fk_KrakenAssetSnapshots_account", "KrakenAssetSnapshots", "_account_Id", "Accounts", "Id")
         ];
         private static readonly string[] AllocatedExpenseDirtyTriggerColumns =
         [
@@ -982,6 +984,15 @@ namespace MyBook
                     }
 
                     savedStatementImportIds.Add(statementImportId.Value);
+                    if (import.KrakenAssetSnapshots.Count > 0)
+                    {
+                        foreach (var snapshot in import.KrakenAssetSnapshots)
+                        {
+                            snapshot._statementImport_Id = statementImportId.Value;
+                            snapshot._account_Id = GetPostingAccount(import.HoldingAccount).Id;
+                        }
+                        db.Insertable(import.KrakenAssetSnapshots).ExecuteCommand();
+                    }
                     saved.Add(true);
                     shouldValidateBeginningBalances[import.Provider] = true;
                 }
@@ -1294,6 +1305,21 @@ namespace MyBook
         public bool HasAccountHistory(Account account)
         {
             return AccountHasHistory(account);
+        }
+
+        public List<KrakenAssetSnapshot> GetLatestKrakenAssetSnapshots(Account account)
+        {
+            account = GetPostingAccount(account);
+            var latestImportId = db.Queryable<KrakenAssetSnapshot>()
+                .Where(snapshot => snapshot._account_Id == account.Id)
+                .OrderByDescending(snapshot => snapshot._statementImport_Id)
+                .Select(snapshot => snapshot._statementImport_Id)
+                .First();
+            return latestImportId <= 0
+                ? []
+                : db.Queryable<KrakenAssetSnapshot>()
+                    .Where(snapshot => snapshot._statementImport_Id == latestImportId)
+                    .ToList();
         }
 
         public bool HasAccountRecordsOnOrAfter(Account account, DateTime start)
@@ -4840,6 +4866,13 @@ namespace MyBook
             ClearAllRecordMatches();
             db.Deleteable<Record>().ExecuteCommand();
             db.Ado.ExecuteCommand("""
+                delete krakenSnapshot
+                from `KrakenAssetSnapshots` krakenSnapshot
+                join `StatementImports` statementImport
+                    on krakenSnapshot.`_statementImport_Id` = statementImport.`Id`
+                where statementImport.`statementKey` <> ''
+                """);
+            db.Ado.ExecuteCommand("""
                 delete from `StatementImports`
                 where `statementKey` <> ''
                 """);
@@ -4896,6 +4929,11 @@ namespace MyBook
             ClearAllRecordMatches();
             db.Ado.ExecuteCommand("""
                 delete from `Records`
+                where `_statementImport_Id` > @maxStatementImportId
+                """,
+                new SugarParameter("@maxStatementImportId", snapshot.maxStatementImportId));
+            db.Ado.ExecuteCommand("""
+                delete from `KrakenAssetSnapshots`
                 where `_statementImport_Id` > @maxStatementImportId
                 """,
                 new SugarParameter("@maxStatementImportId", snapshot.maxStatementImportId));
@@ -5212,7 +5250,8 @@ namespace MyBook
                 ["Holdings"] = db.Queryable<Holding>().Count(),
                 ["Finance"] = db.Queryable<Finance>().Count(),
                 ["Snapshots"] = db.Queryable<Snapshot>().Count(),
-                ["SnapshotItems"] = db.Queryable<SnapshotItem>().Count()
+                ["SnapshotItems"] = db.Queryable<SnapshotItem>().Count(),
+                ["KrakenAssetSnapshots"] = db.Queryable<KrakenAssetSnapshot>().Count()
             };
         }
 
@@ -5692,6 +5731,8 @@ namespace MyBook
                 return "SnapshotItems";
             if (type == typeof(StatementImport))
                 return "StatementImports";
+            if (type == typeof(KrakenAssetSnapshot))
+                return "KrakenAssetSnapshots";
 
             return type.Name;
         }
@@ -6137,6 +6178,13 @@ namespace MyBook
             BeginningHoldings = beginningHoldings ?? [];
             InternalCardNos = internalCardNos ?? [];
             RecordDate = recordDate;
+            KrakenAssetSnapshots = [];
+        }
+
+        public StatementRecordHoldingImport WithKrakenAssetSnapshots(List<KrakenAssetSnapshot> snapshots)
+        {
+            KrakenAssetSnapshots = snapshots;
+            return this;
         }
 
         public StatementImportProvider Provider { get; }
@@ -6150,5 +6198,6 @@ namespace MyBook
         public List<Holding> BeginningHoldings { get; }
         public List<AccountInternalId> InternalCardNos { get; }
         public DateTime? RecordDate { get; }
+        public List<KrakenAssetSnapshot> KrakenAssetSnapshots { get; private set; }
     }
 }

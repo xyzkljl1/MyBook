@@ -14,6 +14,7 @@ namespace MyBook
         MailUtil? mail;
         PubWebUtil? pubWeb;
         GraphQLUtil? graphQL;
+        KrakenUtil? kraken;
         DatabaseUtil? database;
         SIMUtil? sim;
         Timer? dailyTimer;
@@ -43,6 +44,22 @@ namespace MyBook
             mail = new(config, database);
             pubWeb = new(config, database);
             graphQL = new(config, database);
+            var krakenApiKey = config["kraken_api_key"];
+            var krakenApiSecret = config["kraken_api_secret"];
+            if (String.IsNullOrWhiteSpace(krakenApiKey) && String.IsNullOrWhiteSpace(krakenApiSecret))
+            {
+                Console.WriteLine("skip scheduled Kraken fetch: missing Kraken API credentials");
+                kraken = null;
+            }
+            else if (String.IsNullOrWhiteSpace(krakenApiKey) || String.IsNullOrWhiteSpace(krakenApiSecret))
+            {
+                Console.WriteLine("skip scheduled Kraken fetch: incomplete Kraken API credentials");
+                kraken = null;
+            }
+            else
+            {
+                kraken = new(config, database);
+            }
             sim = new(database);
             dailyTimer?.Dispose();
             simTimer?.Dispose();
@@ -125,6 +142,11 @@ namespace MyBook
                         "Nexus DP",
                         () => ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport),
                         graphQL.FetchNexusDpMonthlyReports).ConfigureAwait(false);
+                if (kraken is not null)
+                    await RunImportTaskAsync(
+                        "Kraken",
+                        () => ShouldFetchProviderAfterDays("Kraken", StatementImportProvider.KrakenApi, 0),
+                        () => kraken.FetchDailyReportsAsync()).ConfigureAwait(false);
                 if (pubWeb is not null)
                     await RunImportTaskAsync("exchange rate", () => true, pubWeb.FetchExchangeRates).ConfigureAwait(false);
                 if (database is not null)

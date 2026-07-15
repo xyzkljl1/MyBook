@@ -36,7 +36,9 @@ namespace MyBook
         // 现金类持仓。
         Cash,
         // 应计、待结算、或还未实际入账但已计入账户净资产的项目。
-        Accrued
+        Accrued,
+        // 加密资产；原生数量保存在提供方快照中，Holding 保存账户基础币种市值。
+        Crypto
     };
 
     // 账户持有的股票、债券、现金、应计项目或其它资产，使用 code + holdingType 区分具体资产。
@@ -108,7 +110,7 @@ namespace MyBook
 
         public static bool IsSingleValueAsset(HoldingType holdingType)
         {
-            return holdingType is HoldingType.Cash or HoldingType.Accrued;
+            return holdingType is HoldingType.Cash or HoldingType.Accrued or HoldingType.Crypto;
         }
 
         // 用于存储
@@ -182,8 +184,8 @@ namespace MyBook
     static class MySqlEnumColumnTypes
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
-        public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','PayPalMail','Manual')";
+        public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','PayPalMail','Manual')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
@@ -565,6 +567,7 @@ namespace MyBook
         OCBCMail,
         OCBCStatementMail,
         NexusDpMonthlyReport,
+        KrakenApi,
         PayPalMail,
         Manual,
     }
@@ -584,6 +587,50 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "''")]
         public string statementKey { get; set; } = "";
+    }
+
+    [SugarIndex("unique_KrakenAssetSnapshots_statement_asset", nameof(KrakenAssetSnapshot._statementImport_Id), OrderByType.Asc, nameof(KrakenAssetSnapshot.asset), OrderByType.Asc, true)]
+    [SugarTable("KrakenAssetSnapshots")]
+    public class KrakenAssetSnapshot
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [Navigate(NavigateType.ManyToOne, nameof(_statementImport_Id), nameof(StatementImport.Id))]
+        public StatementImport? StatementImport { get; set; }
+
+        [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(Account.Id))]
+        public Account? Account { get; set; }
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(32)")]
+        public string asset { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(32)")]
+        public string displayAsset { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal balance { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? availableBalance { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? credit { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? creditUsed { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? holdTrade { get; set; }
+
+        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal usdPrice { get; set; }
+
+        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal usdMarketValue { get; set; }
+
+        public int _statementImport_Id { get; set; }
+        public int _account_Id { get; set; }
     }
 
     //币种
