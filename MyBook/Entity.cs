@@ -105,11 +105,28 @@ namespace MyBook
         {
             get
             {
-                var amount = quantity * currentPrice.v;
+                return new Currency(CalculateTotalValue(quantity, currentPrice.v, holdingType), currentPrice.t);
+            }
+        }
+
+        public static decimal CalculateTotalValue(decimal quantity, decimal unitPrice, HoldingType holdingType)
+        {
+            MySqlDecimalColumnTypes.ValidateCurrencyValue(quantity, "Holding quantity");
+            MySqlDecimalColumnTypes.ValidateCurrencyValue(unitPrice, "Holding unit price");
+            try
+            {
+                var value = checked(quantity * unitPrice);
                 // 美债和加密资产的市值按货币金额精确到分。
                 if (holdingType is HoldingType.UST or HoldingType.Crypto)
-                    amount = Decimal.Round(amount, 2, MidpointRounding.AwayFromZero);
-                return new Currency(amount, currentPrice.t);
+                    value = Decimal.Round(value, 2, MidpointRounding.AwayFromZero);
+                MySqlDecimalColumnTypes.ValidateCurrencyValue(value, "Holding total value");
+                return value;
+            }
+            catch (OverflowException exception)
+            {
+                throw new InvalidOperationException(
+                    $"Holding total value exceeds {MySqlDecimalColumnTypes.CurrencyValue}: quantity={quantity}, unitPrice={unitPrice}.",
+                    exception);
             }
         }
 

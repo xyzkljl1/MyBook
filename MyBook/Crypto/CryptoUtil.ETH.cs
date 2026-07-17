@@ -50,7 +50,7 @@ namespace MyBook
                 ["USDT"] = await FetchUsdtBalanceRawAsync(address, cancellationToken).ConfigureAwait(false)
             };
             ValidateCurrentQuantities(quantities, events, currentQuantities);
-            var prices = await cryptoPrice.FetchDailyUsdPricesAsync(
+            var prices = await krakenPub.FetchDailyUsdPricesAsync(
                 ["ETH", "USDT"],
                 firstDate.AddDays(-1),
                 lastCompletedDate,
@@ -104,13 +104,13 @@ namespace MyBook
         private static List<Record> CreateRecords(
             Account account,
             List<EthereumAssetEvent> events,
-            CryptoPriceSet prices)
+            KrakenDailyPriceSet prices)
         {
             return events.Select(item =>
             {
                 var quantity = ToAssetQuantity(item.QuantityRaw, item.Decimals);
                 var price = prices.Get(item.Asset, item.Time.Date);
-                var amount = CryptoPriceUtil.CalculateMarketValue(quantity, price.CloseUsd);
+                var amount = Holding.CalculateTotalValue(quantity, price.CloseUsd, HoldingType.Crypto);
                 var record = CreateRecord(
                     account,
                     item.Asset,
@@ -163,7 +163,7 @@ namespace MyBook
         private static List<Holding> CreateHoldings(
             Account account,
             Dictionary<string, decimal> quantities,
-            CryptoPriceSet prices,
+            KrakenDailyPriceSet prices,
             DateTime priceDate)
         {
             return quantities.Where(item => item.Value != 0)
@@ -199,7 +199,7 @@ namespace MyBook
             DateTime date,
             Dictionary<string, decimal> beginningQuantities,
             Dictionary<string, decimal> endingQuantities,
-            CryptoPriceSet prices,
+            KrakenDailyPriceSet prices,
             string sourcePrefix)
         {
             foreach (var asset in beginningQuantities.Keys.Union(endingQuantities.Keys, StringComparer.Ordinal).OrderBy(asset => asset, StringComparer.Ordinal))
@@ -208,8 +208,8 @@ namespace MyBook
                 var endingQuantity = endingQuantities.TryGetValue(asset, out var ending) ? ending : 0;
                 var previousPrice = prices.Get(asset, date.AddDays(-1));
                 var currentPrice = prices.Get(asset, date);
-                var beginningValue = CryptoPriceUtil.CalculateMarketValue(beginningQuantity, previousPrice.CloseUsd);
-                var repricedBeginningValue = CryptoPriceUtil.CalculateMarketValue(beginningQuantity, currentPrice.CloseUsd);
+                var beginningValue = Holding.CalculateTotalValue(beginningQuantity, previousPrice.CloseUsd, HoldingType.Crypto);
+                var repricedBeginningValue = Holding.CalculateTotalValue(beginningQuantity, currentPrice.CloseUsd, HoldingType.Crypto);
                 var priceChange = repricedBeginningValue - beginningValue;
                 if (priceChange != 0)
                 {
@@ -226,7 +226,7 @@ namespace MyBook
                 var eventValue = records
                     .Where(record => record.Holding?.code == asset && record.HoldingQuantity != 0)
                     .Sum(record => record.v);
-                var endingValue = CryptoPriceUtil.CalculateMarketValue(endingQuantity, currentPrice.CloseUsd);
+                var endingValue = Holding.CalculateTotalValue(endingQuantity, currentPrice.CloseUsd, HoldingType.Crypto);
                 var transactionPriceImpact = endingValue - repricedBeginningValue - eventValue;
                 if (transactionPriceImpact != 0)
                 {
@@ -242,12 +242,12 @@ namespace MyBook
             }
         }
 
-        private static List<Finance> CreateLatestPrices(CryptoPriceSet prices, IEnumerable<string> assets, DateTime date)
+        private static List<Finance> CreateLatestPrices(KrakenDailyPriceSet prices, IEnumerable<string> assets, DateTime date)
         {
             return assets.Distinct(StringComparer.Ordinal).Select(asset =>
             {
                 var price = prices.Get(asset, date);
-                return new Finance(CryptoPriceUtil.GetBaseAsset(asset), HoldingType.Crypto)
+                return new Finance(KrakenPubUtil.GetBaseAsset(asset), HoldingType.Crypto)
                 {
                     currentPrice = new Currency(price.CloseUsd, CurrencyType.USD),
                     currentPriceTime = new DateTimeOffset(DateTime.SpecifyKind(date.AddDays(1), DateTimeKind.Utc)).ToUnixTimeSeconds()

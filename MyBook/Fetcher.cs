@@ -45,7 +45,7 @@ namespace MyBook
             mail = new(config, database);
             pubWeb = new(config, database);
             graphQL = new(config, database);
-            var cryptoPrice = new CryptoPriceUtil();
+            var krakenPub = new KrakenPubUtil();
             var krakenApiKey = config["kraken_api_key"];
             var krakenApiSecret = config["kraken_api_secret"];
             if (String.IsNullOrWhiteSpace(krakenApiKey) && String.IsNullOrWhiteSpace(krakenApiSecret))
@@ -60,9 +60,9 @@ namespace MyBook
             }
             else
             {
-                kraken = new(config, database, cryptoPrice);
+                kraken = new(config, database, krakenPub);
             }
-            crypto = new(config, database, cryptoPrice);
+            crypto = new(config, database, krakenPub);
             sim = new(database);
             dailyTimer?.Dispose();
             simTimer?.Dispose();
