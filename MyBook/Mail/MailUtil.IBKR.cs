@@ -3690,7 +3690,7 @@ namespace MyBook
 
         private sealed record IBKRStatementPeriod(DateTime StartDate, DateTime EndDate);
 
-        private sealed record IBKRHoldingSnapshotValue(int Quantity, Currency TotalPrice);
+        private sealed record IBKRHoldingSnapshotValue(decimal Quantity, Currency TotalPrice);
 
         private sealed record IBKRFinancialInstrumentInfo(string Code, string Description, HoldingType HoldingType, string ListingExchange);
 

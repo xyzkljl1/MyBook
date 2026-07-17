@@ -966,9 +966,12 @@ namespace MyBook
             }
         }
 
-        public List<bool> SaveStatementRecordsAndHoldingsOnce(IEnumerable<StatementRecordHoldingImport> imports)
+        public List<bool> SaveStatementRecordsAndHoldingsOnce(
+            IEnumerable<StatementRecordHoldingImport> imports,
+            IEnumerable<Finance>? finances = null)
         {
             var importList = imports.ToList();
+            var financeList = finances?.ToList() ?? [];
             var saved = new List<bool>();
             return ExecuteLockedTransaction(() =>
             {
@@ -1011,6 +1014,8 @@ namespace MyBook
 
                 ApplyAutomaticExpenseAllocationForStatements(savedStatementImportIds);
                 ProcessAllocatedExpenseDirtyRecordsCore();
+                foreach (var finance in financeList)
+                    SaveFinanceCore(finance);
                 return saved;
             });
         }
@@ -2210,10 +2215,17 @@ namespace MyBook
                 .Where(record => hashes.Contains(record.blockchainTransactionHash)
                     && record.matchedRecordId == null)
                 .ToList();
+            var holdingIds = records.Select(record => record._holding_Id).Distinct().ToList();
+            var holdings = db.Queryable<Holding>()
+                .Where(holding => holdingIds.Contains(holding.Id))
+                .ToList()
+                .ToDictionary(holding => holding.Id);
             foreach (var anchor in imported.OrderBy(record => record.Id))
             {
                 if (anchor.matchedRecordId is not null)
                     continue;
+                if (!holdings.TryGetValue(anchor._holding_Id, out var anchorHolding))
+                    throw new InvalidOperationException($"Blockchain record holding not found: record={anchor.Id}, holding={anchor._holding_Id}.");
 
                 var candidates = records.Where(candidate =>
                         candidate.Id != anchor.Id
@@ -2224,6 +2236,10 @@ namespace MyBook
                         && String.Equals(candidate.blockchainAssetContract, anchor.blockchainAssetContract, StringComparison.OrdinalIgnoreCase)
                         && candidate.t == anchor.t
                         && candidate.v == -anchor.v
+                        && candidate.HoldingQuantity == -anchor.HoldingQuantity
+                        && holdings.TryGetValue(candidate._holding_Id, out var candidateHolding)
+                        && candidateHolding.holdingType == anchorHolding.holdingType
+                        && String.Equals(candidateHolding.code, anchorHolding.code, StringComparison.OrdinalIgnoreCase)
                         && (!anchor.blockchainEventIndex.HasValue
                             || !candidate.blockchainEventIndex.HasValue
                             || anchor.blockchainEventIndex == candidate.blockchainEventIndex))
@@ -2643,6 +2659,14 @@ namespace MyBook
             account = GetPostingAccount(account);
             return db.Queryable<AccountBalance>()
                 .Where(balance => balance._account_Id == account.Id)
+                .ToList();
+        }
+
+        public List<Holding> GetCurrentAccountHoldings(Account account)
+        {
+            account = GetPostingAccount(account);
+            return db.Queryable<Holding>()
+                .Where(holding => holding._account_Id == account.Id)
                 .ToList();
         }
 
@@ -3283,9 +3307,7 @@ namespace MyBook
 
         private static decimal NormalizeBalanceAmount(CurrencyType currency, decimal amount)
         {
-            return currency is CurrencyType.BTC or CurrencyType.ETH or CurrencyType.USDT
-                ? amount
-                : Currency.RoundMoney(amount);
+            return Currency.RoundMoney(amount);
         }
 
         private void ValidateAllAccountBalancesFromHoldings()
@@ -3728,18 +3750,6 @@ namespace MyBook
                     continue;
 
                 rates[currency] = finance._currentPrice_v;
-            }
-
-            if (rates.TryGetValue(CurrencyType.USD, out var usdToRmb))
-            {
-                foreach (var finance in db.Queryable<Finance>()
-                    .Where(finance => finance.holdingType == HoldingType.Crypto && finance._currentPrice_t == CurrencyType.USD)
-                    .ToList())
-                {
-                    if (finance._currentPrice_v <= 0 || !Enum.TryParse<CurrencyType>(finance.code, out var currency))
-                        continue;
-                    rates[currency] = finance._currentPrice_v * usdToRmb;
-                }
             }
 
             return rates;
@@ -5320,25 +5330,27 @@ namespace MyBook
 
         public void SaveFinance(Finance finance)
         {
-            ExecuteLockedTransaction(() =>
+            ExecuteLockedTransaction(() => SaveFinanceCore(finance));
+        }
+
+        private void SaveFinanceCore(Finance finance)
+        {
+            if (finance.currentPriceTime <= 0)
+                finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
+
+            var existing = db.Queryable<Finance>()
+                .Where(it => it.code == finance.code && it.holdingType == finance.holdingType)
+                .First();
+            if (existing is null)
             {
-                if (finance.currentPriceTime <= 0)
-                    finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
+                finance.Id = db.Insertable(finance).ExecuteReturnIdentity();
+                return;
+            }
 
-                var existing = db.Queryable<Finance>()
-                    .Where(it => it.code == finance.code && it.holdingType == finance.holdingType)
-                    .First();
-                if (existing is null)
-                {
-                    finance.Id = db.Insertable(finance).ExecuteReturnIdentity();
-                    return;
-                }
-
-                existing._currentPrice_v = finance._currentPrice_v;
-                existing._currentPrice_t = finance._currentPrice_t;
-                existing.currentPriceTime = finance.currentPriceTime;
-                db.Updateable(existing).ExecuteCommand();
-            });
+            existing._currentPrice_v = finance._currentPrice_v;
+            existing._currentPrice_t = finance._currentPrice_t;
+            existing.currentPriceTime = finance.currentPriceTime;
+            db.Updateable(existing).ExecuteCommand();
         }
 
         public List<Record> GetRecordsByStatementImport(int statementImportId)
@@ -5655,12 +5667,12 @@ namespace MyBook
             {
                 "view accountbalances as select",
                 "row_number() over",
-                "holdings join accounts",
+                "join accounts",
                 "group by",
                 "accountname",
                 "_account_id",
                 "_currentprice_t",
-                "holdingtype = 'ust'",
+                "holdingtype in ('ust','crypto')",
                 "round",
                 "quantity *",
                 "_currentprice_v",
@@ -6010,7 +6022,7 @@ namespace MyBook
             string AccountName,
             string Code,
             string HoldingType,
-            int Quantity,
+            decimal Quantity,
             decimal PriceAmount,
             string PriceCurrencyType,
             decimal TotalAmount,
@@ -6035,7 +6047,7 @@ namespace MyBook
             int? MatchedRecordId,
             string MatchedRecordReason,
             bool IsRefundMatched,
-            int HoldingQuantity,
+            decimal HoldingQuantity,
             int? ExpenseAllocationDays,
             int? ExpenseAllocationSkipDays,
             string Source,
@@ -6055,7 +6067,7 @@ namespace MyBook
         private sealed record HoldingQuantityData(
             string Code,
             HoldingType HoldingType,
-            int Quantity);
+            decimal Quantity);
 
         private sealed record AccountCurrentBalance(
             decimal Rmb,
@@ -6152,7 +6164,7 @@ namespace MyBook
         string AccountName,
         string Code,
         HoldingType HoldingType,
-        int Quantity,
+        decimal Quantity,
         Currency CurrentPrice,
         Currency TotalPrice,
         string DisplayText,

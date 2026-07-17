@@ -380,7 +380,6 @@ namespace MyBook
                     DateTime.Today.AddMonths(-11));
                 var data = database.GetDashboardData(DateTime.Today, effectiveMonthlyFlowStartMonth);
                 var missingFiatRates = data.MissingExchangeRateCurrencies
-                    .Where(currency => !PubWebUtil.IsCryptoCurrency(currency))
                     .ToList();
                 if (missingFiatRates.Count > 0)
                 {
@@ -388,7 +387,6 @@ namespace MyBook
                     await pubWeb.FetchExchangeRates(missingFiatRates);
                     data = database.GetDashboardData(DateTime.Today, effectiveMonthlyFlowStartMonth);
                     missingFiatRates = data.MissingExchangeRateCurrencies
-                        .Where(currency => !PubWebUtil.IsCryptoCurrency(currency))
                         .ToList();
                     if (missingFiatRates.Count > 0)
                     {
@@ -1502,7 +1500,7 @@ namespace MyBook
         public CurrencyType Currency { get; set; }
         public string Reason { get; set; } = "";
         public string DestAccount { get; set; } = "";
-        public int HoldingQuantity { get; set; }
+        public decimal HoldingQuantity { get; set; }
         public bool IsInternal { get; set; }
         public int? MatchedRecordId { get; set; }
         public string MatchedRecordReason { get; set; } = "";
@@ -1699,7 +1697,7 @@ namespace MyBook
         CurrencyType Currency,
         string Reason,
         string DestAccount,
-        int HoldingQuantity,
+        decimal HoldingQuantity,
         bool IsInternal,
         bool IsRefundMatched,
         int? ExpenseAllocationDays,

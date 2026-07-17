@@ -20,9 +20,10 @@ namespace MyBook
         private readonly string apiKey;
         private readonly byte[] apiSecret;
         private readonly DatabaseUtil? database;
+        private readonly CryptoPriceUtil cryptoPrice;
         private readonly SemaphoreSlim requestLock = new(1, 1);
 
-        public KrakenUtil(IConfigurationRoot config, DatabaseUtil? database = null)
+        public KrakenUtil(IConfigurationRoot config, DatabaseUtil? database = null, CryptoPriceUtil? cryptoPrice = null)
         {
             apiKey = RequiredConfig(config, "kraken_api_key");
             var secret = RequiredConfig(config, "kraken_api_secret");
@@ -35,6 +36,7 @@ namespace MyBook
                 throw new InvalidOperationException("kraken_api_secret is not valid Base64.", exception);
             }
             this.database = database;
+            this.cryptoPrice = cryptoPrice ?? new CryptoPriceUtil();
         }
 
         public async Task FetchDailyReportsAsync(CancellationToken cancellationToken = default)
@@ -58,8 +60,25 @@ namespace MyBook
             var rangeStartUtc = DateTime.SpecifyKind(firstDate, DateTimeKind.Utc);
             var rangeEndUtc = DateTime.SpecifyKind(lastCompletedUtcDate.AddDays(1), DateTimeKind.Utc);
             var currentBalances = (await FetchExtendedBalancesAsync(cancellationToken).ConfigureAwait(false))
-                .ToDictionary(balance => balance.Asset, balance => balance.Balance, StringComparer.Ordinal);
+                .GroupBy(balance => balance.Asset, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Sum(balance => balance.Balance), StringComparer.Ordinal);
             var ledgers = await FetchLedgersAsync(rangeStartUtc, DateTime.UtcNow, cancellationToken).ConfigureAwait(false);
+            var cryptoAssets = currentBalances.Where(item => item.Value != 0).Select(item => item.Key)
+                .Concat(ledgers.Where(ledger => ledger.Amount != 0 || ledger.Fee != 0).Select(ledger => ledger.Asset))
+                .Where(asset => CryptoPriceUtil.GetBaseAsset(asset) != "USD")
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(asset => asset, StringComparer.Ordinal)
+                .ToList();
+            foreach (var asset in cryptoAssets)
+            {
+                if (!CryptoPriceUtil.IsCryptoAsset(asset))
+                    throw new InvalidOperationException($"Unsupported Kraken crypto asset: {asset}.");
+            }
+            var prices = await cryptoPrice.FetchDailyUsdPricesAsync(
+                cryptoAssets,
+                firstDate.AddDays(-1),
+                lastCompletedUtcDate,
+                cancellationToken).ConfigureAwait(false);
             var fundingTransactions = new List<KrakenFundingTransaction>();
             foreach (var asset in ledgers.Where(ledger => ledger.Type is "deposit" or "withdrawal")
                          .Select(ledger => NormalizeAsset(ledger.Asset))
@@ -100,9 +119,10 @@ namespace MyBook
                 foreach (var ledger in dayLedgers)
                     endingQuantities[ledger.Asset] = GetQuantity(endingQuantities, ledger.Asset) + ledger.Amount - ledger.Fee;
 
-                var beginningHoldings = CreateHoldings(account, previousQuantities);
-                var endingHoldings = CreateHoldings(account, endingQuantities);
-                var records = CreateDailyRecords(account, date, dayLedgers, fundingTransactions);
+                var beginningHoldings = CreateHoldings(account, previousQuantities, prices, date.AddDays(-1));
+                var endingHoldings = CreateHoldings(account, endingQuantities, prices, date);
+                var records = CreateDailyRecords(account, dayLedgers, fundingTransactions, prices);
+                AddValuationRecords(records, account, date, previousQuantities, endingQuantities, prices);
                 imports.Add(new StatementRecordHoldingImport(
                         StatementImportProvider.KrakenApi,
                         date,
@@ -110,8 +130,8 @@ namespace MyBook
                         account,
                         records,
                         endingHoldings,
-                        CreateAccountBalances(account, endingQuantities),
-                        CreateAccountBalances(account, previousQuantities),
+                        CreateAccountBalances(account, endingHoldings),
+                        CreateAccountBalances(account, beginningHoldings),
                         beginningHoldings,
                         recordDate: date));
 
@@ -120,7 +140,9 @@ namespace MyBook
 
             var quantitiesAtCompletedEnd = DeriveQuantitiesAt(currentBalances, ledgers, rangeEndUtc);
             ValidateQuantitiesEqual(previousQuantities, quantitiesAtCompletedEnd, $"Kraken ending balance {lastCompletedUtcDate:yyyy-MM-dd}");
-            var saved = db.SaveStatementRecordsAndHoldingsOnce(imports);
+            var saved = db.SaveStatementRecordsAndHoldingsOnce(
+                imports,
+                CreateLatestPrices(prices, cryptoAssets, lastCompletedUtcDate));
             Console.WriteLine(
                 $"Fetch Kraken daily reports done: range={firstDate:yyyy-MM-dd}..{lastCompletedUtcDate:yyyy-MM-dd}, "
                 + $"ledgers={ledgers.Count}, saved={saved.Count(value => value)}, skipped={saved.Count(value => !value)}");
@@ -277,19 +299,24 @@ namespace MyBook
 
         private static List<Record> CreateDailyRecords(
             Account account,
-            DateTime date,
             List<KrakenLedgerEntry> ledgers,
-            List<KrakenFundingTransaction> fundingTransactions)
+            List<KrakenFundingTransaction> fundingTransactions,
+            CryptoPriceSet prices)
         {
             var records = new List<Record>();
-            foreach (var ledger in ledgers)
+            var exchangeLedgers = ledgers.Where(ledger => IsAssetExchangeLedger(ledger.Type)).ToList();
+            foreach (var group in exchangeLedgers.GroupBy(ledger => ledger.ReferenceId, StringComparer.Ordinal))
+                AddExchangeRecords(records, account, group.ToList(), prices);
+
+            foreach (var ledger in ledgers.Where(ledger => !IsAssetExchangeLedger(ledger.Type)))
             {
                 var ledgerRecord = AddRecord(
                     records,
                     account,
                     ledger.Asset,
-                    date,
+                    ledger.Time,
                     ledger.Amount,
+                    GetRecordAmount(ledger.Asset, ledger.Amount, ledger.Time.Date, prices),
                     GetLedgerReason(ledger.Type, ledger.Subtype),
                     $"Kraken ledger {ledger.Id}; refid={ledger.ReferenceId}; type={ledger.Type}; subtype={ledger.Subtype}; amount={ledger.Amount}; asset={ledger.Asset}",
                     includeZero: ledger.Amount != 0m,
@@ -300,8 +327,9 @@ namespace MyBook
                     records,
                     account,
                     ledger.Asset,
-                    date,
+                    ledger.Time,
                     -ledger.Fee,
+                    GetRecordAmount(ledger.Asset, -ledger.Fee, ledger.Time.Date, prices),
                     "\u624b\u7eed\u8d39",
                     $"Kraken ledger fee {ledger.Id}; refid={ledger.ReferenceId}; fee={ledger.Fee}; asset={ledger.Asset}",
                     includeZero: ledger.Fee != 0m);
@@ -310,11 +338,66 @@ namespace MyBook
             return records;
         }
 
+        private static void AddExchangeRecords(
+            List<Record> records,
+            Account account,
+            List<KrakenLedgerEntry> ledgers,
+            CryptoPriceSet prices)
+        {
+            if (ledgers.Count != 2 || String.IsNullOrWhiteSpace(ledgers[0].ReferenceId))
+            {
+                throw new InvalidOperationException(
+                    $"Kraken asset exchange must contain exactly two ledger entries: refid={ledgers.FirstOrDefault()?.ReferenceId}; entries={ledgers.Count}.");
+            }
+
+            var positive = ledgers.Where(ledger => ledger.Amount > 0).ToList();
+            var negative = ledgers.Where(ledger => ledger.Amount < 0).ToList();
+            if (positive.Count != 1 || negative.Count != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Kraken asset exchange must contain one incoming and one outgoing entry: refid={ledgers[0].ReferenceId}.");
+            }
+
+            var usdLedger = ledgers.SingleOrDefault(ledger => CryptoPriceUtil.GetBaseAsset(ledger.Asset) == "USD");
+            var notional = usdLedger is null
+                ? Math.Abs(GetRecordAmount(positive[0].Asset, positive[0].Amount, positive[0].Time.Date, prices))
+                : Math.Abs(usdLedger.Amount);
+            if (notional == 0)
+                throw new InvalidOperationException($"Kraken asset exchange has zero USD notional: refid={ledgers[0].ReferenceId}.");
+
+            foreach (var ledger in ledgers)
+            {
+                var amount = ledger.Amount > 0 ? notional : -notional;
+                AddRecord(
+                    records,
+                    account,
+                    ledger.Asset,
+                    ledger.Time,
+                    ledger.Amount,
+                    amount,
+                    GetLedgerReason(ledger.Type, ledger.Subtype),
+                    $"code=BALANCE-KRAKEN-{ledger.ReferenceId}; Kraken ledger {ledger.Id}; refid={ledger.ReferenceId}; type={ledger.Type}; subtype={ledger.Subtype}; amount={ledger.Amount}; asset={ledger.Asset}; usdNotional={notional}",
+                    includeZero: true,
+                    isInternal: true);
+                AddRecord(
+                    records,
+                    account,
+                    ledger.Asset,
+                    ledger.Time,
+                    -ledger.Fee,
+                    GetRecordAmount(ledger.Asset, -ledger.Fee, ledger.Time.Date, prices),
+                    "\u624b\u7eed\u8d39",
+                    $"Kraken ledger fee {ledger.Id}; refid={ledger.ReferenceId}; fee={ledger.Fee}; asset={ledger.Asset}",
+                    includeZero: ledger.Fee != 0m);
+            }
+        }
+
         private static Record? AddRecord(
             List<Record> records,
             Account account,
             string rawAsset,
             DateTime date,
+            decimal holdingQuantity,
             decimal amount,
             string reason,
             string source,
@@ -327,17 +410,17 @@ namespace MyBook
             var record = new Record
             {
                 Account = account,
-                Holding = CreateHolding(account, displayAsset, 0m),
-                date = date.Date,
-                postingDate = date.Date,
+                Holding = CreateHolding(account, displayAsset, 0m, amount == 0 ? 0 : 1),
+                date = date,
+                postingDate = date,
                 updateTime = DateTime.Now,
-                HoldingQuantity = 0,
+                HoldingQuantity = displayAsset == "USD" ? 0 : holdingQuantity,
                 DestAccount = displayAsset,
                 Source = source,
                 Reason = reason,
                 isInternal = isInternal
             };
-            record.CopyFrom(new Currency(amount, ParseAssetCurrency(displayAsset)));
+            record.CopyFrom(new Currency(amount, CurrencyType.USD));
             records.Add(record);
             return record;
         }
@@ -385,44 +468,116 @@ namespace MyBook
 
         private static List<Holding> CreateHoldings(
             Account account,
-            Dictionary<string, decimal> quantities)
+            Dictionary<string, decimal> quantities,
+            CryptoPriceSet prices,
+            DateTime priceDate)
         {
             return quantities
                 .Where(item => item.Value != 0)
                 .Select(item => CreateHolding(
                     account,
                     NormalizeAsset(item.Key),
-                    item.Value))
+                    item.Value,
+                    prices.Get(item.Key, priceDate).CloseUsd))
                 .OrderBy(holding => holding.code, StringComparer.Ordinal)
                 .ToList();
         }
 
-        private static Holding CreateHolding(Account account, string asset, decimal quantity)
+        private static Holding CreateHolding(Account account, string asset, decimal quantity, decimal unitPrice)
         {
-            return new Holding(asset, asset == "USD" ? HoldingType.Cash : HoldingType.Crypto)
+            var isUsd = CryptoPriceUtil.GetBaseAsset(asset) == "USD";
+            CryptoPriceUtil.ValidateDecimal30_18(quantity, $"Kraken {asset} quantity");
+            return new Holding(asset, isUsd ? HoldingType.Cash : HoldingType.Crypto)
             {
                 Account = account,
-                desc = asset == "USD" ? "USD cash balance" : $"Kraken {asset}",
+                desc = isUsd ? "USD cash balance" : $"Kraken {asset}",
                 displayText = asset,
-                currentPrice = new Currency(quantity, ParseAssetCurrency(asset))
+                quantity = quantity,
+                currentPrice = new Currency(isUsd ? quantity : unitPrice, CurrencyType.USD)
             };
         }
 
-        private static List<AccountBalance> CreateAccountBalances(Account account, Dictionary<string, decimal> quantities)
+        private static List<AccountBalance> CreateAccountBalances(Account account, List<Holding> holdings)
         {
-            return quantities
-                .Select(item => new AccountBalance(account, new Currency(item.Value, ParseAssetCurrency(NormalizeAsset(item.Key)))))
-                .ToList();
+            return
+            [
+                new AccountBalance(
+                    account,
+                    new Currency(Currency.RoundMoney(holdings.Sum(holding => holding.totalPrice.v)), CurrencyType.USD))
+            ];
         }
 
-        private static CurrencyType ParseAssetCurrency(string asset)
+        private static decimal GetRecordAmount(string asset, decimal quantity, DateTime date, CryptoPriceSet prices)
         {
-            var normalized = NormalizeAsset(asset);
-            var suffixIndex = normalized.IndexOf('.', StringComparison.Ordinal);
-            var currencyCode = suffixIndex < 0 ? normalized : normalized[..suffixIndex];
-            return Enum.TryParse<CurrencyType>(currencyCode, out var currency)
-                ? currency
-                : throw new InvalidOperationException($"Unsupported Kraken currency: {asset}.");
+            return CryptoPriceUtil.GetBaseAsset(asset) == "USD"
+                ? Currency.RoundMoney(quantity)
+                : CryptoPriceUtil.CalculateMarketValue(quantity, prices.Get(asset, date).CloseUsd);
+        }
+
+        private static void AddValuationRecords(
+            List<Record> records,
+            Account account,
+            DateTime date,
+            Dictionary<string, decimal> beginningQuantities,
+            Dictionary<string, decimal> endingQuantities,
+            CryptoPriceSet prices)
+        {
+            foreach (var asset in beginningQuantities.Keys
+                         .Union(endingQuantities.Keys, StringComparer.Ordinal)
+                         .Where(asset => CryptoPriceUtil.GetBaseAsset(asset) != "USD")
+                         .OrderBy(asset => asset, StringComparer.Ordinal))
+            {
+                var beginningQuantity = GetQuantity(beginningQuantities, asset);
+                var endingQuantity = GetQuantity(endingQuantities, asset);
+                var previousPrice = prices.Get(asset, date.AddDays(-1));
+                var currentPrice = prices.Get(asset, date);
+                var beginningValue = CryptoPriceUtil.CalculateMarketValue(beginningQuantity, previousPrice.CloseUsd);
+                var repricedBeginningValue = CryptoPriceUtil.CalculateMarketValue(beginningQuantity, currentPrice.CloseUsd);
+                var priceChange = repricedBeginningValue - beginningValue;
+                if (priceChange != 0)
+                {
+                    AddRecord(
+                        records,
+                        account,
+                        asset,
+                        date,
+                        0,
+                        priceChange,
+                        "持仓价格变动",
+                        $"Kraken valuation; asset={asset}; quantity={beginningQuantity}; previousClose={previousPrice.CloseUsd}; currentClose={currentPrice.CloseUsd}; previousDate={previousPrice.SourceCandleDate:yyyy-MM-dd}; currentDate={currentPrice.SourceCandleDate:yyyy-MM-dd}");
+                }
+
+                var eventValue = records
+                    .Where(record => record.Holding?.code == asset && record.HoldingQuantity != 0)
+                    .Sum(record => record.v);
+                var endingValue = CryptoPriceUtil.CalculateMarketValue(endingQuantity, currentPrice.CloseUsd);
+                var transactionPriceImpact = endingValue - repricedBeginningValue - eventValue;
+                if (transactionPriceImpact != 0)
+                {
+                    AddRecord(
+                        records,
+                        account,
+                        asset,
+                        date,
+                        0,
+                        transactionPriceImpact,
+                        "交易价格影响",
+                        $"Kraken valuation; asset={asset}; endingValue={endingValue}; repricedBeginning={repricedBeginningValue}; eventValue={eventValue}; close={currentPrice.CloseUsd}; closeDate={currentPrice.SourceCandleDate:yyyy-MM-dd}");
+                }
+            }
+        }
+
+        private static List<Finance> CreateLatestPrices(CryptoPriceSet prices, IEnumerable<string> assets, DateTime date)
+        {
+            return assets.Select(CryptoPriceUtil.GetBaseAsset).Distinct(StringComparer.Ordinal).Select(asset =>
+            {
+                var price = prices.Get(asset, date);
+                return new Finance(asset, HoldingType.Crypto)
+                {
+                    currentPrice = new Currency(price.CloseUsd, CurrencyType.USD),
+                    currentPriceTime = new DateTimeOffset(DateTime.SpecifyKind(date.AddDays(1), DateTimeKind.Utc)).ToUnixTimeSeconds()
+                };
+            }).ToList();
         }
 
         private async Task<JObject> PostPrivateAsync(
@@ -509,22 +664,35 @@ namespace MyBook
             var credit = ReadDecimal(value["credit"]);
             var creditUsed = ReadDecimal(value["credit_used"]);
             var holdTrade = ReadDecimal(value["hold_trade"]);
-            return new KrakenExtendedBalance(asset, balance, credit, creditUsed, holdTrade, balance + credit - creditUsed - holdTrade);
+            var normalizedAsset = NormalizeAsset(asset);
+            ValidateKrakenQuantity(normalizedAsset, balance, "balance");
+            ValidateKrakenQuantity(normalizedAsset, credit, "credit");
+            ValidateKrakenQuantity(normalizedAsset, creditUsed, "credit_used");
+            ValidateKrakenQuantity(normalizedAsset, holdTrade, "hold_trade");
+            return new KrakenExtendedBalance(normalizedAsset, balance, credit, creditUsed, holdTrade, balance + credit - creditUsed - holdTrade);
         }
 
         private static KrakenLedgerEntry ParseLedger(string id, JToken value)
         {
             var unixTime = ReadDecimal(value["time"]);
+            var asset = NormalizeAsset(value["asset"]?.ToString()
+                ?? throw new InvalidOperationException($"Kraken ledger {id} is missing asset."));
+            var amount = ReadDecimal(value["amount"]);
+            var fee = ReadDecimal(value["fee"]);
+            var balance = ReadDecimal(value["balance"]);
+            ValidateKrakenQuantity(asset, amount, $"ledger {id} amount");
+            ValidateKrakenQuantity(asset, fee, $"ledger {id} fee");
+            ValidateKrakenQuantity(asset, balance, $"ledger {id} balance");
             return new KrakenLedgerEntry(
                 id,
                 value["refid"]?.ToString() ?? "",
                 DateTimeOffset.FromUnixTimeMilliseconds((long)(unixTime * 1000m)).UtcDateTime,
                 value["type"]?.ToString() ?? "",
                 value["subtype"]?.ToString() ?? "",
-                value["asset"]?.ToString() ?? throw new InvalidOperationException($"Kraken ledger {id} is missing asset."),
-                ReadDecimal(value["amount"]),
-                ReadDecimal(value["fee"]),
-                ReadDecimal(value["balance"]));
+                asset,
+                amount,
+                fee,
+                balance);
         }
 
         private static KrakenFundingTransaction ParseFundingTransaction(JObject value, bool isWithdrawal)
@@ -644,6 +812,12 @@ namespace MyBook
             return String.IsNullOrWhiteSpace(value)
                 ? 0m
                 : Decimal.Parse(value, NumberStyles.Float, CultureInfo.InvariantCulture);
+        }
+
+        private static void ValidateKrakenQuantity(string asset, decimal value, string field)
+        {
+            if (CryptoPriceUtil.GetBaseAsset(asset) != "USD")
+                CryptoPriceUtil.ValidateDecimal30_18(value, $"Kraken {asset} {field}");
         }
 
         private static void ThrowKrakenErrors(JObject json, string prefix)

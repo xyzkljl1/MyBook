@@ -43,6 +43,11 @@ namespace MyBook
                 ["USDT"] = await FetchUsdtBalanceRawAsync(address, cancellationToken).ConfigureAwait(false)
             };
             ValidateCurrentQuantities(quantities, events, currentQuantities);
+            var prices = await cryptoPrice.FetchDailyUsdPricesAsync(
+                ["ETH", "USDT"],
+                firstDate.AddDays(-1),
+                lastCompletedDate,
+                cancellationToken).ConfigureAwait(false);
 
             var imports = new List<StatementRecordHoldingImport>();
             for (var date = firstDate; date <= lastCompletedDate; date = date.AddDays(1))
@@ -53,9 +58,19 @@ namespace MyBook
                 foreach (var item in dayEvents)
                     quantities[item.Asset] += item.QuantityRaw;
 
-                var beginningHoldings = CreateHoldings(account, beginningQuantities);
-                var endingHoldings = CreateHoldings(account, quantities);
-                var records = CreateRecords(account, dayEvents);
+                var beginningAssetQuantities = ToAssetQuantities(beginningQuantities);
+                var endingAssetQuantities = ToAssetQuantities(quantities);
+                var beginningHoldings = CreateHoldings(account, beginningAssetQuantities, prices, date.AddDays(-1));
+                var endingHoldings = CreateHoldings(account, endingAssetQuantities, prices, date);
+                var records = CreateRecords(account, dayEvents, prices);
+                AddValuationRecords(
+                    records,
+                    account,
+                    date,
+                    beginningAssetQuantities,
+                    endingAssetQuantities,
+                    prices,
+                    "Ethereum");
                 imports.Add(new StatementRecordHoldingImport(
                     StatementImportProvider.EthereumApi,
                     date,
@@ -63,8 +78,8 @@ namespace MyBook
                     account,
                     records,
                     endingHoldings,
-                    CreateAccountBalances(account, quantities),
-                    CreateAccountBalances(account, beginningQuantities),
+                    CreateAccountBalances(account, endingHoldings),
+                    CreateAccountBalances(account, beginningHoldings),
                     beginningHoldings,
                     recordDate: date));
             }
@@ -73,16 +88,30 @@ namespace MyBook
             foreach (var item in events.Where(item => item.Time >= DateTime.SpecifyKind(lastCompletedDate.AddDays(1), DateTimeKind.Utc)))
                 completedQuantities[item.Asset] -= item.QuantityRaw;
             ValidateQuantities(quantities, completedQuantities, $"Ethereum completed balance {lastCompletedDate:yyyy-MM-dd}");
-            var saved = database.SaveStatementRecordsAndHoldingsOnce(imports);
+            var saved = database.SaveStatementRecordsAndHoldingsOnce(
+                imports,
+                CreateLatestPrices(prices, ["ETH", "USDT"], lastCompletedDate));
             Console.WriteLine($"Fetch Ethereum daily reports done: account={account.name}; events={events.Count}; saved={saved.Count(value => value)}");
         }
 
-        private static List<Record> CreateRecords(Account account, List<EthereumAssetEvent> events)
+        private static List<Record> CreateRecords(
+            Account account,
+            List<EthereumAssetEvent> events,
+            CryptoPriceSet prices)
         {
             return events.Select(item =>
             {
                 var quantity = ToAssetQuantity(item.QuantityRaw, item.Decimals);
-                var record = CreateRecord(account, item.Asset, item.Time, quantity, item.Reason, item.Source);
+                var price = prices.Get(item.Asset, item.Time.Date);
+                var amount = CryptoPriceUtil.CalculateMarketValue(quantity, price.CloseUsd);
+                var record = CreateRecord(
+                    account,
+                    item.Asset,
+                    item.Time,
+                    amount,
+                    quantity,
+                    item.Reason,
+                    $"{item.Source}; valuation=Kraken {price.Asset}/USD; closeDate={price.SourceCandleDate:yyyy-MM-dd}; close={price.CloseUsd}");
                 record.blockchain = BlockchainType.Ethereum;
                 record.blockchainTransactionHash = item.TransactionHash;
                 record.blockchainEventIndex = item.EventIndex;
@@ -91,54 +120,132 @@ namespace MyBook
             }).ToList();
         }
 
-        private static Record CreateRecord(Account account, string asset, DateTime date, decimal amount, string reason, string source)
+        private static Record CreateRecord(
+            Account account,
+            string asset,
+            DateTime date,
+            decimal amount,
+            decimal holdingQuantity,
+            string reason,
+            string source)
         {
             var record = new Record
             {
                 Account = account,
-                Holding = CreateHolding(account, asset, 0),
+                Holding = CreateHolding(account, asset, 0, 0),
                 date = date,
                 postingDate = date,
                 updateTime = DateTime.Now,
+                HoldingQuantity = holdingQuantity,
                 DestAccount = asset,
                 Reason = reason,
                 Source = source
             };
-            record.CopyFrom(new Currency(amount, ParseAssetCurrency(asset)));
+            record.CopyFrom(new Currency(amount, CurrencyType.USD));
             return record;
         }
 
-        private static List<Holding> CreateHoldings(Account account, Dictionary<string, decimal> quantities)
+        private static Dictionary<string, decimal> ToAssetQuantities(Dictionary<string, decimal> rawQuantities)
+        {
+            return rawQuantities.ToDictionary(
+                item => item.Key,
+                item => ToAssetQuantity(item.Value, item.Key == "ETH" ? EthDecimals : UsdtDecimals),
+                StringComparer.Ordinal);
+        }
+
+        private static List<Holding> CreateHoldings(
+            Account account,
+            Dictionary<string, decimal> quantities,
+            CryptoPriceSet prices,
+            DateTime priceDate)
         {
             return quantities.Where(item => item.Value != 0)
-                .Select(item => CreateHolding(account, item.Key, ToAssetQuantity(
-                    item.Value, item.Key == "ETH" ? EthDecimals : UsdtDecimals)))
+                .Select(item => CreateHolding(account, item.Key, item.Value, prices.Get(item.Key, priceDate).CloseUsd))
                 .ToList();
         }
 
-        private static Holding CreateHolding(Account account, string asset, decimal value)
+        private static Holding CreateHolding(Account account, string asset, decimal quantity, decimal unitPrice)
         {
             return new Holding(asset, HoldingType.Crypto)
             {
                 Account = account,
                 desc = $"Ethereum {asset}",
                 displayText = asset,
-                currentPrice = new Currency(value, ParseAssetCurrency(asset))
+                quantity = quantity,
+                currentPrice = new Currency(unitPrice, CurrencyType.USD)
             };
         }
 
-        private static List<AccountBalance> CreateAccountBalances(Account account, Dictionary<string, decimal> rawQuantities)
+        private static List<AccountBalance> CreateAccountBalances(Account account, List<Holding> holdings)
         {
-            return rawQuantities
-                .Select(item => new AccountBalance(account, new Currency(
-                    ToAssetQuantity(item.Value, item.Key == "ETH" ? EthDecimals : UsdtDecimals),
-                    ParseAssetCurrency(item.Key))))
-                .ToList();
+            return
+            [
+                new AccountBalance(
+                    account,
+                    new Currency(Currency.RoundMoney(holdings.Sum(holding => holding.totalPrice.v)), CurrencyType.USD))
+            ];
         }
 
-        private static CurrencyType ParseAssetCurrency(string asset)
+        private static void AddValuationRecords(
+            List<Record> records,
+            Account account,
+            DateTime date,
+            Dictionary<string, decimal> beginningQuantities,
+            Dictionary<string, decimal> endingQuantities,
+            CryptoPriceSet prices,
+            string sourcePrefix)
         {
-            return Enum.Parse<CurrencyType>(asset);
+            foreach (var asset in beginningQuantities.Keys.Union(endingQuantities.Keys, StringComparer.Ordinal).OrderBy(asset => asset, StringComparer.Ordinal))
+            {
+                var beginningQuantity = beginningQuantities.TryGetValue(asset, out var beginning) ? beginning : 0;
+                var endingQuantity = endingQuantities.TryGetValue(asset, out var ending) ? ending : 0;
+                var previousPrice = prices.Get(asset, date.AddDays(-1));
+                var currentPrice = prices.Get(asset, date);
+                var beginningValue = CryptoPriceUtil.CalculateMarketValue(beginningQuantity, previousPrice.CloseUsd);
+                var repricedBeginningValue = CryptoPriceUtil.CalculateMarketValue(beginningQuantity, currentPrice.CloseUsd);
+                var priceChange = repricedBeginningValue - beginningValue;
+                if (priceChange != 0)
+                {
+                    records.Add(CreateRecord(
+                        account,
+                        asset,
+                        date,
+                        priceChange,
+                        0,
+                        "持仓价格变动",
+                        $"{sourcePrefix} valuation; asset={asset}; quantity={beginningQuantity}; previousClose={previousPrice.CloseUsd}; currentClose={currentPrice.CloseUsd}; previousDate={previousPrice.SourceCandleDate:yyyy-MM-dd}; currentDate={currentPrice.SourceCandleDate:yyyy-MM-dd}"));
+                }
+
+                var eventValue = records
+                    .Where(record => record.Holding?.code == asset && record.HoldingQuantity != 0)
+                    .Sum(record => record.v);
+                var endingValue = CryptoPriceUtil.CalculateMarketValue(endingQuantity, currentPrice.CloseUsd);
+                var transactionPriceImpact = endingValue - repricedBeginningValue - eventValue;
+                if (transactionPriceImpact != 0)
+                {
+                    records.Add(CreateRecord(
+                        account,
+                        asset,
+                        date,
+                        transactionPriceImpact,
+                        0,
+                        "交易价格影响",
+                        $"{sourcePrefix} valuation; asset={asset}; endingValue={endingValue}; repricedBeginning={repricedBeginningValue}; eventValue={eventValue}; close={currentPrice.CloseUsd}; closeDate={currentPrice.SourceCandleDate:yyyy-MM-dd}"));
+                }
+            }
+        }
+
+        private static List<Finance> CreateLatestPrices(CryptoPriceSet prices, IEnumerable<string> assets, DateTime date)
+        {
+            return assets.Distinct(StringComparer.Ordinal).Select(asset =>
+            {
+                var price = prices.Get(asset, date);
+                return new Finance(CryptoPriceUtil.GetBaseAsset(asset), HoldingType.Crypto)
+                {
+                    currentPrice = new Currency(price.CloseUsd, CurrencyType.USD),
+                    currentPriceTime = new DateTimeOffset(DateTime.SpecifyKind(date.AddDays(1), DateTimeKind.Utc)).ToUnixTimeSeconds()
+                };
+            }).ToList();
         }
 
         private async Task<List<EthereumAssetEvent>> FetchEventsAsync(
@@ -238,21 +345,23 @@ namespace MyBook
         private Dictionary<string, decimal> GetImportedRawQuantities(Account account)
         {
             var result = CreateEmptyRawQuantities();
-            foreach (var balance in database.GetCurrentAccountBalances(account))
+            foreach (var holding in database.GetCurrentAccountHoldings(account))
             {
-                switch (balance.t)
+                if (holding.holdingType != HoldingType.Crypto)
                 {
-                    case CurrencyType.ETH:
-                        result["ETH"] += ToRawQuantity(balance.v, EthDecimals);
-                        break;
-                    case CurrencyType.USDT:
-                        result["USDT"] += ToRawQuantity(balance.v, UsdtDecimals);
-                        break;
-                    default:
-                        if (balance.v != 0)
-                            throw new InvalidOperationException($"Unsupported Ethereum account balance currency: {balance.t}.");
-                        break;
+                    if (holding.totalPrice.v != 0)
+                        throw new InvalidOperationException($"Unsupported Ethereum holding: {holding.code}/{holding.holdingType}.");
+                    continue;
                 }
+
+                if (holding.currentPrice.t != CurrencyType.USD)
+                    throw new InvalidOperationException($"Ethereum crypto holding must be valued in USD: {holding.code}/{holding.currentPrice.t}.");
+                result[holding.code] = holding.code switch
+                {
+                    "ETH" => ToRawQuantity(holding.quantity, EthDecimals),
+                    "USDT" => ToRawQuantity(holding.quantity, UsdtDecimals),
+                    _ => throw new InvalidOperationException($"Unsupported Ethereum crypto holding: {holding.code}.")
+                };
             }
             return result;
         }

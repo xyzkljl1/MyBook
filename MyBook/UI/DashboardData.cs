@@ -183,7 +183,7 @@ namespace MyBook
         public int? MatchedRecordId { get; set; }
         public string MatchedRecordReason { get; set; } = "";
         public bool IsRefundMatched { get; set; }
-        public int HoldingQuantity { get; set; }
+        public decimal HoldingQuantity { get; set; }
         public int? ExpenseAllocationDays { get; set; }
         public int? ExpenseAllocationSkipDays { get; set; }
         public string Source { get; set; } = "";
@@ -203,7 +203,7 @@ namespace MyBook
         public string DestAccount { get; set; } = "";
         public bool IsInternal { get; set; }
         public bool IsRefundMatched { get; set; }
-        public int HoldingQuantity { get; set; }
+        public decimal HoldingQuantity { get; set; }
         public int? ExpenseAllocationDays { get; set; }
         public int? ExpenseAllocationSkipDays { get; set; }
         public string Source { get; set; } = "";

@@ -9,11 +9,13 @@ namespace MyBook
         private static readonly HttpClient sharedHttpClient = CreateSharedHttpClient();
         private readonly DatabaseUtil database;
         private readonly IConfigurationRoot config;
+        private readonly CryptoPriceUtil cryptoPrice;
 
-        public CryptoUtil(IConfigurationRoot config, DatabaseUtil database)
+        public CryptoUtil(IConfigurationRoot config, DatabaseUtil database, CryptoPriceUtil? cryptoPrice = null)
         {
             this.database = database;
             this.config = config;
+            this.cryptoPrice = cryptoPrice ?? new CryptoPriceUtil();
         }
 
         private string EtherscanApiKey => RequiredConfig(config, "etherscan_api_key");

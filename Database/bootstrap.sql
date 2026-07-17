@@ -22,7 +22,7 @@ CREATE TABLE `accountinternalids` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `cardNo` varchar(128) NOT NULL DEFAULT '',
   `desc` varchar(255) NOT NULL DEFAULT '',
-  `currencyType` enum('RMB','USD','JPY','SGD','HKD','BTC','ETH','USDT') DEFAULT NULL,
+  `currencyType` enum('RMB','USD','JPY','SGD','HKD') DEFAULT NULL,
   `_account_Id` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`Id`),
   UNIQUE KEY `unique_AccountInternalIds_account_card_no` (`_account_Id`,`cardNo`),
@@ -48,7 +48,7 @@ CREATE TABLE `finance` (
   `holdingType` enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto') NOT NULL DEFAULT 'NASDAQ',
   `currentPriceTime` bigint NOT NULL DEFAULT '0',
   `_currentPrice_v` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
-  `_currentPrice_t` enum('RMB','USD','JPY','SGD','HKD','BTC','ETH','USDT') NOT NULL DEFAULT 'RMB',
+  `_currentPrice_t` enum('RMB','USD','JPY','SGD','HKD') NOT NULL DEFAULT 'RMB',
   PRIMARY KEY (`Id`),
   UNIQUE KEY `unique_Finance_code_holding_type` (`code`,`holdingType`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -65,12 +65,12 @@ CREATE TABLE `statementimports` (
 CREATE TABLE `holdings` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `code` varchar(255) NOT NULL DEFAULT '',
-  `quantity` int NOT NULL DEFAULT '0',
+  `quantity` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
   `_currentPrice_v` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
   `desc` varchar(255) NOT NULL DEFAULT '',
   `_account_Id` int NOT NULL DEFAULT '0',
   `holdingType` enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto') NOT NULL DEFAULT 'NASDAQ',
-  `_currentPrice_t` enum('RMB','USD','JPY','SGD','HKD','BTC','ETH','USDT') NOT NULL DEFAULT 'RMB',
+  `_currentPrice_t` enum('RMB','USD','JPY','SGD','HKD') NOT NULL DEFAULT 'RMB',
   `displayText` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`Id`),
   UNIQUE KEY `unique_Holdings_account_code_holding_type` (`_account_Id`,`code`,`holdingType`),
@@ -97,11 +97,11 @@ CREATE TABLE `records` (
   `Reason` varchar(1024) NOT NULL DEFAULT '',
   `_account_Id` int NOT NULL DEFAULT '0',
   `_descCurrency_v` decimal(30,18) DEFAULT NULL,
-  `_descCurrency_t` enum('RMB','USD','JPY','SGD','HKD','BTC','ETH','USDT') DEFAULT NULL,
+  `_descCurrency_t` enum('RMB','USD','JPY','SGD','HKD') DEFAULT NULL,
   `_Currency_v` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
-  `_Currency_t` enum('RMB','USD','JPY','SGD','HKD','BTC','ETH','USDT') NOT NULL DEFAULT 'RMB',
+  `_Currency_t` enum('RMB','USD','JPY','SGD','HKD') NOT NULL DEFAULT 'RMB',
   `_statementImport_Id` int NOT NULL DEFAULT '0',
-  `HoldingQuantity` int NOT NULL DEFAULT '0',
+  `HoldingQuantity` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
   `backup` json DEFAULT NULL,
   `postingDate` datetime(6) DEFAULT NULL,
   `_holding_Id` int NOT NULL,
@@ -149,7 +149,7 @@ CREATE TABLE `snapshotitems` (
   `itemType` enum('AccountBalance','Holding') NOT NULL DEFAULT 'AccountBalance',
   `stableKey` varchar(256) NOT NULL DEFAULT '',
   `accountName` varchar(256) NOT NULL DEFAULT '',
-  `currencyType` enum('RMB','USD','JPY','SGD','HKD','BTC','ETH','USDT') DEFAULT NULL,
+  `currencyType` enum('RMB','USD','JPY','SGD','HKD') DEFAULT NULL,
   `amount` decimal(30,18) DEFAULT NULL,
   `payloadJson` longtext NOT NULL,
   `_snapshot_Id` int NOT NULL DEFAULT '0',
@@ -161,7 +161,7 @@ CREATE TABLE `snapshotitems` (
   CONSTRAINT `fk_SnapshotItems_snapshot` FOREIGN KEY (`_snapshot_Id`) REFERENCES `snapshots` (`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `accountbalances` AS select cast(row_number() OVER (ORDER BY `grouped`.`_account_Id`,`grouped`.`currency_type` )  as signed) AS `Id`,`grouped`.`accountName` AS `accountName`,`grouped`.`amount` AS `amount`,`grouped`.`currency_type` AS `currency_type`,`grouped`.`_account_Id` AS `_account_Id` from (select `holdings`.`_account_Id` AS `_account_Id`,`accounts`.`name` AS `accountName`,`holdings`.`_currentPrice_t` AS `currency_type`,sum((case when (`holdings`.`holdingType` = 'UST') then round((`holdings`.`quantity` * `holdings`.`_currentPrice_v`),2) else (`holdings`.`quantity` * `holdings`.`_currentPrice_v`) end)) AS `amount` from (`holdings` join `accounts` on((`accounts`.`Id` = `holdings`.`_account_Id`))) group by `holdings`.`_account_Id`,`accounts`.`name`,`holdings`.`_currentPrice_t` having (`amount` <> 0)) `grouped`;
+CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `accountbalances` AS select cast(row_number() OVER (ORDER BY `grouped`.`_account_Id`,`grouped`.`currency_type` )  as signed) AS `Id`,`grouped`.`accountName` AS `accountName`,`grouped`.`amount` AS `amount`,`grouped`.`currency_type` AS `currency_type`,`grouped`.`_account_Id` AS `_account_Id` from (select `holding`.`_account_Id` AS `_account_Id`,`account`.`name` AS `accountName`,`holding`.`_currentPrice_t` AS `currency_type`,sum((case when (`holding`.`holdingType` in ('UST','Crypto')) then round((`holding`.`quantity` * `holding`.`_currentPrice_v`),2) else (`holding`.`quantity` * `holding`.`_currentPrice_v`) end)) AS `amount` from (`holdings` `holding` join `accounts` `account` on((`account`.`Id` = `holding`.`_account_Id`))) group by `holding`.`_account_Id`,`account`.`name`,`holding`.`_currentPrice_t` having (`amount` <> 0)) `grouped`;
 
 CREATE TRIGGER `trg_Records_alloc_exp_ins`
 BEFORE INSERT ON `Records`

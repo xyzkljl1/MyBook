@@ -37,7 +37,7 @@ namespace MyBook
         Cash,
         // 应计、待结算、或还未实际入账但已计入账户净资产的项目。
         Accrued,
-        // 加密资产；作为单值资产直接保存其原币数量。
+        // 加密资产；quantity 保存原币数量，currentPrice 保存每单位资产价格。
         Crypto
     };
 
@@ -64,11 +64,21 @@ namespace MyBook
         [SugarColumn(DefaultValue = "NASDAQ", ColumnDataType = MySqlEnumColumnTypes.HoldingType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public HoldingType holdingType { get; set; } = HoldingType.NASDAQ;
 
-        [SugarColumn(DefaultValue = "0")]
-        public int quantity
+        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal quantity
         {
             get => IsSingleValueAsset(holdingType) ? 1 : _quantity;
-            set => _quantity = IsSingleValueAsset(holdingType) ? 1 : value;
+            set
+            {
+                if (IsSingleValueAsset(holdingType))
+                {
+                    _quantity = 1;
+                    return;
+                }
+
+                MySqlDecimalColumnTypes.ValidateCurrencyValue(value, "Holding quantity");
+                _quantity = value;
+            }
         }
 
         [SugarColumn(DefaultValue = "''")]
@@ -96,8 +106,8 @@ namespace MyBook
             get
             {
                 var amount = quantity * currentPrice.v;
-                // IBKR 美债报价按 100 面值给出，报表参与净资产计算的市值按分四舍五入。
-                if (holdingType == HoldingType.UST)
+                // 美债和加密资产的市值按货币金额精确到分。
+                if (holdingType is HoldingType.UST or HoldingType.Crypto)
                     amount = Decimal.Round(amount, 2, MidpointRounding.AwayFromZero);
                 return new Currency(amount, currentPrice.t);
             }
@@ -115,7 +125,7 @@ namespace MyBook
 
         public static bool IsSingleValueAsset(HoldingType holdingType)
         {
-            return holdingType is HoldingType.Cash or HoldingType.Accrued or HoldingType.Crypto;
+            return holdingType is HoldingType.Cash or HoldingType.Accrued;
         }
 
         // 用于存储
@@ -128,7 +138,7 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public int _account_Id { get; set; } = 0;
 
-        private int _quantity = 0;
+        private decimal _quantity = 0;
     }
 
     // 从互联网获取的最新股票价格或汇率，不关联 Account。
@@ -188,7 +198,7 @@ namespace MyBook
     // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
     static class MySqlEnumColumnTypes
     {
-        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD','BTC','ETH','USDT')";
+        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
         public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
@@ -200,6 +210,12 @@ namespace MyBook
     static class MySqlDecimalColumnTypes
     {
         public const string CurrencyValue = "decimal(30,18)";
+
+        public static void ValidateCurrencyValue(decimal value, string name)
+        {
+            if (Math.Abs(value) >= 1_000_000_000_000m || Decimal.Round(value, 18) != value)
+                throw new InvalidOperationException($"{name} exceeds {CurrencyValue}: {value}.");
+        }
     }
 
     public enum AccountUsage
@@ -400,8 +416,16 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public bool isRefundMatched { get; set; } = false; // 是否已匹配到对应退款/消费；默认不计入界面统计图表。
 
-        [SugarColumn(DefaultValue = "0")]
-        public int HoldingQuantity { get; set; } = 0; // 交易涉及的持仓数量，非持仓交易为 0。
+        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal HoldingQuantity
+        {
+            get => _holdingQuantity;
+            set
+            {
+                MySqlDecimalColumnTypes.ValidateCurrencyValue(value, "Record holding quantity");
+                _holdingQuantity = value;
+            }
+        } // 交易涉及的持仓数量，非持仓交易为 0。
 
         [SugarColumn(IsNullable = true)]
         public int? expenseAllocationDays { get; set; } = null; // UI 支出统计均摊天数，正数向交易日后均摊，负数向交易日前均摊。
@@ -468,6 +492,7 @@ namespace MyBook
         public int _statementImport_Id { get; set; }
 
         private Currency? _descCurrency;
+        private decimal _holdingQuantity;
     }
     public class Records : List<Record>
     {
@@ -616,9 +641,6 @@ namespace MyBook
         JPY,
         SGD,
         HKD,
-        BTC,
-        ETH,
-        USDT,
     };
     // 任意币种*数量的组合
     class Money
