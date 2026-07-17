@@ -11,6 +11,7 @@ namespace MyBook
     partial class KrakenUtil
     {
         private const string KrakenApiBaseUrl = "https://api.kraken.com";
+        private const string EthereumUsdtContract = "0xdac17f958d2ee523a2206206994597c13d831ec7";
         private const int LedgerPageSize = 50;
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(20);
         private static long lastNonce;
@@ -62,6 +63,16 @@ namespace MyBook
             var currentBalances = (await FetchExtendedBalancesAsync(cancellationToken).ConfigureAwait(false))
                 .ToDictionary(balance => balance.Asset, balance => balance.Balance, StringComparer.Ordinal);
             var ledgers = await FetchLedgersAsync(rangeStartUtc, DateTime.UtcNow, cancellationToken).ConfigureAwait(false);
+            var fundingTransactions = new List<KrakenFundingTransaction>();
+            foreach (var asset in ledgers.Where(ledger => ledger.Type is "deposit" or "withdrawal")
+                         .Select(ledger => NormalizeAsset(ledger.Asset))
+                         .Where(asset => asset is "ETH" or "USDT")
+                         .Distinct(StringComparer.Ordinal))
+            {
+                fundingTransactions.AddRange(await FetchRecentDepositsAsync(asset, cancellationToken).ConfigureAwait(false));
+                if (ledgers.Any(ledger => ledger.Type == "withdrawal" && NormalizeAsset(ledger.Asset) == asset))
+                    fundingTransactions.AddRange(await FetchRecentWithdrawalsAsync(asset, cancellationToken).ConfigureAwait(false));
+            }
 
             var previousQuantities = latestSnapshots.Count == 0
                 ? DeriveQuantitiesAt(currentBalances, ledgers, rangeStartUtc)
@@ -88,7 +99,7 @@ namespace MyBook
 
                 var beginningHoldings = CreateHoldings(account, previousQuantities, previousPrices);
                 var endingHoldings = CreateHoldings(account, endingQuantities, endPrices);
-                var records = CreateDailyRecords(account, date, previousQuantities, endingQuantities, previousPrices, endPrices, dayLedgers);
+                var records = CreateDailyRecords(account, date, previousQuantities, endingQuantities, previousPrices, endPrices, dayLedgers, fundingTransactions);
                 var beginningValue = Currency.RoundMoney(beginningHoldings.Sum(holding => holding.totalPrice.v));
                 var endingValue = Currency.RoundMoney(endingHoldings.Sum(holding => holding.totalPrice.v));
                 var snapshots = BuildSnapshots(account, endingQuantities, endPrices);
@@ -130,16 +141,50 @@ namespace MyBook
                 .ToList();
         }
 
-        private async Task ValidateApiPermissionsAsync(CancellationToken cancellationToken)
+        public async Task<HashSet<string>> FetchApiPermissionsAsync(CancellationToken cancellationToken = default)
         {
             var result = await PostPrivateAsync(
                 "/0/private/GetApiKeyInfo",
                 new Dictionary<string, string>(),
                 cancellationToken).ConfigureAwait(false);
-            var permissions = (result["permissions"] as JArray)?.Values<string>()
+            return (result["permissions"] as JArray)?.Values<string>()
                 .Where(permission => !String.IsNullOrWhiteSpace(permission))
+                .Select(permission => permission!)
                 .ToHashSet(StringComparer.Ordinal)
                 ?? [];
+        }
+
+        public async Task<List<KrakenFundingTransaction>> FetchRecentDepositsAsync(
+            string asset,
+            CancellationToken cancellationToken = default)
+        {
+            var result = await PostPrivateResultAsync(
+                "/0/private/DepositStatus",
+                new Dictionary<string, string> { ["asset"] = asset },
+                cancellationToken).ConfigureAwait(false);
+            var rows = result as JArray
+                ?? (result as JObject)?["deposits"] as JArray
+                ?? throw new InvalidOperationException("Kraken DepositStatus response is not an array.");
+            return rows.OfType<JObject>().Select(item => ParseFundingTransaction(item, false)).ToList();
+        }
+
+        public async Task<List<KrakenFundingTransaction>> FetchRecentWithdrawalsAsync(
+            string asset,
+            CancellationToken cancellationToken = default)
+        {
+            var result = await PostPrivateResultAsync(
+                "/0/private/WithdrawStatus",
+                new Dictionary<string, string> { ["asset"] = asset },
+                cancellationToken).ConfigureAwait(false);
+            var rows = result as JArray
+                ?? (result as JObject)?["withdrawals"] as JArray
+                ?? throw new InvalidOperationException("Kraken WithdrawStatus response is not an array.");
+            return rows.OfType<JObject>().Select(item => ParseFundingTransaction(item, true)).ToList();
+        }
+
+        private async Task ValidateApiPermissionsAsync(CancellationToken cancellationToken)
+        {
+            var permissions = await FetchApiPermissionsAsync(cancellationToken).ConfigureAwait(false);
             var required = new[] { "query-funds", "query-ledger" };
             var missing = required.Where(permission => !permissions.Contains(permission)).ToList();
             if (missing.Count > 0)
@@ -224,13 +269,14 @@ namespace MyBook
             Dictionary<string, decimal> endingQuantities,
             Dictionary<string, decimal> beginningPrices,
             Dictionary<string, decimal> endingPrices,
-            List<KrakenLedgerEntry> ledgers)
+            List<KrakenLedgerEntry> ledgers,
+            List<KrakenFundingTransaction> fundingTransactions)
         {
             var records = new List<Record>();
             foreach (var ledger in ledgers)
             {
                 var price = GetPrice(endingPrices, ledger.Asset);
-                AddRecord(
+                var ledgerRecord = AddRecord(
                     records,
                     account,
                     ledger.Asset,
@@ -239,6 +285,8 @@ namespace MyBook
                     GetLedgerReason(ledger.Type, ledger.Subtype),
                     $"Kraken ledger {ledger.Id}; refid={ledger.ReferenceId}; type={ledger.Type}; subtype={ledger.Subtype}; amount={ledger.Amount}; asset={ledger.Asset}",
                     includeZero: ledger.Amount != 0m);
+                if (ledgerRecord is not null && ledger.Type is "deposit" or "withdrawal")
+                    ApplyFundingTransaction(ledgerRecord, ledger, fundingTransactions);
                 AddRecord(
                     records,
                     account,
@@ -277,7 +325,7 @@ namespace MyBook
             return records;
         }
 
-        private static void AddRecord(
+        private static Record? AddRecord(
             List<Record> records,
             Account account,
             string rawAsset,
@@ -288,7 +336,7 @@ namespace MyBook
             bool includeZero = false)
         {
             if (amount == 0 && !includeZero)
-                return;
+                return null;
             var displayAsset = NormalizeAsset(rawAsset);
             var record = new Record
             {
@@ -304,6 +352,48 @@ namespace MyBook
             };
             record.CopyFrom(new Currency(amount, CurrencyType.USD));
             records.Add(record);
+            return record;
+        }
+
+        private static void ApplyFundingTransaction(
+            Record record,
+            KrakenLedgerEntry ledger,
+            List<KrakenFundingTransaction> fundingTransactions)
+        {
+            var matches = fundingTransactions.Where(item =>
+                    String.Equals(item.ReferenceId, ledger.ReferenceId, StringComparison.Ordinal)
+                    && String.Equals(NormalizeAsset(item.Asset), NormalizeAsset(ledger.Asset), StringComparison.Ordinal)
+                    && item.IsWithdrawal == (ledger.Type == "withdrawal")
+                    && (item.IsWithdrawal ? -item.Amount : item.Amount) == ledger.Amount
+                    && String.Equals(item.Status, "Success", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (matches.Count != 1)
+                throw new InvalidOperationException($"Kraken deposit funding match is not unique: ledger={ledger.Id}; refid={ledger.ReferenceId}; matches={matches.Count}.");
+
+            var funding = matches[0];
+            EthereumUtil.ValidateAddressValue(funding.Address);
+            if (!funding.TransactionHash.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                || funding.TransactionHash.Length != 66)
+            {
+                throw new InvalidOperationException($"Kraken deposit has invalid Ethereum transaction hash: refid={funding.ReferenceId}; txid={funding.TransactionHash}.");
+            }
+
+            var asset = NormalizeAsset(ledger.Asset);
+            var decimals = asset == "ETH" ? 18 : 6;
+            var multiplier = 1m;
+            for (var index = 0; index < decimals; index++)
+                multiplier *= 10m;
+            var signedAmount = funding.IsWithdrawal ? -funding.Amount : funding.Amount;
+            var raw = signedAmount * multiplier;
+            if (raw != decimal.Truncate(raw))
+                throw new InvalidOperationException($"Kraken deposit amount exceeds {decimals} decimals: refid={funding.ReferenceId}; amount={funding.Amount}.");
+
+            record.blockchain = BlockchainType.Ethereum;
+            record.blockchainTransactionHash = funding.TransactionHash.ToLowerInvariant();
+            record.blockchainEventIndex = null;
+            record.blockchainAssetContract = asset == "USDT" ? EthereumUsdtContract : "";
+            record.blockchainQuantityRaw = raw;
+            record.Source += $"; txid={funding.TransactionHash}; address={funding.Address}; fundingStatus={funding.Status}";
         }
 
         private static List<Holding> CreateHoldings(
@@ -353,6 +443,16 @@ namespace MyBook
             IReadOnlyDictionary<string, string> parameters,
             CancellationToken cancellationToken)
         {
+            var result = await PostPrivateResultAsync(path, parameters, cancellationToken).ConfigureAwait(false);
+            return result as JObject
+                ?? throw new InvalidOperationException("Kraken response does not contain an object result.");
+        }
+
+        private async Task<JToken> PostPrivateResultAsync(
+            string path,
+            IReadOnlyDictionary<string, string> parameters,
+            CancellationToken cancellationToken)
+        {
             await requestLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -380,8 +480,8 @@ namespace MyBook
 
                         var json = JObject.Parse(responseText);
                         ThrowKrakenErrors(json, "Kraken request failed");
-                        return json["result"] as JObject
-                            ?? throw new InvalidOperationException("Kraken response does not contain an object result.");
+                        return json["result"]
+                            ?? throw new InvalidOperationException("Kraken response does not contain a result.");
                     }
                     catch (HttpRequestException) when (attempt < 3)
                     {
@@ -438,6 +538,21 @@ namespace MyBook
                 ReadDecimal(value["amount"]),
                 ReadDecimal(value["fee"]),
                 ReadDecimal(value["balance"]));
+        }
+
+        private static KrakenFundingTransaction ParseFundingTransaction(JObject value, bool isWithdrawal)
+        {
+            var unixTime = ReadDecimal(value["time"]);
+            return new KrakenFundingTransaction(
+                value["refid"]?.ToString() ?? "",
+                value["txid"]?.ToString() ?? "",
+                value["info"]?.ToString() ?? "",
+                value["asset"]?.ToString() ?? "",
+                ReadDecimal(value["amount"]),
+                ReadDecimal(value["fee"]),
+                DateTimeOffset.FromUnixTimeMilliseconds((long)(unixTime * 1000m)).UtcDateTime,
+                value["status"]?.ToString() ?? "",
+                isWithdrawal);
         }
 
         private static Dictionary<string, decimal> DeriveQuantitiesAt(
@@ -596,4 +711,15 @@ namespace MyBook
         decimal Amount,
         decimal Fee,
         decimal Balance);
+
+    sealed record KrakenFundingTransaction(
+        string ReferenceId,
+        string TransactionHash,
+        string Address,
+        string Asset,
+        decimal Amount,
+        decimal Fee,
+        DateTime Time,
+        string Status,
+        bool IsWithdrawal);
 }

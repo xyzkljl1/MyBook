@@ -45,6 +45,8 @@ Expected files:
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly summaries through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
 - `PlaidUtil.TODO` will evaluate Plaid-based account imports; it currently only verifies Plaid Sandbox credentials and searches supported institutions without creating Plaid Items or importing account data.
+- `EthereumUtil` provides read-only Ethereum mainnet queries through Etherscan V2. `EthereumImporter` imports every missing completed UTC day for `ETH_0x...` accounts, validates exact ETH and official Ethereum USDT quantities against JSON-RPC balances, stores daily USD holdings and transaction/gas/price-change records, and ignores look-alike token symbols from other contracts.
+- Ethereum and supported provider records retain chain, transaction hash, event index, token contract, and signed raw quantity. The existing internal-transfer matcher links records only when the same transaction contains one unique opposite raw asset movement; provider deposit and withdrawal addresses remain evidence for that event and are not stored as account addresses.
 - `FileUtil.WeChat.TODO` will parse local WeChat bill files for WeChat account transactions.
 - `SIMUtil` polls a USB SIM modem through a Windows COM port, verifies the SIM IMSI against local configuration, combines complete long SMS messages before dispatching by sender, and can import supported ICBC debit-card transaction SMS messages with balance validation. The first trusted ICBC SMS balance reuses the shared initial cash-balance record mechanism when no current cash balance exists. If an ICBC SMS balance proves that earlier unreported activity changed an already initialized debit-account balance, it writes an `ICBCSIMCompensation` record in the same atomic import so later history-detail rows can reverse and replace it.
 - `WebUtil.Bilibili.TODO` will fetch Bilibili account balance information.
@@ -74,6 +76,7 @@ Notable configuration keys:
 - `kraken_api_key` / `kraken_api_secret` - Kraken read-only API credentials for authenticated account queries.
 - `nexus_oauth_client_id` - Nexus OAuth PKCE token refresh client id. `nexus_oauth_client_secret` is retained for local compatibility but is not sent by the PKCE refresh flow.
 - `plaid_client_id` / `plaid_sandbox_secret` - Plaid Sandbox credentials for evaluating Plaid-based account imports.
+- `etherscan_api_key` - Etherscan API key for read-only Ethereum mainnet address balance and transaction queries.
 - `sim_imsi` - expected IMSI for the local USB SIM modem. Leave empty to disable scheduled SMS polling.
 - `sim_poll_interval_minutes` - optional SMS polling interval. Values less than 1 use the built-in default of 5 minutes.
 

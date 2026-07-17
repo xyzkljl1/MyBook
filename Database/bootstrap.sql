@@ -55,7 +55,7 @@ CREATE TABLE `finance` (
 
 CREATE TABLE `statementimports` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `provider` enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','PayPalMail','Manual') NOT NULL DEFAULT 'Manual',
+  `provider` enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual') NOT NULL DEFAULT 'Manual',
   `time` datetime(6) NOT NULL,
   `statementKey` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`Id`),
@@ -83,6 +83,11 @@ CREATE TABLE `records` (
   `isInternal` tinyint(1) NOT NULL DEFAULT '0',
   `matchedRecordId` int DEFAULT NULL,
   `matchedRecordReason` varchar(1024) NOT NULL DEFAULT '',
+  `blockchain` enum('Ethereum') DEFAULT NULL,
+  `blockchainTransactionHash` varchar(66) NOT NULL DEFAULT '',
+  `blockchainEventIndex` int DEFAULT NULL,
+  `blockchainAssetContract` varchar(42) NOT NULL DEFAULT '',
+  `blockchainQuantityRaw` decimal(30,0) DEFAULT NULL,
   `isRefundMatched` tinyint(1) NOT NULL DEFAULT '0',
   `expenseAllocationDays` int DEFAULT NULL,
   `expenseAllocationSkipDays` int DEFAULT NULL,
@@ -109,6 +114,7 @@ CREATE TABLE `records` (
   KEY `fk_Records_matchedRecord` (`matchedRecordId`),
   KEY `fk_Records_holding` (`_holding_Id`),
   KEY `index_Records_allocated_expense_dirty` (`allocatedExpenseCacheDirty`),
+  KEY `index_Records_blockchain_event` (`blockchain`,`blockchainTransactionHash`,`blockchainAssetContract`,`blockchainEventIndex`),
   CONSTRAINT `fk_Records_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`),
   CONSTRAINT `fk_Records_holding` FOREIGN KEY (`_holding_Id`) REFERENCES `holdings` (`Id`),
   CONSTRAINT `fk_Records_matchedRecord` FOREIGN KEY (`matchedRecordId`) REFERENCES `records` (`Id`),

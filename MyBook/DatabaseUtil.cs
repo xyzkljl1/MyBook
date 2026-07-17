@@ -860,6 +860,23 @@ namespace MyBook
             return latestImport?.time;
         }
 
+        public DateTime? GetLatestStatementImportTimeByKeyPrefix(StatementImportProvider provider, string statementKeyPrefix)
+        {
+            var latestImport = db.Queryable<StatementImport>()
+                .Where(import => import.provider == provider && import.statementKey.StartsWith(statementKeyPrefix))
+                .OrderByDescending(import => import.time)
+                .First();
+            return latestImport?.time;
+        }
+
+        public DateTime? GetStatementImportCheckpointTime(StatementImportProvider provider)
+        {
+            return db.Queryable<StatementImport>()
+                .Where(import => import.provider == provider && import.statementKey == "")
+                .Select(import => (DateTime?)import.time)
+                .Single();
+        }
+
         public string? GetLatestStatementImportKey(StatementImportProvider provider)
         {
             var latestImport = db.Queryable<StatementImport>()
@@ -906,6 +923,7 @@ namespace MyBook
                     if (!statementImportId.HasValue)
                         return false;
 
+                    MatchBlockchainTransfersForStatements([statementImportId.Value]);
                     MatchKnownInternalTransfersForStatements([statementImportId.Value]);
                     MatchInternalTransfersAroundStatement(statementImportId.Value);
                     ApplyAutomaticExpenseAllocationForStatements([statementImportId.Value]);
@@ -997,6 +1015,7 @@ namespace MyBook
                     shouldValidateBeginningBalances[import.Provider] = true;
                 }
 
+                MatchBlockchainTransfersForStatements(savedStatementImportIds);
                 MatchKnownInternalTransfersForStatements(savedStatementImportIds);
                 foreach (var statementImportId in savedStatementImportIds)
                     MatchInternalTransfersAroundStatement(statementImportId);
@@ -2199,6 +2218,55 @@ namespace MyBook
             MatchInternalTransfers(records, accountsByName, requireKnownCounterparty: true);
         }
 
+        private void MatchBlockchainTransfersForStatements(List<int> statementImportIds)
+        {
+            if (statementImportIds.Count == 0)
+                return;
+
+            var imported = db.Queryable<Record>()
+                .Where(record => statementImportIds.Contains(record._statementImport_Id)
+                    && record.matchedRecordId == null
+                    && record.blockchainTransactionHash != ""
+                    && record.blockchainQuantityRaw != null)
+                .ToList();
+            var hashes = imported.Select(record => record.blockchainTransactionHash).Distinct().ToList();
+            if (hashes.Count == 0)
+                return;
+
+            var records = db.Queryable<Record>()
+                .Where(record => hashes.Contains(record.blockchainTransactionHash)
+                    && record.matchedRecordId == null
+                    && record.blockchainQuantityRaw != null)
+                .ToList();
+            foreach (var anchor in imported.OrderBy(record => record.Id))
+            {
+                if (anchor.matchedRecordId is not null)
+                    continue;
+
+                var candidates = records.Where(candidate =>
+                        candidate.Id != anchor.Id
+                        && candidate._account_Id != anchor._account_Id
+                        && candidate.matchedRecordId is null
+                        && candidate.blockchain == anchor.blockchain
+                        && String.Equals(candidate.blockchainTransactionHash, anchor.blockchainTransactionHash, StringComparison.OrdinalIgnoreCase)
+                        && String.Equals(candidate.blockchainAssetContract, anchor.blockchainAssetContract, StringComparison.OrdinalIgnoreCase)
+                        && candidate.blockchainQuantityRaw == -anchor.blockchainQuantityRaw
+                        && (!anchor.blockchainEventIndex.HasValue
+                            || !candidate.blockchainEventIndex.HasValue
+                            || anchor.blockchainEventIndex == candidate.blockchainEventIndex))
+                    .ToList();
+                if (candidates.Count != 1)
+                    continue;
+
+                anchor.isInternal = true;
+                candidates[0].isInternal = true;
+                MatchInternalTransferPair(
+                    anchor,
+                    candidates[0],
+                    $"SameBlockchainEvent:{anchor.blockchain}:{anchor.blockchainTransactionHash}");
+            }
+        }
+
         private void MatchInternalTransfers(
             List<Record> records,
             Dictionary<string, Account> accountsByName,
@@ -2343,10 +2411,10 @@ namespace MyBook
             right.updateTime = updateTime;
 
             db.Updateable(left)
-                .UpdateColumns(record => new { record.matchedRecordId, record.matchedRecordReason, record.updateTime })
+                .UpdateColumns(record => new { record.isInternal, record.matchedRecordId, record.matchedRecordReason, record.updateTime })
                 .ExecuteCommand();
             db.Updateable(right)
-                .UpdateColumns(record => new { record.matchedRecordId, record.matchedRecordReason, record.updateTime })
+                .UpdateColumns(record => new { record.isInternal, record.matchedRecordId, record.matchedRecordReason, record.updateTime })
                 .ExecuteCommand();
         }
 
@@ -2462,6 +2530,14 @@ namespace MyBook
                 throw new InvalidOperationException($"Account not found: {accountName}");
 
             return account;
+        }
+
+        public List<Account> GetAccountsByNamePrefix(string prefix)
+        {
+            return db.Queryable<Account>()
+                .Where(account => account.name.StartsWith(prefix))
+                .OrderBy(account => account.Id)
+                .ToList();
         }
 
         public List<Account> GetAllAccounts()

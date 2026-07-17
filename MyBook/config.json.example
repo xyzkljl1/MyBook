@@ -9,6 +9,7 @@
     "nexus_api_key":  "",
     "kraken_api_key":  "",
     "kraken_api_secret":  "",
+    "etherscan_api_key":  "",
     "plaid_client_id":  "",
     "plaid_sandbox_secret":  "",
     "sim_imsi":  "",

@@ -41,6 +41,11 @@ namespace MyBook
         Crypto
     };
 
+    public enum BlockchainType
+    {
+        Ethereum
+    }
+
     // 账户持有的股票、债券、现金、应计项目或其它资产，使用 code + holdingType 区分具体资产。
     // currentPrice 表示账单/报表导入时记录的价格；单值资产的 quantity 固定为 1，currentPrice 表示该项总额。
     [SugarIndex("unique_Holdings_account_code_holding_type", nameof(Holding._account_Id), OrderByType.Asc, nameof(Holding.code), OrderByType.Asc, nameof(Holding.holdingType), OrderByType.Asc, true)]
@@ -185,7 +190,7 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','PayPalMail','Manual')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
@@ -335,6 +340,7 @@ namespace MyBook
     [SugarIndex("index_Records_allocated_expense_dirty", nameof(Record.allocatedExpenseCacheDirty), OrderByType.Asc)]
     [SugarIndex("index_Records_balance_rollup", nameof(Record._account_Id), OrderByType.Asc, nameof(Record.t), OrderByType.Asc, nameof(Record._statementImport_Id), OrderByType.Asc, nameof(Record.date), OrderByType.Asc)]
     [SugarIndex("index_Records_import_date", nameof(Record._statementImport_Id), OrderByType.Asc, nameof(Record.date), OrderByType.Asc, nameof(Record._account_Id), OrderByType.Asc, nameof(Record.t), OrderByType.Asc)]
+    [SugarIndex("index_Records_blockchain_event", nameof(Record.blockchain), OrderByType.Asc, nameof(Record.blockchainTransactionHash), OrderByType.Asc, nameof(Record.blockchainAssetContract), OrderByType.Asc, nameof(Record.blockchainEventIndex), OrderByType.Asc)]
     [SugarTable("Records")]
     public class Record : Currency // 收支记录
     {
@@ -378,6 +384,21 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(1024)")]
         public string matchedRecordReason { get; set; } = ""; // 跨账单匹配依据，仅用英文原因标识。
+
+        [SugarColumn(IsNullable = true, ColumnDataType = "enum('Ethereum')", SqlParameterDbType = typeof(EnumToStringConvert))]
+        public BlockchainType? blockchain { get; set; } = null;
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(66)")]
+        public string blockchainTransactionHash { get; set; } = "";
+
+        [SugarColumn(IsNullable = true)]
+        public int? blockchainEventIndex { get; set; } = null;
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(42)")]
+        public string blockchainAssetContract { get; set; } = "";
+
+        [SugarColumn(IsNullable = true, ColumnDataType = "decimal(30,0)")]
+        public decimal? blockchainQuantityRaw { get; set; } = null;
 
         [SugarColumn(DefaultValue = "0")]
         public bool isRefundMatched { get; set; } = false; // 是否已匹配到对应退款/消费；默认不计入界面统计图表。
@@ -568,6 +589,7 @@ namespace MyBook
         OCBCStatementMail,
         NexusDpMonthlyReport,
         KrakenApi,
+        EthereumApi,
         PayPalMail,
         Manual,
     }
