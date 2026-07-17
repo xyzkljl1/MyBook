@@ -2,7 +2,6 @@ using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Globalization;
-using System.Net.Http;
 using System.Text.RegularExpressions;
 
 namespace MyBook
@@ -12,7 +11,6 @@ namespace MyBook
         private const string ApiBaseUrl = "https://api.etherscan.io/v2/api";
         private const int ChainId = 1;
         private const int PageSize = 1000;
-        private static readonly TimeSpan EtherscanRequestTimeout = TimeSpan.FromSeconds(20);
         private static readonly Regex AddressPattern = new("^0x[0-9a-fA-F]{40}$", RegexOptions.CultureInvariant);
 
         public async Task<EthereumAddressData> FetchETHAddressDataAsync(
@@ -111,9 +109,7 @@ namespace MyBook
             var query = String.Join("&", parameters.Select(item =>
                 $"{Uri.EscapeDataString(item.Key)}={Uri.EscapeDataString(item.Value)}"));
 
-            using var client = new HttpClient { Timeout = EtherscanRequestTimeout };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 EthereumReader");
-            using var response = await client.GetAsync($"{ApiBaseUrl}?{query}", cancellationToken).ConfigureAwait(false);
+            using var response = await sharedHttpClient.GetAsync($"{ApiBaseUrl}?{query}", cancellationToken).ConfigureAwait(false);
             var responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
                 throw new InvalidOperationException($"Etherscan request failed: {(int)response.StatusCode} {response.ReasonPhrase}.");

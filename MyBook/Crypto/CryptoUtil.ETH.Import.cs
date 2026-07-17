@@ -14,7 +14,6 @@ namespace MyBook
         private const string OfficialUsdtContract = "0xdac17f958d2ee523a2206206994597c13d831ec7";
         private const int EthDecimals = 18;
         private const int UsdtDecimals = 6;
-        private static readonly TimeSpan ETHImportRequestTimeout = TimeSpan.FromSeconds(20);
 
         private async Task FetchETHDailyReportsAsync(CancellationToken cancellationToken = default)
         {
@@ -35,19 +34,16 @@ namespace MyBook
             if (firstDate > lastCompletedDate)
                 return;
 
-            var events = await FetchEventsAsync(address, cancellationToken).ConfigureAwait(false);
+            var firstDateUtc = DateTime.SpecifyKind(firstDate, DateTimeKind.Utc);
+            var quantities = GetImportedRawQuantities(account);
+            var events = await FetchEventsAsync(address, firstDateUtc, cancellationToken).ConfigureAwait(false);
             var currentQuantities = new Dictionary<string, decimal>(StringComparer.Ordinal)
             {
                 ["ETH"] = await FetchEthBalanceWeiAsync(address, cancellationToken).ConfigureAwait(false),
                 ["USDT"] = await FetchUsdtBalanceRawAsync(address, cancellationToken).ConfigureAwait(false)
             };
-            ValidateCurrentQuantities(events, currentQuantities);
+            ValidateCurrentQuantities(quantities, events, currentQuantities);
 
-            var quantities = new Dictionary<string, decimal>(StringComparer.Ordinal)
-            {
-                ["ETH"] = 0,
-                ["USDT"] = 0
-            };
             var imports = new List<StatementRecordHoldingImport>();
             for (var date = firstDate; date <= lastCompletedDate; date = date.AddDays(1))
             {
@@ -145,37 +141,19 @@ namespace MyBook
             return Enum.Parse<CurrencyType>(asset);
         }
 
-        private static async Task<List<EthereumAssetEvent>> FetchEventsAsync(string address, CancellationToken cancellationToken)
+        private async Task<List<EthereumAssetEvent>> FetchEventsAsync(
+            string address,
+            DateTime fromUtc,
+            CancellationToken cancellationToken)
         {
-            var normalTask = FetchBlockscoutItemsAsync($"addresses/{address}/transactions", cancellationToken);
-            var internalTask = FetchBlockscoutItemsAsync($"addresses/{address}/internal-transactions", cancellationToken);
-            var tokenTask = FetchBlockscoutItemsAsync($"addresses/{address}/token-transfers", cancellationToken);
+            var normalTask = FetchBlockscoutItemsAsync($"addresses/{address}/transactions", fromUtc, cancellationToken);
+            var internalTask = FetchBlockscoutItemsAsync($"addresses/{address}/internal-transactions", fromUtc, cancellationToken);
+            var tokenTask = FetchBlockscoutItemsAsync($"addresses/{address}/token-transfers", fromUtc, cancellationToken);
             await Task.WhenAll(normalTask, internalTask, tokenTask).ConfigureAwait(false);
             var result = new List<EthereumAssetEvent>();
 
             foreach (var item in await normalTask.ConfigureAwait(false))
-            {
-                if (!String.Equals(item["status"]?.ToString(), "ok", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                var hash = RequiredText(item, "hash").ToLowerInvariant();
-                var time = DateTime.Parse(RequiredText(item, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal);
-                var from = item["from"]?["hash"]?.ToString() ?? "";
-                var to = item["to"]?["hash"]?.ToString() ?? "";
-                var value = ReadRaw(item["value"]);
-                if (value != 0 && (AddressEquals(from, address) || AddressEquals(to, address)))
-                {
-                    var signed = AddressEquals(from, address) ? -value : value;
-                    result.Add(new EthereumAssetEvent(hash, -1, time, "ETH", "", EthDecimals, signed,
-                        "\u94fe\u4e0a\u8f6c\u8d26", $"Ethereum transaction {hash}; from={from}; to={to}; valueWei={value}"));
-                }
-                if (AddressEquals(from, address))
-                {
-                    var fee = ReadRaw(item["fee"]?["value"]);
-                    if (fee != 0)
-                        result.Add(new EthereumAssetEvent(hash, -2, time, "ETH", "", EthDecimals, -fee,
-                            "\u624b\u7eed\u8d39", $"Ethereum gas {hash}; feeWei={fee}"));
-                }
-            }
+                result.AddRange(ParseNormalTransactionEvents(item, address));
 
             foreach (var item in await internalTask.ConfigureAwait(false))
             {
@@ -218,19 +196,98 @@ namespace MyBook
             return result.OrderBy(item => item.Time).ThenBy(item => item.EventIndex).ToList();
         }
 
-        private static async Task<List<JObject>> FetchBlockscoutItemsAsync(string path, CancellationToken cancellationToken)
+        private static List<EthereumAssetEvent> ParseNormalTransactionEvents(JObject item, string address)
+        {
+            var status = item["status"]?.ToString() ?? "";
+            var succeeded = String.Equals(status, "ok", StringComparison.OrdinalIgnoreCase);
+            var failed = String.Equals(status, "error", StringComparison.OrdinalIgnoreCase);
+            if (!succeeded && !failed)
+                return [];
+
+            var result = new List<EthereumAssetEvent>();
+            var hash = RequiredText(item, "hash").ToLowerInvariant();
+            var time = DateTime.Parse(RequiredText(item, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal);
+            var from = item["from"]?["hash"]?.ToString() ?? "";
+            var to = item["to"]?["hash"]?.ToString() ?? "";
+            var value = ReadRaw(item["value"]);
+            if (succeeded && value != 0 && (AddressEquals(from, address) || AddressEquals(to, address)))
+            {
+                var signed = AddressEquals(from, address) ? -value : value;
+                result.Add(new EthereumAssetEvent(hash, -1, time, "ETH", "", EthDecimals, signed,
+                    "\u94fe\u4e0a\u8f6c\u8d26", $"Ethereum transaction {hash}; from={from}; to={to}; valueWei={value}"));
+            }
+            if (AddressEquals(from, address))
+            {
+                var fee = ReadRaw(item["fee"]?["value"]);
+                if (fee != 0)
+                    result.Add(new EthereumAssetEvent(hash, -2, time, "ETH", "", EthDecimals, -fee,
+                        "\u624b\u7eed\u8d39", $"Ethereum gas {hash}; status={status}; feeWei={fee}"));
+            }
+            return result;
+        }
+
+        private static Dictionary<string, decimal> CreateEmptyRawQuantities()
+        {
+            return new Dictionary<string, decimal>(StringComparer.Ordinal)
+            {
+                ["ETH"] = 0,
+                ["USDT"] = 0
+            };
+        }
+
+        private Dictionary<string, decimal> GetImportedRawQuantities(Account account)
+        {
+            var result = CreateEmptyRawQuantities();
+            foreach (var balance in database.GetCurrentAccountBalances(account))
+            {
+                switch (balance.t)
+                {
+                    case CurrencyType.ETH:
+                        result["ETH"] += ToRawQuantity(balance.v, EthDecimals);
+                        break;
+                    case CurrencyType.USDT:
+                        result["USDT"] += ToRawQuantity(balance.v, UsdtDecimals);
+                        break;
+                    default:
+                        if (balance.v != 0)
+                            throw new InvalidOperationException($"Unsupported Ethereum account balance currency: {balance.t}.");
+                        break;
+                }
+            }
+            return result;
+        }
+
+        private async Task<List<JObject>> FetchBlockscoutItemsAsync(
+            string path,
+            DateTime fromUtc,
+            CancellationToken cancellationToken)
         {
             var result = new List<JObject>();
             string? query = null;
+            DateTime? previousTime = null;
             do
             {
-                using var client = CreateHttpClient();
-                using var response = await client.GetAsync($"{BlockscoutApiBaseUrl}/{path}{query}", cancellationToken).ConfigureAwait(false);
+                using var response = await sharedHttpClient.GetAsync($"{BlockscoutApiBaseUrl}/{path}{query}", cancellationToken).ConfigureAwait(false);
                 var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                     throw new InvalidOperationException($"Blockscout request failed: {(int)response.StatusCode} {response.ReasonPhrase}.");
                 var json = JObject.Parse(text);
-                result.AddRange((json["items"] as JArray ?? new JArray()).OfType<JObject>());
+                var items = (json["items"] as JArray ?? new JArray()).OfType<JObject>().ToList();
+                var reachedEarlierEvent = false;
+                foreach (var item in items)
+                {
+                    var time = DateTime.Parse(RequiredText(item, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal);
+                    if (previousTime.HasValue && time > previousTime.Value)
+                        throw new InvalidOperationException($"Blockscout {path} response is not ordered newest first.");
+                    previousTime = time;
+                    if (time >= fromUtc)
+                        result.Add(item);
+                    else
+                        reachedEarlierEvent = true;
+                }
+                if (reachedEarlierEvent)
+                    break;
+
                 var next = json["next_page_params"] as JObject;
                 query = next is null ? null : "?" + String.Join("&", next.Properties().Select(property =>
                     $"{Uri.EscapeDataString(property.Name)}={Uri.EscapeDataString(property.Value.ToString())}"));
@@ -238,13 +295,13 @@ namespace MyBook
             return result;
         }
 
-        private static async Task<decimal> FetchEthBalanceWeiAsync(string address, CancellationToken cancellationToken)
+        private async Task<decimal> FetchEthBalanceWeiAsync(string address, CancellationToken cancellationToken)
         {
             var result = await PostRpcAsync("eth_getBalance", new JArray(address, "latest"), cancellationToken).ConfigureAwait(false);
             return ParseHexRaw(result.ToString());
         }
 
-        private static async Task<decimal> FetchUsdtBalanceRawAsync(string address, CancellationToken cancellationToken)
+        private async Task<decimal> FetchUsdtBalanceRawAsync(string address, CancellationToken cancellationToken)
         {
             var data = "0x70a08231" + address[2..].PadLeft(64, '0');
             var result = await PostRpcAsync("eth_call", new JArray(new JObject
@@ -255,9 +312,8 @@ namespace MyBook
             return ParseHexRaw(result.ToString());
         }
 
-        private static async Task<JToken> PostRpcAsync(string method, JArray parameters, CancellationToken cancellationToken)
+        private async Task<JToken> PostRpcAsync(string method, JArray parameters, CancellationToken cancellationToken)
         {
-            using var client = CreateHttpClient();
             using var content = new StringContent(new JObject
             {
                 ["jsonrpc"] = "2.0",
@@ -265,7 +321,7 @@ namespace MyBook
                 ["params"] = parameters,
                 ["id"] = 1
             }.ToString(), Encoding.UTF8, "application/json");
-            using var response = await client.PostAsync(EthereumRpcUrl, content, cancellationToken).ConfigureAwait(false);
+            using var response = await sharedHttpClient.PostAsync(EthereumRpcUrl, content, cancellationToken).ConfigureAwait(false);
             var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
                 throw new InvalidOperationException($"Ethereum RPC failed: {(int)response.StatusCode} {response.ReasonPhrase}.");
@@ -275,9 +331,12 @@ namespace MyBook
             return json["result"] ?? throw new InvalidOperationException("Ethereum RPC response has no result.");
         }
 
-        private static void ValidateCurrentQuantities(List<EthereumAssetEvent> events, Dictionary<string, decimal> current)
+        private static void ValidateCurrentQuantities(
+            Dictionary<string, decimal> beginning,
+            List<EthereumAssetEvent> events,
+            Dictionary<string, decimal> current)
         {
-            var calculated = new Dictionary<string, decimal>(StringComparer.Ordinal) { ["ETH"] = 0, ["USDT"] = 0 };
+            var calculated = new Dictionary<string, decimal>(beginning, StringComparer.Ordinal);
             foreach (var item in events)
                 calculated[item.Asset] += item.QuantityRaw;
             ValidateQuantities(calculated, current, "Ethereum current balance");
@@ -297,6 +356,13 @@ namespace MyBook
         private static decimal ReadRaw(JToken? token) => decimal.Parse(token?.ToString() ?? "0", CultureInfo.InvariantCulture);
         private static decimal ParseHexRaw(string value) => decimal.Parse(BigInteger.Parse("0" + value[2..], NumberStyles.AllowHexSpecifier).ToString(), CultureInfo.InvariantCulture);
         private static decimal ToAssetQuantity(decimal raw, int decimals) => raw / Pow10(decimals);
+        private static decimal ToRawQuantity(decimal quantity, int decimals)
+        {
+            var raw = quantity * Pow10(decimals);
+            if (Decimal.Truncate(raw) != raw)
+                throw new InvalidOperationException($"Ethereum quantity has more than {decimals} decimal places: {quantity}.");
+            return raw;
+        }
         private static decimal Pow10(int decimals)
         {
             var value = 1m;
@@ -306,12 +372,6 @@ namespace MyBook
         }
         private static bool AddressEquals(string left, string right) => String.Equals(left, right, StringComparison.OrdinalIgnoreCase);
         private static string RequiredText(JObject item, string name) => item[name]?.ToString() ?? throw new InvalidOperationException($"Ethereum API item has no {name}.");
-        private static HttpClient CreateHttpClient()
-        {
-            var client = new HttpClient { Timeout = ETHImportRequestTimeout };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 CryptoUtil.ETH");
-            return client;
-        }
     }
 
     sealed record EthereumAssetEvent(

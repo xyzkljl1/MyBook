@@ -13,6 +13,7 @@ namespace MyBook
         private const string KrakenApiBaseUrl = "https://api.kraken.com";
         private const string EthereumUsdtContract = "0xdac17f958d2ee523a2206206994597c13d831ec7";
         private const int LedgerPageSize = 50;
+        private const int FundingPageSize = 50;
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(20);
         private static long lastNonce;
 
@@ -44,8 +45,6 @@ namespace MyBook
             if (!latestReportDate.HasValue)
                 throw new InvalidOperationException("Missing Kraken statement import checkpoint.");
 
-            await ValidateApiPermissionsAsync(cancellationToken).ConfigureAwait(false);
-
             var firstDate = latestReportDate.Value.Date.AddDays(1);
             var lastCompletedUtcDate = DateTime.UtcNow.Date.AddDays(-1);
             if (firstDate > lastCompletedUtcDate)
@@ -53,6 +52,8 @@ namespace MyBook
                 Console.WriteLine($"Fetch Kraken daily reports: no completed UTC day after {latestReportDate:yyyy-MM-dd}");
                 return;
             }
+
+            await ValidateApiPermissionsAsync(cancellationToken).ConfigureAwait(false);
 
             var rangeStartUtc = DateTime.SpecifyKind(firstDate, DateTimeKind.Utc);
             var rangeEndUtc = DateTime.SpecifyKind(lastCompletedUtcDate.AddDays(1), DateTimeKind.Utc);
@@ -65,9 +66,25 @@ namespace MyBook
                          .Where(asset => asset is "ETH" or "USDT")
                          .Distinct(StringComparer.Ordinal))
             {
-                fundingTransactions.AddRange(await FetchRecentDepositsAsync(asset, cancellationToken).ConfigureAwait(false));
+                fundingTransactions.AddRange(await FetchFundingTransactionsAsync(
+                    "/0/private/DepositStatus",
+                    "deposits",
+                    asset,
+                    false,
+                    DateTime.UnixEpoch,
+                    DateTime.UtcNow,
+                    cancellationToken).ConfigureAwait(false));
                 if (ledgers.Any(ledger => ledger.Type == "withdrawal" && NormalizeAsset(ledger.Asset) == asset))
-                    fundingTransactions.AddRange(await FetchRecentWithdrawalsAsync(asset, cancellationToken).ConfigureAwait(false));
+                {
+                    fundingTransactions.AddRange(await FetchFundingTransactionsAsync(
+                        "/0/private/WithdrawStatus",
+                        "withdrawals",
+                        asset,
+                        true,
+                        DateTime.UnixEpoch,
+                        DateTime.UtcNow,
+                        cancellationToken).ConfigureAwait(false));
+                }
             }
 
             var previousQuantities = DeriveQuantitiesAt(currentBalances, ledgers, rangeStartUtc);
@@ -139,28 +156,86 @@ namespace MyBook
             string asset,
             CancellationToken cancellationToken = default)
         {
-            var result = await PostPrivateResultAsync(
+            return await FetchFundingTransactionsAsync(
                 "/0/private/DepositStatus",
-                new Dictionary<string, string> { ["asset"] = asset },
+                "deposits",
+                asset,
+                false,
+                null,
+                null,
                 cancellationToken).ConfigureAwait(false);
-            var rows = result as JArray
-                ?? (result as JObject)?["deposits"] as JArray
-                ?? throw new InvalidOperationException("Kraken DepositStatus response is not an array.");
-            return rows.OfType<JObject>().Select(item => ParseFundingTransaction(item, false)).ToList();
         }
 
         public async Task<List<KrakenFundingTransaction>> FetchRecentWithdrawalsAsync(
             string asset,
             CancellationToken cancellationToken = default)
         {
-            var result = await PostPrivateResultAsync(
+            return await FetchFundingTransactionsAsync(
                 "/0/private/WithdrawStatus",
-                new Dictionary<string, string> { ["asset"] = asset },
+                "withdrawals",
+                asset,
+                true,
+                null,
+                null,
                 cancellationToken).ConfigureAwait(false);
-            var rows = result as JArray
-                ?? (result as JObject)?["withdrawals"] as JArray
-                ?? throw new InvalidOperationException("Kraken WithdrawStatus response is not an array.");
-            return rows.OfType<JObject>().Select(item => ParseFundingTransaction(item, true)).ToList();
+        }
+
+        private async Task<List<KrakenFundingTransaction>> FetchFundingTransactionsAsync(
+            string path,
+            string collectionName,
+            string asset,
+            bool isWithdrawal,
+            DateTime? startUtc,
+            DateTime? endUtc,
+            CancellationToken cancellationToken)
+        {
+            var result = new List<KrakenFundingTransaction>();
+            var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+            string? cursor = "true";
+            while (cursor is not null)
+            {
+                var parameters = new Dictionary<string, string>
+                {
+                    ["asset"] = asset,
+                    ["cursor"] = cursor,
+                    ["limit"] = FundingPageSize.ToString(CultureInfo.InvariantCulture)
+                };
+                if (startUtc.HasValue)
+                    parameters["start"] = ToUnixSeconds(startUtc.Value).ToString(CultureInfo.InvariantCulture);
+                if (endUtc.HasValue)
+                    parameters["end"] = ToUnixSeconds(endUtc.Value).ToString(CultureInfo.InvariantCulture);
+
+                var page = await PostPrivateResultAsync(path, parameters, cancellationToken).ConfigureAwait(false);
+                var (rows, nextCursor) = ParseFundingPage(page, collectionName);
+                result.AddRange(rows.Select(item => ParseFundingTransaction(item, isWithdrawal)));
+                if (String.IsNullOrWhiteSpace(nextCursor))
+                {
+                    if (page is JArray && rows.Count >= FundingPageSize)
+                        throw new InvalidOperationException($"Kraken {path} did not return a cursor for a full page.");
+                    break;
+                }
+                if (!seenCursors.Add(nextCursor))
+                    throw new InvalidOperationException($"Kraken {path} returned a repeated pagination cursor.");
+                cursor = nextCursor;
+            }
+            return result;
+        }
+
+        private static (List<JObject> Rows, string? NextCursor) ParseFundingPage(JToken page, string collectionName)
+        {
+            if (page is JArray array)
+            {
+                var cursor = array.Last?.Type == JTokenType.String ? array.Last.ToString() : null;
+                return (array.OfType<JObject>().ToList(), cursor);
+            }
+            if (page is not JObject pageObject)
+                throw new InvalidOperationException("Kraken funding status response has an unsupported result type.");
+
+            var rows = pageObject[collectionName] as JArray
+                ?? pageObject["items"] as JArray
+                ?? throw new InvalidOperationException($"Kraken funding status response has no {collectionName} array.");
+            var nextCursor = pageObject["cursor"]?.ToString() ?? pageObject["next_cursor"]?.ToString();
+            return (rows.OfType<JObject>().ToList(), nextCursor);
         }
 
         private async Task ValidateApiPermissionsAsync(CancellationToken cancellationToken)
@@ -217,7 +292,8 @@ namespace MyBook
                     ledger.Amount,
                     GetLedgerReason(ledger.Type, ledger.Subtype),
                     $"Kraken ledger {ledger.Id}; refid={ledger.ReferenceId}; type={ledger.Type}; subtype={ledger.Subtype}; amount={ledger.Amount}; asset={ledger.Asset}",
-                    includeZero: ledger.Amount != 0m);
+                    includeZero: ledger.Amount != 0m,
+                    isInternal: IsAssetExchangeLedger(ledger.Type));
                 if (ledgerRecord is not null && ledger.Type is "deposit" or "withdrawal")
                     ApplyFundingTransaction(ledgerRecord, ledger, fundingTransactions);
                 AddRecord(
@@ -242,7 +318,8 @@ namespace MyBook
             decimal amount,
             string reason,
             string source,
-            bool includeZero = false)
+            bool includeZero = false,
+            bool isInternal = false)
         {
             if (amount == 0 && !includeZero)
                 return null;
@@ -257,7 +334,8 @@ namespace MyBook
                 HoldingQuantity = 0,
                 DestAccount = displayAsset,
                 Source = source,
-                Reason = reason
+                Reason = reason,
+                isInternal = isInternal
             };
             record.CopyFrom(new Currency(amount, ParseAssetCurrency(displayAsset)));
             records.Add(record);
@@ -280,6 +358,10 @@ namespace MyBook
                 throw new InvalidOperationException($"Kraken deposit funding match is not unique: ledger={ledger.Id}; refid={ledger.ReferenceId}; matches={matches.Count}.");
 
             var funding = matches[0];
+            record.Source += $"; fundingMethod={funding.Method}; fundingStatus={funding.Status}";
+            if (!IsEthereumMainnetFundingMethod(funding.Method))
+                return;
+
             CryptoUtil.ValidateEthereumAddressValue(funding.Address);
             if (!funding.TransactionHash.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
                 || funding.TransactionHash.Length != 66)
@@ -292,7 +374,13 @@ namespace MyBook
             record.blockchainTransactionHash = funding.TransactionHash.ToLowerInvariant();
             record.blockchainEventIndex = null;
             record.blockchainAssetContract = asset == "USDT" ? EthereumUsdtContract : "";
-            record.Source += $"; txid={funding.TransactionHash}; address={funding.Address}; fundingStatus={funding.Status}";
+            record.Source += $"; txid={funding.TransactionHash}; address={funding.Address}";
+        }
+
+        private static bool IsEthereumMainnetFundingMethod(string method)
+        {
+            return method is "Ether (Hex)" or "Ethereum" or "Ethereum (ERC20)" or "Tether USD (ERC20)"
+                || method.EndsWith(" - Ethereum (Unified)", StringComparison.Ordinal);
         }
 
         private static List<Holding> CreateHoldings(
@@ -329,7 +417,10 @@ namespace MyBook
 
         private static CurrencyType ParseAssetCurrency(string asset)
         {
-            return Enum.TryParse<CurrencyType>(NormalizeAsset(asset), out var currency)
+            var normalized = NormalizeAsset(asset);
+            var suffixIndex = normalized.IndexOf('.', StringComparison.Ordinal);
+            var currencyCode = suffixIndex < 0 ? normalized : normalized[..suffixIndex];
+            return Enum.TryParse<CurrencyType>(currencyCode, out var currency)
                 ? currency
                 : throw new InvalidOperationException($"Unsupported Kraken currency: {asset}.");
         }
@@ -440,6 +531,7 @@ namespace MyBook
         {
             var unixTime = ReadDecimal(value["time"]);
             return new KrakenFundingTransaction(
+                value["method"]?.ToString() ?? "",
                 value["refid"]?.ToString() ?? "",
                 value["txid"]?.ToString() ?? "",
                 value["info"]?.ToString() ?? "",
@@ -504,7 +596,7 @@ namespace MyBook
         {
             return type switch
             {
-                "trade" => "\u4ea4\u6613\u4ef7\u683c\u5f71\u54cd",
+                "trade" or "spend" or "receive" => "\u8d44\u4ea7\u5151\u6362",
                 "deposit" => "\u5145\u503c",
                 "withdrawal" => "\u63d0\u73b0",
                 "transfer" => "\u8f6c\u8d26",
@@ -518,6 +610,11 @@ namespace MyBook
                 "sale" => "\u51fa\u552e",
                 _ => String.IsNullOrWhiteSpace(subtype) ? type : $"{type}/{subtype}"
             };
+        }
+
+        private static bool IsAssetExchangeLedger(string type)
+        {
+            return type is "trade" or "spend" or "receive";
         }
 
         private static string NormalizeAsset(string asset)
@@ -596,6 +693,7 @@ namespace MyBook
         decimal Balance);
 
     sealed record KrakenFundingTransaction(
+        string Method,
         string ReferenceId,
         string TransactionHash,
         string Address,

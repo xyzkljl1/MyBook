@@ -2638,6 +2638,14 @@ namespace MyBook
                 : new Currency(0, currencyType);
         }
 
+        public List<AccountBalance> GetCurrentAccountBalances(Account account)
+        {
+            account = GetPostingAccount(account);
+            return db.Queryable<AccountBalance>()
+                .Where(balance => balance._account_Id == account.Id)
+                .ToList();
+        }
+
         public bool TryGetAccountBalance(Account account, CurrencyType currencyType, out Currency balance)
         {
             account = GetPostingAccount(account);
