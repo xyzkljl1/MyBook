@@ -37,7 +37,7 @@ namespace MyBook
         Cash,
         // 应计、待结算、或还未实际入账但已计入账户净资产的项目。
         Accrued,
-        // 加密资产；原生数量保存在提供方快照中，Holding 保存账户基础币种市值。
+        // 加密资产；作为单值资产直接保存其原币数量。
         Crypto
     };
 
@@ -188,7 +188,7 @@ namespace MyBook
     // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
     static class MySqlEnumColumnTypes
     {
-        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
+        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD','BTC','ETH','USDT')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
         public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
@@ -396,9 +396,6 @@ namespace MyBook
 
         [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(42)")]
         public string blockchainAssetContract { get; set; } = "";
-
-        [SugarColumn(IsNullable = true, ColumnDataType = "decimal(30,0)")]
-        public decimal? blockchainQuantityRaw { get; set; } = null;
 
         [SugarColumn(DefaultValue = "0")]
         public bool isRefundMatched { get; set; } = false; // 是否已匹配到对应退款/消费；默认不计入界面统计图表。
@@ -611,50 +608,6 @@ namespace MyBook
         public string statementKey { get; set; } = "";
     }
 
-    [SugarIndex("unique_KrakenAssetSnapshots_statement_asset", nameof(KrakenAssetSnapshot._statementImport_Id), OrderByType.Asc, nameof(KrakenAssetSnapshot.asset), OrderByType.Asc, true)]
-    [SugarTable("KrakenAssetSnapshots")]
-    public class KrakenAssetSnapshot
-    {
-        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
-        public int Id { get; set; }
-
-        [Navigate(NavigateType.ManyToOne, nameof(_statementImport_Id), nameof(StatementImport.Id))]
-        public StatementImport? StatementImport { get; set; }
-
-        [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(Account.Id))]
-        public Account? Account { get; set; }
-
-        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(32)")]
-        public string asset { get; set; } = "";
-
-        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(32)")]
-        public string displayAsset { get; set; } = "";
-
-        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
-        public decimal balance { get; set; }
-
-        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
-        public decimal? availableBalance { get; set; }
-
-        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
-        public decimal? credit { get; set; }
-
-        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
-        public decimal? creditUsed { get; set; }
-
-        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
-        public decimal? holdTrade { get; set; }
-
-        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
-        public decimal usdPrice { get; set; }
-
-        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
-        public decimal usdMarketValue { get; set; }
-
-        public int _statementImport_Id { get; set; }
-        public int _account_Id { get; set; }
-    }
-
     //币种
     public enum CurrencyType
     {
@@ -663,6 +616,9 @@ namespace MyBook
         JPY,
         SGD,
         HKD,
+        BTC,
+        ETH,
+        USDT,
     };
     // 任意币种*数量的组合
     class Money

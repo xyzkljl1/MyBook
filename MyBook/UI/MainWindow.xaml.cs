@@ -379,15 +379,21 @@ namespace MyBook
                     previousViewModel?.MonthlyFlowStartMonth ??
                     DateTime.Today.AddMonths(-11));
                 var data = database.GetDashboardData(DateTime.Today, effectiveMonthlyFlowStartMonth);
-                if (data.MissingExchangeRateCurrencies.Count > 0)
+                var missingFiatRates = data.MissingExchangeRateCurrencies
+                    .Where(currency => !PubWebUtil.IsCryptoCurrency(currency))
+                    .ToList();
+                if (missingFiatRates.Count > 0)
                 {
                     using var pubWeb = new PubWebUtil(config, database);
-                    await pubWeb.FetchExchangeRates(data.MissingExchangeRateCurrencies);
+                    await pubWeb.FetchExchangeRates(missingFiatRates);
                     data = database.GetDashboardData(DateTime.Today, effectiveMonthlyFlowStartMonth);
-                    if (data.MissingExchangeRateCurrencies.Count > 0)
+                    missingFiatRates = data.MissingExchangeRateCurrencies
+                        .Where(currency => !PubWebUtil.IsCryptoCurrency(currency))
+                        .ToList();
+                    if (missingFiatRates.Count > 0)
                     {
                         throw new InvalidOperationException(
-                            $"缺少汇率：{String.Join("、", data.MissingExchangeRateCurrencies)}");
+                            $"缺少汇率：{String.Join("、", missingFiatRates)}");
                     }
                 }
 

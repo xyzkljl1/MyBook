@@ -54,6 +54,8 @@ namespace MyBook
                     break;
                 case HoldingType.Accrued:
                     break;
+                case HoldingType.Crypto:
+                    break;
             }
 
             ret = ret is null || ret.v < 0 ? null : ret;
@@ -75,7 +77,8 @@ namespace MyBook
         public async Task FetchExchangeRates(IEnumerable<CurrencyType> currencyTypes)
         {
             var distinctCurrencyTypes = currencyTypes.Distinct().ToList();
-            var rates = await Task.WhenAll(distinctCurrencyTypes.Select(async currencyType =>
+            var fiatCurrencies = distinctCurrencyTypes.Where(currencyType => !IsCryptoCurrency(currencyType)).ToList();
+            var rates = await Task.WhenAll(fiatCurrencies.Select(async currencyType =>
                 (CurrencyType: currencyType, Rate: await FetchCurrencyToRmb(currencyType).ConfigureAwait(false)))).ConfigureAwait(false);
 
             foreach (var (currencyType, rate) in rates)
@@ -90,6 +93,11 @@ namespace MyBook
                 };
                 database?.SaveFinance(finance);
             }
+        }
+
+        internal static bool IsCryptoCurrency(CurrencyType currencyType)
+        {
+            return currencyType is CurrencyType.BTC or CurrencyType.ETH or CurrencyType.USDT;
         }
 
         public Task<List<Holding>> Fetch(Account account)

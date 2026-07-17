@@ -56,23 +56,17 @@ namespace MyBook
                 ["USDT"] = 0
             };
             var imports = new List<StatementRecordHoldingImport>();
-            var pricesByDate = await FetchPricesAsync(firstDate.AddDays(-1), cancellationToken).ConfigureAwait(false);
-            var previousPrices = pricesByDate[firstDate.AddDays(-1)];
             for (var date = firstDate; date <= lastCompletedDate; date = date.AddDays(1))
             {
                 var dayEnd = DateTime.SpecifyKind(date.AddDays(1), DateTimeKind.Utc);
                 var dayEvents = events.Where(item => item.Time >= date && item.Time < dayEnd).ToList();
-                var prices = pricesByDate[date];
                 var beginningQuantities = new Dictionary<string, decimal>(quantities, StringComparer.Ordinal);
                 foreach (var item in dayEvents)
                     quantities[item.Asset] += item.QuantityRaw;
 
-                var beginningHoldings = CreateHoldings(account, beginningQuantities, previousPrices);
-                var endingHoldings = CreateHoldings(account, quantities, prices);
-                var records = CreateRecords(account, dayEvents, prices);
-                AddPriceChangeRecords(account, date, beginningQuantities, quantities, previousPrices, prices, records);
-                var beginningValue = Currency.RoundMoney(beginningHoldings.Sum(item => item.totalPrice.v));
-                var endingValue = Currency.RoundMoney(endingHoldings.Sum(item => item.totalPrice.v));
+                var beginningHoldings = CreateHoldings(account, beginningQuantities);
+                var endingHoldings = CreateHoldings(account, quantities);
+                var records = CreateRecords(account, dayEvents);
                 imports.Add(new StatementRecordHoldingImport(
                     StatementImportProvider.EthereumApi,
                     date,
@@ -80,11 +74,10 @@ namespace MyBook
                     account,
                     records,
                     endingHoldings,
-                    [new AccountBalance(account, new Currency(endingValue, CurrencyType.USD))],
-                    [new AccountBalance(account, new Currency(beginningValue, CurrencyType.USD))],
+                    CreateAccountBalances(account, quantities),
+                    CreateAccountBalances(account, beginningQuantities),
                     beginningHoldings,
                     recordDate: date));
-                previousPrices = prices;
             }
 
             var completedQuantities = new Dictionary<string, decimal>(currentQuantities, StringComparer.Ordinal);
@@ -95,41 +88,18 @@ namespace MyBook
             Console.WriteLine($"Fetch Ethereum daily reports done: account={account.name}; events={events.Count}; saved={saved.Count(value => value)}");
         }
 
-        private static List<Record> CreateRecords(Account account, List<EthereumAssetEvent> events, Dictionary<string, decimal> prices)
+        private static List<Record> CreateRecords(Account account, List<EthereumAssetEvent> events)
         {
             return events.Select(item =>
             {
                 var quantity = ToAssetQuantity(item.QuantityRaw, item.Decimals);
-                var amount = Currency.RoundMoney(quantity * prices[item.Asset]);
-                var record = CreateRecord(account, item.Asset, item.Time, amount, item.Reason, item.Source);
+                var record = CreateRecord(account, item.Asset, item.Time, quantity, item.Reason, item.Source);
                 record.blockchain = BlockchainType.Ethereum;
                 record.blockchainTransactionHash = item.TransactionHash;
                 record.blockchainEventIndex = item.EventIndex;
                 record.blockchainAssetContract = item.ContractAddress;
-                record.blockchainQuantityRaw = item.QuantityRaw;
                 return record;
             }).ToList();
-        }
-
-        private static void AddPriceChangeRecords(
-            Account account,
-            DateTime date,
-            Dictionary<string, decimal> beginningQuantities,
-            Dictionary<string, decimal> endingQuantities,
-            Dictionary<string, decimal> beginningPrices,
-            Dictionary<string, decimal> endingPrices,
-            List<Record> records)
-        {
-            foreach (var asset in beginningQuantities.Keys.Union(endingQuantities.Keys, StringComparer.Ordinal))
-            {
-                var decimals = asset == "ETH" ? EthDecimals : UsdtDecimals;
-                var beginningValue = Currency.RoundMoney(ToAssetQuantity(beginningQuantities[asset], decimals) * beginningPrices[asset]);
-                var endingValue = Currency.RoundMoney(ToAssetQuantity(endingQuantities[asset], decimals) * endingPrices[asset]);
-                var movementValue = records.Where(record => record.DestAccount == asset).Sum(record => record.v);
-                var change = endingValue - beginningValue - movementValue;
-                if (change != 0)
-                    records.Add(CreateRecord(account, asset, date, change, "\u6301\u4ed3\u4ef7\u683c\u53d8\u52a8", $"Ethereum daily close; asset={asset}"));
-            }
         }
 
         private static Record CreateRecord(Account account, string asset, DateTime date, decimal amount, string reason, string source)
@@ -145,15 +115,15 @@ namespace MyBook
                 Reason = reason,
                 Source = source
             };
-            record.CopyFrom(new Currency(amount, CurrencyType.USD));
+            record.CopyFrom(new Currency(amount, ParseAssetCurrency(asset)));
             return record;
         }
 
-        private static List<Holding> CreateHoldings(Account account, Dictionary<string, decimal> quantities, Dictionary<string, decimal> prices)
+        private static List<Holding> CreateHoldings(Account account, Dictionary<string, decimal> quantities)
         {
             return quantities.Where(item => item.Value != 0)
-                .Select(item => CreateHolding(account, item.Key, Currency.RoundMoney(
-                    ToAssetQuantity(item.Value, item.Key == "ETH" ? EthDecimals : UsdtDecimals) * prices[item.Key])))
+                .Select(item => CreateHolding(account, item.Key, ToAssetQuantity(
+                    item.Value, item.Key == "ETH" ? EthDecimals : UsdtDecimals)))
                 .ToList();
         }
 
@@ -164,8 +134,22 @@ namespace MyBook
                 Account = account,
                 desc = $"Ethereum {asset}",
                 displayText = asset,
-                currentPrice = new Currency(value, CurrencyType.USD)
+                currentPrice = new Currency(value, ParseAssetCurrency(asset))
             };
+        }
+
+        private static List<AccountBalance> CreateAccountBalances(Account account, Dictionary<string, decimal> rawQuantities)
+        {
+            return rawQuantities
+                .Select(item => new AccountBalance(account, new Currency(
+                    ToAssetQuantity(item.Value, item.Key == "ETH" ? EthDecimals : UsdtDecimals),
+                    ParseAssetCurrency(item.Key))))
+                .ToList();
+        }
+
+        private static CurrencyType ParseAssetCurrency(string asset)
+        {
+            return Enum.Parse<CurrencyType>(asset);
         }
 
         private static async Task<List<EthereumAssetEvent>> FetchEventsAsync(string address, CancellationToken cancellationToken)
@@ -296,54 +280,6 @@ namespace MyBook
             if (json["error"] is not null)
                 throw new InvalidOperationException($"Ethereum RPC failed: {json["error"]}.");
             return json["result"] ?? throw new InvalidOperationException("Ethereum RPC response has no result.");
-        }
-
-        private static async Task<Dictionary<DateTime, Dictionary<string, decimal>>> FetchPricesAsync(DateTime firstDate, CancellationToken cancellationToken)
-        {
-            var since = new DateTimeOffset(DateTime.SpecifyKind(firstDate.Date, DateTimeKind.Utc)).ToUnixTimeSeconds();
-            JObject? result = null;
-            for (var attempt = 1; attempt <= 3 && result is null; attempt++)
-            {
-                try
-                {
-                    using var client = CreateHttpClient();
-                    using var response = await client.GetAsync($"https://api.kraken.com/0/public/OHLC?pair=ETHUSD&interval=1440&since={since}", cancellationToken).ConfigureAwait(false);
-                    var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                    if (!response.IsSuccessStatusCode)
-                        throw new InvalidOperationException($"Ethereum price request failed: {(int)response.StatusCode} {response.ReasonPhrase}.");
-                    var json = JObject.Parse(text);
-                    var errors = (json["error"] as JArray)?.Values<string>().Where(error => !String.IsNullOrWhiteSpace(error)).ToList() ?? [];
-                    if (errors.Count > 0)
-                        throw new InvalidOperationException($"Ethereum price request failed: {String.Join(", ", errors)}.");
-                    result = json["result"] as JObject;
-                }
-                catch (HttpRequestException) when (attempt < 3)
-                {
-                }
-                catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < 3)
-                {
-                }
-
-                if (result is null && attempt < 3)
-                    await Task.Delay(TimeSpan.FromMilliseconds(500 * attempt), cancellationToken).ConfigureAwait(false);
-            }
-            if (result is null)
-                throw new InvalidOperationException("Ethereum price response has no result after 3 attempts.");
-            var rows = result.Properties().First(property => property.Name != "last").Value as JArray
-                ?? throw new InvalidOperationException("Ethereum price response has no OHLC rows.");
-            var prices = rows.OfType<JArray>().ToDictionary(
-                row => DateTimeOffset.FromUnixTimeSeconds(row[0]!.Value<long>()).UtcDateTime.Date,
-                row => new Dictionary<string, decimal>(StringComparer.Ordinal)
-                {
-                    ["ETH"] = decimal.Parse(row[4]!.ToString(), CultureInfo.InvariantCulture),
-                    ["USDT"] = 1m
-                });
-            for (var date = firstDate.Date; date < DateTime.UtcNow.Date; date = date.AddDays(1))
-            {
-                if (!prices.ContainsKey(date))
-                    throw new InvalidOperationException($"Missing ETH/USD close for {date:yyyy-MM-dd} UTC.");
-            }
-            return prices;
         }
 
         private static void ValidateCurrentQuantities(List<EthereumAssetEvent> events, Dictionary<string, decimal> current)
