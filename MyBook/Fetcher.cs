@@ -15,7 +15,7 @@ namespace MyBook
         PubWebUtil? pubWeb;
         GraphQLUtil? graphQL;
         KrakenUtil? kraken;
-        EthereumImporter? ethereum;
+        CryptoUtil? crypto;
         DatabaseUtil? database;
         SIMUtil? sim;
         Timer? dailyTimer;
@@ -61,7 +61,7 @@ namespace MyBook
             {
                 kraken = new(config, database);
             }
-            ethereum = new(database);
+            crypto = new(config, database);
             sim = new(database);
             dailyTimer?.Dispose();
             simTimer?.Dispose();
@@ -149,11 +149,11 @@ namespace MyBook
                         "Kraken",
                         () => ShouldFetchProviderAfterDays("Kraken", StatementImportProvider.KrakenApi, 0),
                         () => kraken.FetchDailyReportsAsync()).ConfigureAwait(false);
-                if (ethereum is not null)
+                if (crypto is not null)
                     await RunImportTaskAsync(
-                        "Ethereum",
-                        () => ShouldFetchProviderAfterDays("Ethereum", StatementImportProvider.EthereumApi, 0),
-                        () => ethereum.FetchDailyReportsAsync()).ConfigureAwait(false);
+                        "Crypto ETH",
+                        () => ShouldFetchProviderAfterDays("Crypto ETH", StatementImportProvider.EthereumApi, 0),
+                        () => crypto.FetchDailyReportsAsync()).ConfigureAwait(false);
                 if (pubWeb is not null)
                     await RunImportTaskAsync("exchange rate", () => true, pubWeb.FetchExchangeRates).ConfigureAwait(false);
                 if (database is not null)

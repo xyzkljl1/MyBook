@@ -6,7 +6,7 @@ using System.Text;
 
 namespace MyBook
 {
-    class EthereumImporter
+    partial class CryptoUtil
     {
         private const string BlockscoutApiBaseUrl = "https://eth.blockscout.com/api/v2";
         private const string EthereumRpcUrl = "https://ethereum-rpc.publicnode.com";
@@ -14,16 +14,9 @@ namespace MyBook
         private const string OfficialUsdtContract = "0xdac17f958d2ee523a2206206994597c13d831ec7";
         private const int EthDecimals = 18;
         private const int UsdtDecimals = 6;
-        private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(20);
+        private static readonly TimeSpan ETHImportRequestTimeout = TimeSpan.FromSeconds(20);
 
-        private readonly DatabaseUtil database;
-
-        public EthereumImporter(DatabaseUtil database)
-        {
-            this.database = database;
-        }
-
-        public async Task FetchDailyReportsAsync(CancellationToken cancellationToken = default)
+        private async Task FetchETHDailyReportsAsync(CancellationToken cancellationToken = default)
         {
             var accounts = database.GetAccountsByNamePrefix(AddressAccountPrefix);
             foreach (var account in accounts)
@@ -33,7 +26,7 @@ namespace MyBook
         private async Task FetchAccountDailyReportsAsync(Account account, CancellationToken cancellationToken)
         {
             var address = account.name[AddressAccountPrefix.Length..].ToLowerInvariant();
-            EthereumUtil.ValidateAddressValue(address);
+            ValidateEthereumAddressValue(address);
             var checkpoint = database.GetLatestStatementImportTimeByKeyPrefix(StatementImportProvider.EthereumApi, address + ":")
                 ?? database.GetStatementImportCheckpointTime(StatementImportProvider.EthereumApi)
                 ?? throw new InvalidOperationException("Missing Ethereum statement import checkpoint.");
@@ -315,8 +308,8 @@ namespace MyBook
         private static string RequiredText(JObject item, string name) => item[name]?.ToString() ?? throw new InvalidOperationException($"Ethereum API item has no {name}.");
         private static HttpClient CreateHttpClient()
         {
-            var client = new HttpClient { Timeout = RequestTimeout };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 EthereumImporter");
+            var client = new HttpClient { Timeout = ETHImportRequestTimeout };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 CryptoUtil.ETH");
             return client;
         }
     }

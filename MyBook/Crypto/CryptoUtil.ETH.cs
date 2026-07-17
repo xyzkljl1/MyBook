@@ -7,26 +7,19 @@ using System.Text.RegularExpressions;
 
 namespace MyBook
 {
-    class EthereumUtil
+    partial class CryptoUtil
     {
         private const string ApiBaseUrl = "https://api.etherscan.io/v2/api";
         private const int ChainId = 1;
         private const int PageSize = 1000;
-        private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(20);
+        private static readonly TimeSpan EtherscanRequestTimeout = TimeSpan.FromSeconds(20);
         private static readonly Regex AddressPattern = new("^0x[0-9a-fA-F]{40}$", RegexOptions.CultureInvariant);
 
-        private readonly string apiKey;
-
-        public EthereumUtil(IConfigurationRoot config)
-        {
-            apiKey = RequiredConfig(config, "etherscan_api_key");
-        }
-
-        public async Task<EthereumAddressData> FetchAddressDataAsync(
+        public async Task<EthereumAddressData> FetchETHAddressDataAsync(
             string address,
             CancellationToken cancellationToken = default)
         {
-            ValidateAddressValue(address);
+            ValidateEthereumAddressValue(address);
             var normalizedAddress = address.ToLowerInvariant();
             var balanceTask = FetchNativeBalanceWeiAsync(normalizedAddress, cancellationToken);
             var transactionsTask = FetchPagedAsync("txlist", normalizedAddress, cancellationToken);
@@ -47,7 +40,7 @@ namespace MyBook
             string address,
             CancellationToken cancellationToken = default)
         {
-            ValidateAddressValue(address);
+            ValidateEthereumAddressValue(address);
             var result = await GetResultAsync(new Dictionary<string, string>
             {
                 ["module"] = "account",
@@ -65,8 +58,8 @@ namespace MyBook
             string contractAddress,
             CancellationToken cancellationToken = default)
         {
-            ValidateAddressValue(address);
-            ValidateAddressValue(contractAddress);
+            ValidateEthereumAddressValue(address);
+            ValidateEthereumAddressValue(contractAddress);
             var result = await GetResultAsync(new Dictionary<string, string>
             {
                 ["module"] = "account",
@@ -114,11 +107,11 @@ namespace MyBook
             bool allowNoTransactions = false)
         {
             parameters["chainid"] = ChainId.ToString(CultureInfo.InvariantCulture);
-            parameters["apikey"] = apiKey;
+            parameters["apikey"] = EtherscanApiKey;
             var query = String.Join("&", parameters.Select(item =>
                 $"{Uri.EscapeDataString(item.Key)}={Uri.EscapeDataString(item.Value)}"));
 
-            using var client = new HttpClient { Timeout = RequestTimeout };
+            using var client = new HttpClient { Timeout = EtherscanRequestTimeout };
             client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 EthereumReader");
             using var response = await client.GetAsync($"{ApiBaseUrl}?{query}", cancellationToken).ConfigureAwait(false);
             var responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -144,7 +137,7 @@ namespace MyBook
             return json["result"] ?? throw new InvalidOperationException("Etherscan response has no result.");
         }
 
-        internal static void ValidateAddressValue(string address)
+        internal static void ValidateEthereumAddressValue(string address)
         {
             if (String.IsNullOrWhiteSpace(address) || !AddressPattern.IsMatch(address))
                 throw new ArgumentException("Ethereum address must contain 0x followed by 40 hexadecimal characters.", nameof(address));

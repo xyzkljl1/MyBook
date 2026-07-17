@@ -280,7 +280,7 @@ namespace MyBook
                 throw new InvalidOperationException($"Kraken deposit funding match is not unique: ledger={ledger.Id}; refid={ledger.ReferenceId}; matches={matches.Count}.");
 
             var funding = matches[0];
-            EthereumUtil.ValidateAddressValue(funding.Address);
+            CryptoUtil.ValidateEthereumAddressValue(funding.Address);
             if (!funding.TransactionHash.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
                 || funding.TransactionHash.Length != 66)
             {
