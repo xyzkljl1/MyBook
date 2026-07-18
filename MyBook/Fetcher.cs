@@ -131,6 +131,10 @@ namespace MyBook
                         () => ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail),
                         mail.FetchICBCBills).ConfigureAwait(false);
                     await RunImportTaskAsync(
+                        "BOC",
+                        () => ShouldFetchMonthlyProvider("BOC", StatementImportProvider.BOCBillMail),
+                        mail.FetchBOCBills).ConfigureAwait(false);
+                    await RunImportTaskAsync(
                         "ICBC history detail",
                         () => ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays),
                         FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
