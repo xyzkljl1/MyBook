@@ -23,8 +23,12 @@
 /MyBook/*.LocalDebug.cs
 
 # 本地下载或拆分的银行/券商账单与测试报表
-/DailyMyBook*.csv
-/IBKR_content_*.plain
-/initialReports/
-/*.pdf
-/archive/
+**/DailyMyBook*.csv
+**/IBKR_content_*.plain
+**/initialReports/
+**/*.pdf
+**/archive/
+
+# 本地 OAuth token 与回调内容
+**/schwab-token.local.json
+**/schwab-callback.local.txt
