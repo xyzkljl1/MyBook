@@ -281,6 +281,13 @@ namespace MyBook
                 return result;
             }
 
+            if (IsBOCSender(message.Sender))
+            {
+                var result = ParseBOCSIMMessage(message);
+                logLines.Add($"SIM SMS poll processed BOC message index {message.Index} from {message.Sender}: {result.Description}.");
+                return result;
+            }
+
             logLines.Add(DeleteProcessedMessages
                 ? $"SIM SMS poll has no parser for sender {message.Sender}; message index {message.Index} will be deleted."
                 : $"SIM SMS poll has no parser for sender {message.Sender}; message index {message.Index} is retained because deletion is temporarily disabled.");

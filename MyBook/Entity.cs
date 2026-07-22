@@ -217,7 +217,7 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','OCBCMail','OCBCStatementMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
@@ -624,6 +624,7 @@ namespace MyBook
         BOCBillMail,
         ICBCHistoryDetailMail,
         ICBCSIMSMS,
+        BOCSIMSMS,
         WiseMail,
         OCBCMail,
         OCBCStatementMail,
