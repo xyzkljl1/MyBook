@@ -2349,17 +2349,21 @@ namespace MyBook
             Record record,
             Dictionary<string, Account> accountsByName)
         {
-            if (TryResolveCounterpartyName(record, out var counterpartyName)
-                && accountsByName.TryGetValue(counterpartyName, out var namedAccount)
-                && !IsUndeterminedAccount(namedAccount))
+            var accountText = record.DestAccount;
+            if (TryResolveCounterpartyName(record, out var counterpartyName))
             {
-                return GetPostingAccount(namedAccount);
+                accountText = counterpartyName;
+                if (accountsByName.TryGetValue(counterpartyName, out var namedAccount)
+                    && !IsUndeterminedAccount(namedAccount))
+                {
+                    return GetPostingAccount(namedAccount);
+                }
             }
 
             var matchedAccount = FindAccountByInternalCardNoText(
                 null,
                 $"record {record.Id} internal transfer match",
-                record.DestAccount);
+                accountText);
             if (matchedAccount is null || IsUndeterminedAccount(matchedAccount))
                 return null;
 

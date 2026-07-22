@@ -39,6 +39,8 @@ namespace MyBook
         private const string IBKRCommissionAdjustmentSection = "佣金调整";
         private const string IBKRStatementPeriodPnlSection = "账单期间的总损益";
         private const string IBKRFinancialInstrumentInformationSection = "金融产品信息";
+        private const string IBKRFeeSection = "费用";
+        private const string IBKROtherFeeSection = "其它费用";
 
         private static readonly HashSet<string> IBKRAssetGroups = new(StringComparer.Ordinal)
         {
@@ -53,6 +55,7 @@ namespace MyBook
         private static readonly string[] IBKRStockYieldEnhancementLoanShortHeader = ["资产分类", "货币", "代码", "交易号码", "数量", "客户抵押品的股票收益提升计划利率 (%)", "抵押品金额"];
         private static readonly string[] IBKRStockYieldEnhancementCollateralHeldHeader = ["资产分类", "货币", "代码", "数量", "价格", "价值"];
         private static readonly string[] IBKRFinancialInstrumentInformationHeader = ["资产分类", "代码", "描述", "合约编号", "证券号码", "底层", "上市交易所", "乘数", "类型", "代码"];
+        private static readonly string[] IBKRFinancialInstrumentInformationExtendedHeader = ["资产分类", "代码", "描述", "合约编号", "证券号码", "底层", "上市交易所", "乘数", "类型", "发行方", "到期", "代码"];
 
         private static readonly HashSet<string> IBKRCsvSections = new(StringComparer.Ordinal)
         {
@@ -88,7 +91,9 @@ namespace MyBook
             IBKRCreditInterestSection,
             IBKRCommissionAdjustmentSection,
             IBKRStatementPeriodPnlSection,
-            IBKRFinancialInstrumentInformationSection
+            IBKRFinancialInstrumentInformationSection,
+            IBKRFeeSection,
+            IBKROtherFeeSection
         };
 
         private static readonly Dictionary<string, string[][]> IBKRCsvHeaders = new(StringComparer.Ordinal)
@@ -221,9 +226,13 @@ namespace MyBook
             [IBKRStatementPeriodPnlSection] =
             [
             ],
-            [IBKRFinancialInstrumentInformationSection] =
+            [IBKRFeeSection] =
             [
-                IBKRFinancialInstrumentInformationHeader
+                ["Subtitle", "货币", "日期", "描述", "金额"]
+            ],
+            [IBKROtherFeeSection] =
+            [
+                ["货币", "日期", "描述", "金额", "代码"]
             ]
         };
 
@@ -254,6 +263,11 @@ namespace MyBook
                 IBKRStockYieldEnhancementLoanFullHeader,
                 IBKRStockYieldEnhancementLoanShortHeader,
                 IBKRStockYieldEnhancementCollateralHeldHeader
+            ],
+            [IBKRFinancialInstrumentInformationSection] =
+            [
+                IBKRFinancialInstrumentInformationHeader,
+                IBKRFinancialInstrumentInformationExtendedHeader
             ]
         };
 
@@ -504,9 +518,29 @@ namespace MyBook
             if (directory is null)
                 return [];
 
-            var parsedReports = Directory.GetFiles(directory, $"{IBKRInitialReportFilePrefix}*.csv")
+            var checkpoint = database.GetStatementImportCheckpointTime(IBKRProvider)?.Date;
+            var sources = Directory.GetFiles(directory, $"{IBKRInitialReportFilePrefix}*.csv")
                 .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
-                .Select(ParseIBKRInitialReportCsv)
+                .Select(ReadIBKRInitialReportSource)
+                .ToList();
+            if (checkpoint.HasValue)
+            {
+                var overlapping = sources.FirstOrDefault(source =>
+                    source.Period.StartDate <= checkpoint.Value
+                    && source.Period.EndDate > checkpoint.Value);
+                if (overlapping is not null)
+                {
+                    throw new MailParseException(
+                        $"Parse IBKR Report Fail, Initial Report Crosses Checkpoint: {overlapping.Period.StartDate:yyyy-MM-dd}..{overlapping.Period.EndDate:yyyy-MM-dd}, checkpoint={checkpoint.Value:yyyy-MM-dd}");
+                }
+
+                sources = sources
+                    .Where(source => source.Period.StartDate > checkpoint.Value)
+                    .ToList();
+            }
+
+            var parsedReports = sources
+                .Select(ParseIBKRInitialReport)
                 .Where(report => report.Account.Id == account.Id)
                 .OrderBy(report => report.Period.StartDate)
                 .ThenBy(report => report.Period.EndDate)
@@ -596,7 +630,7 @@ namespace MyBook
             return new IBKRHoldingSnapshotValue(holding.quantity, holding.totalPrice);
         }
 
-        private IBKRParsedReport ParseIBKRInitialReportCsv(string path)
+        private static IBKRInitialReportSource ReadIBKRInitialReportSource(string path)
         {
             var csv = ReadIBKRLocalCsv(path);
             if (String.IsNullOrWhiteSpace(csv))
@@ -604,8 +638,19 @@ namespace MyBook
 
             var report = ReadIBKRCsvReport(csv, path);
             var period = ValidateIBKRStatementMetadata(report, null, allowPeriodRange: true);
-            var sourceName = $"{path}; initial={period.StartDate:yyyy-MM-dd}..{period.EndDate:yyyy-MM-dd}";
-            return ParseIBKRReportCsvCore(report, period, period.EndDate, period.EndDate, sourceName, isInitialReport: true);
+            return new IBKRInitialReportSource(path, report, period);
+        }
+
+        private IBKRParsedReport ParseIBKRInitialReport(IBKRInitialReportSource source)
+        {
+            var sourceName = $"{source.Path}; initial={source.Period.StartDate:yyyy-MM-dd}..{source.Period.EndDate:yyyy-MM-dd}";
+            return ParseIBKRReportCsvCore(
+                source.Report,
+                source.Period,
+                source.Period.EndDate,
+                source.Period.EndDate,
+                sourceName,
+                isInitialReport: true);
         }
 
         private IBKRParsedReport ParseIBKRReportCsv(string csv, DateTime reportDate, string sourceName, DateTime? importDate = null)
@@ -899,7 +944,7 @@ namespace MyBook
             var result = new Dictionary<string, IBKRFinancialInstrumentInfo>(StringComparer.OrdinalIgnoreCase);
             foreach (var row in report.OptionalDataRows(IBKRFinancialInstrumentInformationSection))
             {
-                AssertIBKRFieldCount(row, 10);
+                AssertIBKRFinancialInstrumentInformationFieldCount(row);
                 var assetClass = row.Fields[0];
                 if (!IBKRAssetGroups.Contains(assetClass))
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Financial Instrument Asset Class: {FormatIBKRCsvRow(row)}");
@@ -1003,6 +1048,7 @@ namespace MyBook
             var dividendAccrualTotal = ParseIBKRDividendAccruals(report);
             var dividendAccrualChangeTotal = ParseIBKRDividendAccrualChangeRecords(report, builder, baseCurrency, contractInfos);
             var transferTotal = ParseIBKRTransferRecords(report, builder, baseCurrency, account, contractInfos);
+            var feeTotals = ParseIBKRFeeRecords(report, builder, baseCurrency);
             var cashTotals = ParseIBKRCashRecords(report, builder, baseCurrency, tradeTotals, commissionTotals);
             AddIBKRPreciseFxTransactionRecord(
                 builder,
@@ -1069,6 +1115,10 @@ namespace MyBook
             var positionTransfer = ParseIBKRNavChangeComponent(report, "持仓转账");
             if (transferTotal.HasData)
                 AssertIBKRMoneyEquals(positionTransfer, transferTotal.Total, "IBKR position transfer");
+
+            AssertIBKRMoneyEquals(feeTotals.Total, cashTotals.OtherFees, "IBKR cash other fees");
+            AssertIBKRMoneyEquals(feeTotals.Total, ParseIBKRNavChangeComponent(report, "其它费用"), "IBKR NAV other fees");
+            AssertIBKRMoneyEquals(feeTotals.Total, mtmTotals.OtherFees, "IBKR MTM other fees");
 
             AddIBKROtherFxTranslationRecord(report, builder, baseCurrency);
             if (expectedNavChange != builder.NetAssetChangeTotal)
@@ -1251,7 +1301,7 @@ namespace MyBook
         {
             var rows = report.OptionalDataRows("按市值计算的表现总结").ToList();
             if (rows.Count == 0)
-                return new IBKRMtmTotals(false, 0, 0, 0, 0, 0, 0, 0);
+                return new IBKRMtmTotals(false, 0, 0, 0, 0, 0, 0, 0, 0);
 
             var cashFxTranslation = ParseIBKRCashFxTranslation(report, baseCurrency);
             decimal holdingTotal = 0;
@@ -1259,6 +1309,7 @@ namespace MyBook
             decimal commissionTotal = 0;
             decimal otherTotal = 0;
             decimal brokerInterestOtherTotal = 0;
+            decimal otherFeesTotal = 0;
             decimal fxTransactionTotal = 0;
             decimal fxTransactionDisplayUnit = 0;
             decimal? grandHoldingTotal = null;
@@ -1291,6 +1342,13 @@ namespace MyBook
                 {
                     AssertIBKRMtmStandaloneTotalRow(row);
                     brokerInterestOtherTotal += ParseIBKRDecimalAt(row, 10, "MTM broker interest other");
+                    continue;
+                }
+
+                if (assetClass == "其它费用")
+                {
+                    AssertIBKRMtmStandaloneTotalRow(row);
+                    otherFeesTotal += ParseIBKRDecimalAt(row, 10, "MTM other fees");
                     continue;
                 }
 
@@ -1367,7 +1425,7 @@ namespace MyBook
                 "现金外汇换算收益/损失",
                 $"CashFxTranslation/{cashFxTranslation}",
                 destAccount: baseCurrency.ToString());
-            return new IBKRMtmTotals(true, holdingTotal, transactionTotal, commissionTotal, otherTotal + brokerInterestOtherTotal, cashFxTranslation, fxTransactionTotal, fxTransactionDisplayUnit);
+            return new IBKRMtmTotals(true, holdingTotal, transactionTotal, commissionTotal, otherTotal + brokerInterestOtherTotal, otherFeesTotal, cashFxTranslation, fxTransactionTotal, fxTransactionDisplayUnit);
         }
 
         private static decimal ParseIBKRCashFxTranslation(IBKRCsvReport report, CurrencyType baseCurrency)
@@ -2091,6 +2149,175 @@ namespace MyBook
                 : $"{target}->{account.name}";
         }
 
+        private static IBKRFeeTotals ParseIBKRFeeRecords(
+            IBKRCsvReport report,
+            IBKRRecordBuilder builder,
+            CurrencyType baseCurrency)
+        {
+            var rows = report.OptionalDataRows(IBKRFeeSection).ToList();
+            var otherFeeRows = report.OptionalDataRows(IBKROtherFeeSection).ToList();
+            if (rows.Count == 0 && otherFeeRows.Count == 0)
+                return new IBKRFeeTotals(0);
+            if (rows.Count == 0 || otherFeeRows.Count == 0)
+                throw new MailParseException($"Parse IBKR Report Fail, Incomplete Fee Sections: {report.SourceName}");
+
+            var baseCurrencyCode = baseCurrency.ToString();
+            var baseCurrencyRates = ParseIBKRBaseCurrencyRates(report);
+            var details = new List<IBKRFeeDetail>();
+            var detailTotals = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            decimal? reportedDetailTotal = null;
+            decimal? reportedBaseTotal = null;
+            foreach (var row in rows)
+            {
+                AssertIBKRFieldCount(row, 5);
+                if (row.Fields[0] == "总数")
+                {
+                    if (reportedDetailTotal.HasValue)
+                        throw new MailParseException($"Parse IBKR Report Fail, Duplicate Fee Total: {FormatIBKRCsvRow(row)}");
+                    ValidateIBKRFeeTotalRow(row);
+                    reportedDetailTotal = ParseIBKRDecimalAt(row, 4, "fee detail total");
+                    continue;
+                }
+
+                if (row.Fields[0].StartsWith("总数 ", StringComparison.Ordinal))
+                {
+                    var totalCurrency = row.Fields[0]["总数 ".Length..].Trim();
+                    if (!totalCurrency.Equals(baseCurrencyCode, StringComparison.OrdinalIgnoreCase))
+                        throw new MailParseException($"Parse IBKR Report Fail, Unexpected Fee Base Total: {FormatIBKRCsvRow(row)}");
+                    if (reportedBaseTotal.HasValue)
+                        throw new MailParseException($"Parse IBKR Report Fail, Duplicate Fee Base Total: {FormatIBKRCsvRow(row)}");
+                    ValidateIBKRFeeTotalRow(row);
+                    reportedBaseTotal = ParseIBKRDecimalAt(row, 4, "fee base total");
+                    continue;
+                }
+
+                if (row.Fields[0] != "其它费用")
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Fee Type: {FormatIBKRCsvRow(row)}");
+
+                var currencyCode = row.Fields[1].Trim();
+                if (String.IsNullOrWhiteSpace(currencyCode))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Fee Currency: {FormatIBKRCsvRow(row)}");
+                currencyCode = currencyCode.ToUpperInvariant();
+                var date = ParseIBKRDate(row.Fields[2]);
+                var description = row.Fields[3].Trim();
+                if (String.IsNullOrWhiteSpace(description))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Fee Description: {FormatIBKRCsvRow(row)}");
+
+                var amount = ParseIBKRDecimalAt(row, 4, "fee detail");
+                details.Add(new IBKRFeeDetail(currencyCode, date, description, amount));
+                detailTotals[currencyCode] = detailTotals.GetValueOrDefault(currencyCode) + amount;
+            }
+
+            if (detailTotals.Count != 1)
+                throw new MailParseException($"Parse IBKR Report Fail, Fee Detail Total Currency Count: {detailTotals.Count}");
+            if (!reportedDetailTotal.HasValue)
+                throw new MailParseException($"Parse IBKR Report Fail, Missing Fee Total: {report.SourceName}");
+            if (!reportedBaseTotal.HasValue)
+                throw new MailParseException($"Parse IBKR Report Fail, Missing Fee Base Total: {report.SourceName}");
+
+            AssertIBKRMoneyEquals(detailTotals.Values.Single(), reportedDetailTotal.Value, "IBKR fee detail total");
+            var otherFeeData = ParseIBKROtherFeeSection(otherFeeRows, baseCurrencyCode);
+            var orderedDetails = details.OrderBy(FormatIBKRFeeDetail, StringComparer.Ordinal).ToList();
+            var orderedOtherDetails = otherFeeData.Details.OrderBy(FormatIBKRFeeDetail, StringComparer.Ordinal).ToList();
+            if (!orderedDetails.SequenceEqual(orderedOtherDetails))
+            {
+                throw new MailParseException(
+                    $"Parse IBKR Report Fail, Fee Section Detail Mismatch: summary={String.Join(";", orderedDetails.Select(FormatIBKRFeeDetail))}, details={String.Join(";", orderedOtherDetails.Select(FormatIBKRFeeDetail))}");
+            }
+            AssertIBKRMoneyEquals(reportedDetailTotal.Value, otherFeeData.DetailTotal, "IBKR fee section detail total");
+            AssertIBKRMoneyEquals(reportedBaseTotal.Value, otherFeeData.BaseTotal, "IBKR fee section base total");
+
+            decimal convertedTotal = 0;
+            foreach (var detail in otherFeeData.Details)
+            {
+                var rate = detail.CurrencyCode.Equals(baseCurrencyCode, StringComparison.OrdinalIgnoreCase)
+                    ? 1m
+                    : baseCurrencyRates.TryGetValue(detail.CurrencyCode, out var configuredRate)
+                        ? configuredRate
+                        : throw new MailParseException($"Parse IBKR Report Fail, Missing Fee Base Currency Rate: {detail.CurrencyCode}");
+                var convertedAmount = detail.Amount * rate;
+                convertedTotal += convertedAmount;
+                builder.Add(
+                    new Currency(convertedAmount, baseCurrency),
+                    "手续费",
+                    $"OtherFee/{FormatIBKRFeeDetail(detail)}/baseRate={rate}",
+                    date: detail.Date,
+                    destAccount: detail.Description);
+            }
+
+            AssertIBKRMoneyEquals(convertedTotal, reportedBaseTotal.Value, "IBKR fee base total");
+            return new IBKRFeeTotals(convertedTotal);
+        }
+
+        private static IBKROtherFeeSectionData ParseIBKROtherFeeSection(
+            List<IBKRCsvRow> rows,
+            string baseCurrencyCode)
+        {
+            var details = new List<IBKRFeeDetail>();
+            var detailTotals = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            decimal? reportedDetailTotal = null;
+            decimal? reportedBaseTotal = null;
+            foreach (var row in rows)
+            {
+                AssertIBKRFieldCount(row, 5);
+                if (row.Fields[0] == "总数")
+                {
+                    if (reportedDetailTotal.HasValue)
+                        throw new MailParseException($"Parse IBKR Report Fail, Duplicate Other Fee Total: {FormatIBKRCsvRow(row)}");
+                    ValidateIBKROtherFeeTotalRow(row);
+                    reportedDetailTotal = ParseIBKRDecimalAt(row, 3, "other fee detail total");
+                    continue;
+                }
+
+                if (row.Fields[0].StartsWith("总数 ", StringComparison.Ordinal))
+                {
+                    var totalCurrency = row.Fields[0]["总数 ".Length..].Trim();
+                    if (!totalCurrency.Equals(baseCurrencyCode, StringComparison.OrdinalIgnoreCase))
+                        throw new MailParseException($"Parse IBKR Report Fail, Unexpected Other Fee Base Total: {FormatIBKRCsvRow(row)}");
+                    if (reportedBaseTotal.HasValue)
+                        throw new MailParseException($"Parse IBKR Report Fail, Duplicate Other Fee Base Total: {FormatIBKRCsvRow(row)}");
+                    ValidateIBKROtherFeeTotalRow(row);
+                    reportedBaseTotal = ParseIBKRDecimalAt(row, 3, "other fee base total");
+                    continue;
+                }
+
+                var currencyCode = row.Fields[0].Trim().ToUpperInvariant();
+                if (String.IsNullOrWhiteSpace(currencyCode))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Other Fee Currency: {FormatIBKRCsvRow(row)}");
+                var date = ParseIBKRDate(row.Fields[1]);
+                var description = row.Fields[2].Trim();
+                if (String.IsNullOrWhiteSpace(description))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Other Fee Description: {FormatIBKRCsvRow(row)}");
+                var amount = ParseIBKRDecimalAt(row, 3, "other fee detail");
+                details.Add(new IBKRFeeDetail(currencyCode, date, description, amount));
+                detailTotals[currencyCode] = detailTotals.GetValueOrDefault(currencyCode) + amount;
+            }
+
+            if (detailTotals.Count != 1)
+                throw new MailParseException($"Parse IBKR Report Fail, Other Fee Detail Total Currency Count: {detailTotals.Count}");
+            if (!reportedDetailTotal.HasValue || !reportedBaseTotal.HasValue)
+                throw new MailParseException("Parse IBKR Report Fail, Missing Other Fee Total");
+            AssertIBKRMoneyEquals(detailTotals.Values.Single(), reportedDetailTotal.Value, "IBKR other fee detail total");
+            return new IBKROtherFeeSectionData(details, reportedDetailTotal.Value, reportedBaseTotal.Value);
+        }
+
+        private static string FormatIBKRFeeDetail(IBKRFeeDetail detail)
+        {
+            return $"{detail.CurrencyCode}/{detail.Date:yyyy-MM-dd}/{detail.Description}/{detail.Amount}";
+        }
+
+        private static void ValidateIBKRFeeTotalRow(IBKRCsvRow row)
+        {
+            if (row.Fields.Skip(1).Take(3).Any(field => !String.IsNullOrWhiteSpace(field)))
+                throw new MailParseException($"Parse IBKR Report Fail, Invalid Fee Total: {FormatIBKRCsvRow(row)}");
+        }
+
+        private static void ValidateIBKROtherFeeTotalRow(IBKRCsvRow row)
+        {
+            if (row.Fields[1].Length != 0 || row.Fields[2].Length != 0 || row.Fields[4].Length != 0)
+                throw new MailParseException($"Parse IBKR Report Fail, Invalid Other Fee Total: {FormatIBKRCsvRow(row)}");
+        }
+
         private IBKRCashTotals ParseIBKRCashRecords(
             IBKRCsvReport report,
             IBKRRecordBuilder builder,
@@ -2104,6 +2331,7 @@ namespace MyBook
             decimal tradeSell = 0;
             decimal nonTradeCashFlow = 0;
             decimal cashFxTranslation = 0;
+            decimal otherFees = 0;
             foreach (var row in rows)
             {
                 AssertIBKRCashReportFieldCount(row);
@@ -2157,6 +2385,10 @@ namespace MyBook
                         cashFxTranslation += amount;
                         // 已由 MTM 外汇行体现，避免同一基础货币折算影响重复生成 record。
                         break;
+                    case "其它费用":
+                        otherFees += amount;
+                        nonTradeCashFlow += amount;
+                        break;
                     case "存款":
                     case "取款":
                     case "转入":
@@ -2182,7 +2414,7 @@ namespace MyBook
                 AssertIBKRMoneyEquals(tradeSell, transactionTotals.SellProceeds, "IBKR cash sell transactions");
             }
 
-            return new IBKRCashTotals(commission, tradeBuy, tradeSell, nonTradeCashFlow, cashFxTranslation);
+            return new IBKRCashTotals(commission, tradeBuy, tradeSell, nonTradeCashFlow, cashFxTranslation, otherFees);
         }
 
         private List<Holding> ParseIBKRHoldings(
@@ -2632,7 +2864,8 @@ namespace MyBook
                     or "应计利息变更"
                     or "应计股息的变化"
                     or "其它外汇换算"
-                    or "佣金")
+                    or "佣金"
+                    or "其它费用")
                 {
                     componentTotal += amount;
                     continue;
@@ -2849,15 +3082,15 @@ namespace MyBook
                 throw new MailParseException($"Parse IBKR Report Fail, Field Count Mismatch: {row.Section}, expected=6/8, actual={row.Fields.Count}, row={FormatIBKRCsvRow(row)}");
         }
 
+        private static void AssertIBKRFinancialInstrumentInformationFieldCount(IBKRCsvRow row)
+        {
+            if (row.Fields.Count is not (10 or 12))
+                throw new MailParseException($"Parse IBKR Report Fail, Field Count Mismatch: {row.Section}, expected=10/12, actual={row.Fields.Count}, row={FormatIBKRCsvRow(row)}");
+        }
+
         private static void ValidateIBKRInformationalSections(IBKRCsvReport report)
         {
-            foreach (var row in report.OptionalDataRows("基础货币汇率"))
-            {
-                AssertIBKRFieldCount(row, 2);
-                if (String.IsNullOrWhiteSpace(row.Fields[0]))
-                    throw new MailParseException($"Parse IBKR Report Fail, Empty Base Currency Rate: {FormatIBKRCsvRow(row)}");
-                _ = ParseIBKRDecimalAt(row, 1, "base currency rate");
-            }
+            _ = ParseIBKRBaseCurrencyRates(report);
 
             foreach (var row in report.OptionalDataRows("代码"))
             {
@@ -2880,13 +3113,78 @@ namespace MyBook
             ValidateIBKRCreditInterestDetails(report);
             ValidateIBKRStatementPeriodPnlSection(report);
             ValidateIBKRFinancialInstrumentInformationSection(report);
+            ValidateIBKRFeeSection(report);
+            ValidateIBKROtherFeeSection(report);
+        }
+
+        private static Dictionary<string, decimal> ParseIBKRBaseCurrencyRates(IBKRCsvReport report)
+        {
+            var rates = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in report.OptionalDataRows("基础货币汇率"))
+            {
+                AssertIBKRFieldCount(row, 2);
+                var currencyCode = row.Fields[0].Trim();
+                if (String.IsNullOrWhiteSpace(currencyCode))
+                    throw new MailParseException($"Parse IBKR Report Fail, Empty Base Currency Rate: {FormatIBKRCsvRow(row)}");
+                var rate = ParseIBKRDecimalAt(row, 1, "base currency rate");
+                if (rate <= 0)
+                    throw new MailParseException($"Parse IBKR Report Fail, Invalid Base Currency Rate: {FormatIBKRCsvRow(row)}");
+                if (!rates.TryAdd(currencyCode, rate))
+                    throw new MailParseException($"Parse IBKR Report Fail, Duplicate Base Currency Rate: {FormatIBKRCsvRow(row)}");
+            }
+
+            return rates;
+        }
+
+        private static void ValidateIBKRFeeSection(IBKRCsvReport report)
+        {
+            foreach (var row in report.OptionalDataRows(IBKRFeeSection))
+            {
+                AssertIBKRFieldCount(row, 5);
+                if (row.Fields[0].StartsWith("总数", StringComparison.Ordinal))
+                {
+                    ValidateIBKRFeeTotalRow(row);
+                    _ = ParseIBKRDecimalAt(row, 4, "fee total");
+                    continue;
+                }
+
+                if (row.Fields[0] != "其它费用")
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown Fee Type: {FormatIBKRCsvRow(row)}");
+                if (String.IsNullOrWhiteSpace(row.Fields[1]))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Fee Currency: {FormatIBKRCsvRow(row)}");
+                _ = ParseIBKRDate(row.Fields[2]);
+                if (String.IsNullOrWhiteSpace(row.Fields[3]))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Fee Description: {FormatIBKRCsvRow(row)}");
+                _ = ParseIBKRDecimalAt(row, 4, "fee detail");
+            }
+        }
+
+        private static void ValidateIBKROtherFeeSection(IBKRCsvReport report)
+        {
+            foreach (var row in report.OptionalDataRows(IBKROtherFeeSection))
+            {
+                AssertIBKRFieldCount(row, 5);
+                if (row.Fields[0].StartsWith("总数", StringComparison.Ordinal))
+                {
+                    ValidateIBKROtherFeeTotalRow(row);
+                    _ = ParseIBKRDecimalAt(row, 3, "other fee total");
+                    continue;
+                }
+
+                if (String.IsNullOrWhiteSpace(row.Fields[0]))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Other Fee Currency: {FormatIBKRCsvRow(row)}");
+                _ = ParseIBKRDate(row.Fields[1]);
+                if (String.IsNullOrWhiteSpace(row.Fields[2]))
+                    throw new MailParseException($"Parse IBKR Report Fail, Missing Other Fee Description: {FormatIBKRCsvRow(row)}");
+                _ = ParseIBKRDecimalAt(row, 3, "other fee detail");
+            }
         }
 
         private static void ValidateIBKRFinancialInstrumentInformationSection(IBKRCsvReport report)
         {
             foreach (var row in report.OptionalDataRows(IBKRFinancialInstrumentInformationSection))
             {
-                AssertIBKRFieldCount(row, 10);
+                AssertIBKRFinancialInstrumentInformationFieldCount(row);
                 if (!IBKRAssetGroups.Contains(row.Fields[0]))
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Financial Instrument Asset Class: {FormatIBKRCsvRow(row)}");
                 if (row.Fields[0] != "股票")
@@ -3088,6 +3386,7 @@ namespace MyBook
             if (rows.Count == 0)
                 return;
 
+            var baseCurrencyRates = ParseIBKRBaseCurrencyRates(report);
             var totalCount = 0;
             foreach (var row in rows)
             {
@@ -3106,7 +3405,12 @@ namespace MyBook
                     continue;
                 }
 
-                _ = ParseIBKRCurrencyType(row.Fields[0]);
+                var currencyCode = row.Fields[0].Trim();
+                if (!TryParseIBKRCurrencyType(currencyCode, out _)
+                    && !baseCurrencyRates.ContainsKey(currencyCode))
+                {
+                    throw new MailParseException($"Parse IBKR Report Fail, Unknown {sectionName} Currency: {FormatIBKRCsvRow(row)}");
+                }
                 _ = ParseIBKRDate(row.Fields[1]);
                 if (String.IsNullOrWhiteSpace(row.Fields[2]))
                     throw new MailParseException($"Parse IBKR Report Fail, Missing {sectionName} Description: {FormatIBKRCsvRow(row)}");
@@ -3686,6 +3990,8 @@ namespace MyBook
 
         private sealed record IBKRReportSaveItem(IBKRParsedReport Report, bool ReturnResult);
 
+        private sealed record IBKRInitialReportSource(string Path, IBKRCsvReport Report, IBKRStatementPeriod Period);
+
         private sealed record IBKRStatementKey(string AccountId, DateTime ReportDate);
 
         private sealed record IBKRStatementPeriod(DateTime StartDate, DateTime EndDate);
@@ -3721,6 +4027,7 @@ namespace MyBook
             decimal Transaction,
             decimal Commission,
             decimal Other,
+            decimal OtherFees,
             decimal CashFxTranslation,
             decimal FxTransaction,
             decimal FxTransactionDisplayUnit);
@@ -3780,12 +4087,22 @@ namespace MyBook
 
         private sealed record IBKRInterestTotals(bool HasData, decimal Total);
 
+        private sealed record IBKRFeeTotals(decimal Total);
+
+        private sealed record IBKRFeeDetail(string CurrencyCode, DateTime Date, string Description, decimal Amount);
+
+        private sealed record IBKROtherFeeSectionData(
+            List<IBKRFeeDetail> Details,
+            decimal DetailTotal,
+            decimal BaseTotal);
+
         private sealed record IBKRCashTotals(
             decimal Commission,
             decimal TradeBuy,
             decimal TradeSell,
             decimal NonTradeCashFlow,
-            decimal CashFxTranslation);
+            decimal CashFxTranslation,
+            decimal OtherFees);
 
         private sealed record IBKRTransferTotals(bool HasData, decimal Total);
 
