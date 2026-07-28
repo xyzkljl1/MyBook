@@ -17,8 +17,5 @@
     "gmail_user":  "",
     "gmail_app_pwd":  "",
     "nexus_oauth_client_id":  "",
-    "nexus_oauth_client_secret":  "",
-    "ocbc_statement_passwords":  [
-
-                                 ]
+    "nexus_oauth_client_secret":  ""
 }

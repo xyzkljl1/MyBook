@@ -42,7 +42,6 @@ Expected files:
 - `MailUtil.IBKR` fetches Interactive Brokers `DailyMyBook` CSV reports daily from mailbox attachments and imports cash, NAV, positions, trades, commissions, fees, transfers, cash/bond interest, accrued cash/bond interest, dividends, withholding tax, FX translation, and end-of-day holdings. It can also read local initial reports before daily reports exist.
 - `KrakenUtil` imports every missing completed UTC day as a daily report. It pages through all balance-affecting Ledger entries, reconstructs and validates native asset quantities, stores USD cash plus BTC/ETH/USDT asset quantities, and values each completed day at the shared Kraken UTC daily close. `KrakenPubUtil` provides the credential-free Kraken OHLC prices shared by Kraken and Ethereum imports. The current `BalanceEx` quantities must exactly equal the reconstructed Ledger chain before the missing daily reports are committed atomically.
 - `MailUtil.Wise` imports local initial Wise XML statements from `initialReports` when the Wise account has no history, and keeps the XML parser for per-currency balances plus fees, conversions, card payments, direct debits, and sent/received transfers. Recurring mailbox downloads for monthly Wise statements are disabled because Wise no longer sends the statement files as mail attachments.
-- `MailUtil.OCBC` fetches OCBC statement emails/PDFs monthly from the mailbox and imports configured OCBC account balances and transaction lines; if an old month is missing, it can also import a self-sent supplemental statement mail with the original subject and PDF attachment.
 - `MailUtil.Steam.TODO` will fetch Steam account mail statements for Steam account transactions.
 - `GraphQLUtil.Nexus` fetches Nexus Mods donation-point monthly summaries through the Nexus GraphQL API and imports monthly DP income for the configured Nexus account.
 - `PlaidUtil.TODO` will evaluate Plaid-based account imports; it currently only verifies Plaid Sandbox credentials and searches supported institutions without creating Plaid Items or importing account data.
@@ -72,7 +71,6 @@ Notable configuration keys:
 - `pubweb_proxy` - optional HTTP proxy for public web market-data fetches, for example `http://127.0.0.1:8000`. Leave empty for direct connections; system proxy settings are not used by these fetches.
 - `alphavantage_key` - exchange-rate or finance data key.
 - `ib_gateway_port` - Interactive Brokers gateway port.
-- `ocbc_statement_passwords` - local list of OCBC statement passwords.
 - `nexus_api_key` - legacy/personal Nexus API key fallback.
 - `kraken_api_key` / `kraken_api_secret` - Kraken read-only API credentials for authenticated account queries.
 - `nexus_oauth_client_id` - Nexus OAuth PKCE token refresh client id. `nexus_oauth_client_secret` is retained for local compatibility but is not sent by the PKCE refresh flow.
