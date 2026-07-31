@@ -121,13 +121,13 @@ When the desktop app starts in a non-debug build, `Fetcher.RunSchedule()` starts
 During scheduled fetches:
 
 - IBKR reports are checked every cycle.
-- ICBC and BOC monthly bills, OCBC statements, and Nexus DP monthly reports are checked only when the latest import is more than 27 days old.
+- ICBC and BOC monthly bills and Nexus DP monthly reports are checked only when the latest import is more than 27 days old.
 - ICBC historical-detail attachments are checked only when the latest history-detail import or scheduled empty-import checkpoint is more than 90 days old. Each scheduled scan searches the last 5 months and writes a `scheduled-empty-import-yyyyMMdd` checkpoint even if no statement is imported, so empty scans are not retried every day.
 - Mail fetches share Yahoo/Gmail IMAP sessions within each fetch cycle or standalone mail import, use the configured `mail_proxy` when set, and reconnect once after connection-level failures.
 - Public web market-data fetches use the configured `pubweb_proxy` when set; exchange-rate pages are requested concurrently and saved after all requests finish.
 - Nexus DP imports use the monthly summary API first and fall back to per-month reports only for missing months or summary failures.
 - SIM SMS polling runs on its own interval when `sim_imsi` is configured. The first poll must find exactly one responsive modem, later polls reuse the cached port and rescan only if it disappears. Each poll verifies IMSI, dispatches complete received SMS messages by sender, keeps incomplete long-SMS fragments until all parts arrive, routes supported bank messages to sender-specific `SIMUtil.ICBC` or `SIMUtil.BOC` modules, can initialize a debit account from the first trusted SMS balance, and logs every reason that no SMS was fetched, imported, retained, or deleted.
-- IBKR and OCBC attachment imports search the missing date/month range in batches, then group downloaded attachments by statement date or month.
+- IBKR attachment imports search the missing date range in batches, then group downloaded attachments by statement date.
 - Attachment-based mail imports first filter IMAP summaries and body structures, then download only matching attachment body parts instead of full messages.
 - Imported records pass through one shared automatic expense-allocation judgment function after internal-transfer matching and before allocated-expense cache generation.
 - Exchange rates are refreshed every cycle.
@@ -181,3 +181,5 @@ The following modules are kept in the codebase but are not part of the current a
 - Account balances are derived from holdings through the `AccountBalances` view.
 - Snapshots represent database state at an import progress point, not natural-date account state.
 - `Records.expenseAllocationDays` controls allocated-expense periods. When `expenseAllocationSkipDays` is empty, the original day-count behavior is used. When both values are present, `expenseAllocationSkipDays` may be 0 or must have the same sign as `expenseAllocationDays`, and `abs(expenseAllocationSkipDays) < abs(expenseAllocationDays)`; the two values then define the relative allocation boundaries around the record date.
+
+OCBC no longer provides statement delivery by email, so the OCBC mail importer was removed.
