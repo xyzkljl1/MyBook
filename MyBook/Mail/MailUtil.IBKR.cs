@@ -1874,12 +1874,45 @@ namespace MyBook
 
         private static string? InferIBKRSingleInterestAccrualReason(IBKRCsvReport report)
         {
+            if (HasIBKRExactCashInterestAccrualReversal(report))
+                return "应计现金利息";
+
             var hasCashInterest = HasIBKRNonZeroInterestDetailTotal(report, "借方利息细节")
                 || HasIBKRNonZeroInterestDetailTotal(report, "贷方利息细节");
             var hasBondInterest = HasIBKRBondAccrualSource(report);
             if (hasCashInterest == hasBondInterest)
                 return null;
             return hasCashInterest ? "应计现金利息" : "应计债券利息";
+        }
+
+        private static bool HasIBKRExactCashInterestAccrualReversal(IBKRCsvReport report)
+        {
+            var accrued = ReadIBKRInterestAccrualComponent(report, "应计利息");
+            var reversal = ReadIBKRInterestAccrualComponent(report, "应计转回");
+            var fxTranslation = ReadIBKRInterestAccrualComponent(report, "外汇换算");
+            if (accrued != 0 || reversal == 0 || fxTranslation != 0)
+                return false;
+
+            var postedCashInterest = ValidateIBKRMoneyDetailSection(report, IBKRInterestSection, 4);
+            return postedCashInterest.HasValue && postedCashInterest.Value == -reversal;
+        }
+
+        private static decimal ReadIBKRInterestAccrualComponent(IBKRCsvReport report, string label)
+        {
+            decimal? amount = null;
+            foreach (var row in report.OptionalDataRows("应计利息"))
+            {
+                AssertIBKRFieldCount(row, 3);
+                if (row.Fields[0] != "基础货币总结" || row.Fields[1] != label)
+                    continue;
+                if (amount.HasValue)
+                    throw new MailParseException(
+                        $"Parse IBKR Report Fail, Duplicate Interest Accrual {label}: {FormatIBKRCsvRow(row)}");
+
+                amount = ParseIBKRDecimalAt(row, 2, $"interest accrual {label}");
+            }
+
+            return amount ?? 0;
         }
 
         private static bool HasIBKRNonZeroInterestDetailTotal(IBKRCsvReport report, string sectionName)
