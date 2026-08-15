@@ -1134,7 +1134,7 @@ namespace MyBook
             var lastText = status.LastFetchTime.HasValue
                 ? status.LastFetchTime.Value.ToString("MM-dd HH:mm", CultureInfo.InvariantCulture)
                 : "无";
-            var failurePrefix = status.HasImportFailureMarker ? "导入失败；" : "";
+            var failurePrefix = status.HasImportFailureMarker ? "导入失败（需手动清除）；" : "";
             if (!String.IsNullOrWhiteSpace(status.CurrentTaskName))
             {
                 ImportRuntimeText = $"{failurePrefix}导入：{status.CurrentTaskName}{FormatElapsedSuffix(status.CurrentTaskStartedAt, now)}；上次：{lastText}";
