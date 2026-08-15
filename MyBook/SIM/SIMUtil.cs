@@ -13,7 +13,7 @@ namespace MyBook
         private static readonly int[] CandidateBaudRates = [115200, 9600, 57600, 38400, 19200];
         private static readonly string[] CandidateMessageStores = ["", "MT", "SM", "ME"];
         private static readonly string[] ProcessingMessageStores = ["ME", "SM", "MT", ""];
-        private static readonly bool DeleteProcessedMessages = false; // Temporarily disabled while developing SMS parsers.
+        private static readonly bool DeleteProcessedMessages = true;
         private static readonly TimeSpan DefaultCommandTimeout = TimeSpan.FromSeconds(4);
         private static readonly TimeSpan ListMessagesTimeout = TimeSpan.FromSeconds(20);
         private readonly DatabaseUtil? database;
