@@ -13,6 +13,12 @@ namespace MyBook
         private static readonly Regex BOCSIMTransactionRegex = new(
             @"^您的借记卡账户(?<cardTail>\d{4})[，,]于(?<month>\d{1,2})月(?<day>\d{1,2})日(?<summary>.+?)(?<direction>支取|存入)人民币(?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]交易后余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)(?:元)?【中国银行】$",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex BOCSIMIncomeTransactionRegex = new(
+            @"^您的借记卡账户(?<cardTail>\d{4})[，,]于(?<month>\d{1,2})月(?<day>\d{1,2})日收入[(（](?<summary>[^)）]+)[)）]人民币(?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]交易后余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)(?:元)?【中国银行】$",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex BOCSIMUnionCreditTransactionRegex = new(
+            @"^您的借记卡/账户(?<cardTail>\d{4})于(?<month>\d{1,2})月(?<day>\d{1,2})日银联入账人民币(?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[(（](?<summary>[^)）]+)[)）][，,]交易后余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)(?:元)?【中国银行】$",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         private static bool IsBOCSender(string sender)
         {
@@ -22,7 +28,8 @@ namespace MyBook
         private SIMMessageProcessResult ParseBOCSIMMessage(SIMMessage message)
         {
             if (!TryParseBOCSIMTransaction(message, out var transaction))
-                return new SIMMessageProcessResult("unsupported BOC SMS format", false);
+                throw new MailParseException(
+                    $"Unsupported BOC SMS format: sender={message.Sender}, index={message.Index}");
 
             if (database is null)
                 return new SIMMessageProcessResult("parsed BOC transaction but no database is configured", false);
@@ -69,13 +76,30 @@ namespace MyBook
         {
             var text = NormalizeBOCSIMText(message.Text);
             var match = BOCSIMTransactionRegex.Match(text);
+            var direction = "";
+            if (match.Success)
+            {
+                direction = match.Groups["direction"].Value;
+            }
+            else
+            {
+                match = BOCSIMIncomeTransactionRegex.Match(text);
+                if (match.Success)
+                    direction = "存入";
+                else
+                {
+                    match = BOCSIMUnionCreditTransactionRegex.Match(text);
+                    if (match.Success)
+                        direction = "存入";
+                }
+            }
+
             if (!match.Success)
             {
                 transaction = null!;
                 return false;
             }
 
-            var direction = match.Groups["direction"].Value;
             var amount = new Currency(
                 Math.Abs(ParseBOCSIMDecimal(match.Groups["amount"].Value)) * (direction == "支取" ? -1 : 1),
                 CurrencyType.RMB);

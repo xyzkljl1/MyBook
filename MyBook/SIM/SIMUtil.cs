@@ -227,7 +227,8 @@ namespace MyBook
 
             var parsedCount = 0;
             var deletedCount = 0;
-            foreach (var message in messages.OrderBy(message => message.Time).ThenBy(message => message.Index))
+            var processingFailures = new List<string>();
+            foreach (var message in OrderSIMMessagesForProcessing(messages))
             {
                 SIMMessageProcessResult result;
                 try
@@ -238,6 +239,7 @@ namespace MyBook
                 catch (Exception exception)
                 {
                     logLines.Add($"SIM SMS poll failed to process message index {message.Index} from {message.Sender}: {exception.Message}");
+                    processingFailures.Add(exception.Message);
                     continue;
                 }
 
@@ -247,7 +249,7 @@ namespace MyBook
                     continue;
                 }
 
-                if (!DeleteProcessedMessages)
+                if (!DeleteProcessedMessages && !result.ForceDelete)
                 {
                     logLines.Add($"SIM SMS poll retained message index {message.Index} from {message.Sender}: deletion is temporarily disabled.");
                     continue;
@@ -266,6 +268,13 @@ namespace MyBook
                         logLines.Add($"SIM SMS poll failed to delete message index {index} from {message.Sender}: {exception.Message}");
                     }
                 }
+            }
+
+            if (processingFailures.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"SIM SMS poll failed to process {processingFailures.Count} bank message(s): "
+                    + String.Join("; ", processingFailures));
             }
 
             logLines.Add($"SIM SMS poll processed {parsedCount} message(s), deleted {deletedCount} stored item(s).");
@@ -1090,7 +1099,7 @@ namespace MyBook
         private sealed record ParsedSIMMessage(DateTime Time, string Sender, string Text, int Index, string Status, string PortName, string Storage, SmsConcatInfo? Concat);
         private sealed record IncompleteConcatMessage(string Sender, int TotalParts, int PresentParts, IReadOnlyList<int> StoredIndexes);
         private sealed record ReadStoredMessagesResult(List<SIMMessage> Messages, List<IncompleteConcatMessage> IncompleteConcatMessages);
-        private sealed record SIMMessageProcessResult(string Description, bool CanDelete);
+        private sealed record SIMMessageProcessResult(string Description, bool CanDelete, bool ForceDelete = false);
         private sealed record SIMModemInfo(string PortName, int BaudRate);
         private sealed record SIMModemProbe(SIMModemInfo Modem, string IMSI);
     }

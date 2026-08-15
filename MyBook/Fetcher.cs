@@ -247,6 +247,7 @@ namespace MyBook
             }
             catch (Exception e)
             {
+                CreateImportFailureMarker("SIM", e);
                 Console.WriteLine($"scheduled SIM SMS polling fail: {e.Message}");
             }
             finally

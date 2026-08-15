@@ -12,7 +12,10 @@ namespace MyBook
         private const string ICBCSIMRowCodePrefix = "ICBCSIM-";
         private const string ICBCSIMCompensationCodePrefix = "ICBCSIMCompensation-";
         private static readonly Regex ICBCSIMTransactionRegex = new(
-            @"尾号(?<cardTail>\d{4})卡(?<month>\d{1,2})月(?<day>\d{1,2})日(?<hour>\d{1,2}):(?<minute>\d{2})(?<direction>支出|收入)[(（](?<summary>[^)）]+)[)）](?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]\s*余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)元",
+            @"尾号(?<cardTail>\d{4})卡(?<month>\d{1,2})月(?<day>\d{1,2})日(?<hour>\d{1,2}):(?<minute>\d{2})(?:手机银行|营业网点)?(?<direction>支出|收入)[(（](?<summary>[^)）]+)[)）](?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]\s*余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)元",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex ICBCSIMIgnoredNotificationRegex = new(
+            @"^您尾号\d{4}(?:卡人民币卡片临时额度将于.+到期|信用卡信用额度已恢复为人民币[\d,.]+元).+【工商银行】$",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         private static bool IsICBCSender(string sender)
@@ -20,10 +23,100 @@ namespace MyBook
             return String.Equals(sender, "95588", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static IReadOnlyList<SIMMessage> OrderSIMMessagesForProcessing(IReadOnlyList<SIMMessage> messages)
+        {
+            var items = messages
+                .Select(message =>
+                {
+                    ICBCSIMTransaction? transaction = null;
+                    if (IsICBCSender(message.Sender)
+                        && TryParseICBCSIMTransaction(message, out var parsedTransaction))
+                    {
+                        transaction = parsedTransaction;
+                    }
+
+                    return new ICBCSIMMessageOrdering(
+                        message,
+                        transaction,
+                        transaction?.TransactionTime ?? message.Time,
+                        0);
+                })
+                .ToList();
+
+            foreach (var group in items
+                .Where(item => item.Transaction is not null)
+                .GroupBy(item => (item.Transaction!.CardTail, item.Transaction.TransactionTime)))
+            {
+                if (group.Count() < 2)
+                    continue;
+
+                var chain = OrderICBCSIMBalanceChain(group.ToList());
+                for (var index = 0; index < chain.Count; index++)
+                    chain[index].ChainOrder = index;
+            }
+
+            return items
+                .OrderBy(item => item.EffectiveTime)
+                .ThenBy(item => item.Transaction?.CardTail ?? "", StringComparer.Ordinal)
+                .ThenBy(item => item.ChainOrder)
+                .ThenBy(item => item.Message.Index)
+                .Select(item => item.Message)
+                .ToList();
+        }
+
+        private static List<ICBCSIMMessageOrdering> OrderICBCSIMBalanceChain(List<ICBCSIMMessageOrdering> items)
+        {
+            var firstCandidates = items
+                .Where(item => !items.Any(other =>
+                    !ReferenceEquals(other, item)
+                    && CurrencyEquals(other.Transaction!.Balance, GetICBCSIMRequiredBeginningBalance(item.Transaction!))))
+                .ToList();
+            if (firstCandidates.Count != 1)
+                throw new MailParseException(
+                    $"Cannot uniquely order {items.Count} ICBC SMS transactions at {items[0].EffectiveTime:yyyy-MM-dd HH:mm}.");
+
+            var result = new List<ICBCSIMMessageOrdering> { firstCandidates[0] };
+            var remaining = items.Where(item => !ReferenceEquals(item, firstCandidates[0])).ToList();
+            while (remaining.Count > 0)
+            {
+                var endingBalance = result[^1].Transaction!.Balance;
+                var nextCandidates = remaining
+                    .Where(item => CurrencyEquals(
+                        endingBalance,
+                        GetICBCSIMRequiredBeginningBalance(item.Transaction!)))
+                    .ToList();
+                if (nextCandidates.Count != 1)
+                    throw new MailParseException(
+                        $"Broken or ambiguous ICBC SMS balance chain at {items[0].EffectiveTime:yyyy-MM-dd HH:mm}.");
+
+                var next = nextCandidates[0];
+                result.Add(next);
+                remaining.Remove(next);
+            }
+
+            return result;
+        }
+
+        private static Currency GetICBCSIMRequiredBeginningBalance(ICBCSIMTransaction transaction)
+        {
+            return new Currency(
+                transaction.Balance.v - transaction.Amount.v,
+                transaction.Balance.t);
+        }
+
+        private static bool CurrencyEquals(Currency left, Currency right)
+        {
+            return left.t == right.t && left.v == right.v;
+        }
+
         private SIMMessageProcessResult ParseICBCSIMMessage(SIMMessage message)
         {
+            if (ICBCSIMIgnoredNotificationRegex.IsMatch(NormalizeICBCSIMText(message.Text)))
+                return new SIMMessageProcessResult("ignored ICBC credit-limit notification", true, true);
+
             if (!TryParseICBCSIMTransaction(message, out var transaction))
-                return new SIMMessageProcessResult("unsupported ICBC SMS format", false);
+                throw new MailParseException(
+                    $"Unsupported ICBC SMS format: sender={message.Sender}, index={message.Index}");
 
             if (database is null)
                 return new SIMMessageProcessResult("parsed ICBC transaction but no database is configured", false);
@@ -171,10 +264,17 @@ namespace MyBook
                 DestAccount = transaction.DestAccount,
                 Source = BuildICBCSIMSource(transaction, statementKey, message),
                 Reason = transaction.Reason,
+                isInternal = IsICBCSIMCreditCardRepayment(transaction),
                 DescCurrency = transaction.Amount
             };
             record.CopyFrom(transaction.Amount);
             return record;
+        }
+
+        private static bool IsICBCSIMCreditCardRepayment(ICBCSIMTransaction transaction)
+        {
+            return transaction.Direction == "支出"
+                && transaction.Reason == "还款";
         }
 
         private Record? BuildICBCSIMCompensationRecordIfNeeded(
@@ -377,5 +477,17 @@ namespace MyBook
             string DestAccount,
             Currency Amount,
             Currency Balance);
+
+        private sealed class ICBCSIMMessageOrdering(
+            SIMMessage message,
+            ICBCSIMTransaction? transaction,
+            DateTime effectiveTime,
+            int chainOrder)
+        {
+            public SIMMessage Message { get; } = message;
+            public ICBCSIMTransaction? Transaction { get; } = transaction;
+            public DateTime EffectiveTime { get; } = effectiveTime;
+            public int ChainOrder { get; set; } = chainOrder;
+        }
     }
 }
