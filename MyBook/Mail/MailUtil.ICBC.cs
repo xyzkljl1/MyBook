@@ -217,7 +217,7 @@ namespace MyBook
                 }
                 else if (IsICBCPaymentTransactionType(transactionType))
                 {
-                    if (transactionType == "转账" && record.v <= 0)
+                    if ((transactionType is "转账" or "转帐") && record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid Transfer");
                     record.isInternal = true;
                     record.Reason = "信用卡还款";
@@ -271,7 +271,8 @@ namespace MyBook
         {
             return transactionType is "人民币自动转账还款"
                 or "自动购汇还款"
-                or "转账";
+                or "转账"
+                or "转帐";
         }
 
         private int OffsetMatchedICBCRefundRecords(int targetStatementImportId)
