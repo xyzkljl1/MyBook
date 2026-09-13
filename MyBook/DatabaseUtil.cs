@@ -5357,6 +5357,12 @@ namespace MyBook
                 .ToList();
         }
 
+        public List<Record> GetAccountRecords(Account account)
+        {
+            var postingAccount = GetPostingAccount(account);
+            return db.Queryable<Record>().Where(record => record._account_Id == postingAccount.Id).ToList();
+        }
+
         public List<Record> GetStatementRecords(StatementImportProvider provider, DateTime start, DateTime end)
         {
             var importIds = db.Queryable<StatementImport>()

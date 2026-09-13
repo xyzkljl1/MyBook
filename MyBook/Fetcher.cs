@@ -139,6 +139,7 @@ namespace MyBook
                         () => ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays),
                         FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
+                    await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
                 }).ConfigureAwait(false);
                 if (graphQL is not null)
                     await RunImportTaskAsync(

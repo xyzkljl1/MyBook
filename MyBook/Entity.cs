@@ -215,9 +215,9 @@ namespace MyBook
     // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
     static class MySqlEnumColumnTypes
     {
-        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD')";
+        public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD','GBP','EUR')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual','IFastMail')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
@@ -631,6 +631,7 @@ namespace MyBook
         EthereumApi,
         PayPalMail,
         Manual,
+        IFastMail,
     }
 
     [SugarIndex("unique_StatementImports_provider_time_key", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.time), OrderByType.Asc, nameof(StatementImport.statementKey), OrderByType.Asc, true)]
@@ -658,6 +659,8 @@ namespace MyBook
         JPY,
         SGD,
         HKD,
+        GBP,
+        EUR,
     };
     // 任意币种*数量的组合
     class Money
