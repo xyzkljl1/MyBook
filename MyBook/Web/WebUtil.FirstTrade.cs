@@ -30,8 +30,7 @@ namespace MyBook
                 var username = Required("firsttrade_username");
                 var password = Required("firsttrade_password");
                 var totpSecret = Required("firsttrade_totp_secret");
-                var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "MyBook", "FirstTrade", Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username))));
+                var directory = FirstTradeDirectory(username);
                 var latestPath = Path.Combine(directory, "latest.firsttrade.dpapi");
                 stage = "read database checkpoint";
                 var imports = database.GetStatementImports(StatementImportProvider.FirstTradeApi);
@@ -101,6 +100,10 @@ namespace MyBook
 
         private static string FirstTradeAccountKey(string account) =>
             "FirstTrade:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(account))) + ":";
+
+        private static string FirstTradeDirectory(string username) => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MyBook", "FirstTrade",
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username))));
 
         private int ImportFirstTradeCapture(FirstTradeCapture capture)
         {
@@ -337,17 +340,58 @@ namespace MyBook
             private string? ftat, sid;
             private int loginAttempts;
             private long responseBytes;
+            private readonly Func<DateTimeOffset> utcNow;
+            private readonly string sessionPath;
+            private readonly FileStream sessionLock;
+            private readonly CookieContainer? cookies;
+            private FirstTradeSessionState session = new();
 
             internal FirstTradeClient(string username, string password, string totpSecret,
-                HttpMessageHandler? handler = null, string? proxy = null)
+                HttpMessageHandler? handler = null, string? proxy = null,
+                string? stateDirectory = null, Func<DateTimeOffset>? utcNow = null)
             {
                 this.username = username;
                 this.password = password;
-                client = new HttpClient(handler ?? CreateHandler(proxy))
+                this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+                var transport = handler ?? CreateHandler(proxy);
+                cookies = (transport as HttpClientHandler)?.CookieContainer;
+                client = new HttpClient(transport)
                     { Timeout = TimeSpan.FromSeconds(30), MaxResponseContentBufferSize = 16 * 1024 * 1024 };
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("okhttp/4.9.2");
                 try { totpKey = DecodeTotpSecret(totpSecret); }
                 catch { client.Dispose(); throw; }
+                try
+                {
+                    var directory = stateDirectory ?? FirstTradeDirectory(username);
+                    Directory.CreateDirectory(directory);
+                    sessionPath = Path.Combine(directory, "session.firsttrade.dpapi");
+                    // Hold a non-waiting cross-process lock through the entire client lifetime.
+                    sessionLock = new FileStream(sessionPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    if (File.Exists(sessionPath))
+                    {
+                        if (new FileInfo(sessionPath).Length > 1024 * 1024)
+                            throw new FirstTradeException("invalid local session state");
+                        var clear = ProtectedData.Unprotect(File.ReadAllBytes(sessionPath), null, DataProtectionScope.CurrentUser);
+                        try { session = JsonSerializer.Deserialize<FirstTradeSessionState>(clear)
+                            ?? throw new FirstTradeException("invalid local session state"); }
+                        finally { CryptographicOperations.ZeroMemory(clear); }
+                        if (session.Version != 1 || session.Failures is < 0 or > 24 || session.Cookies is null)
+                            throw new FirstTradeException("invalid local session state");
+                    }
+                    ftat = session.Ftat;
+                    sid = session.Sid;
+                    if (cookies is not null)
+                        foreach (var cookie in session.Cookies.Where(c => c.Expires == DateTime.MinValue || c.Expires.ToUniversalTime() > this.utcNow().UtcDateTime))
+                            cookies.Add(new Cookie(cookie.Name, cookie.Value, cookie.Path, cookie.Domain)
+                                { Secure = cookie.Secure, HttpOnly = cookie.HttpOnly, Expires = cookie.Expires });
+                }
+                catch
+                {
+                    sessionLock?.Dispose();
+                    client.Dispose();
+                    CryptographicOperations.ZeroMemory(totpKey);
+                    throw new FirstTradeException("local session state unavailable or in use; login was not attempted");
+                }
             }
 
             internal static HttpClientHandler CreateHandler(string? proxy)
@@ -372,8 +416,19 @@ namespace MyBook
 
             internal async Task LoginAsync(CancellationToken token)
             {
+                EnsureRequestsAllowed();
+                if (!String.IsNullOrEmpty(ftat) && !String.IsNullOrEmpty(sid)) return;
+                if (utcNow() < session.NextLoginUtc)
+                    throw new FirstTradeException($"login cooldown active until {session.NextLoginUtc:O}");
                 if (++loginAttempts > 2)
                     throw new FirstTradeException("automatic login retry limit reached");
+                token.ThrowIfCancellationRequested();
+                // Reserve the failure delay before any request, so crashes/restarts cannot reset the budget.
+                session.Failures = Math.Min(24, session.Failures + 1);
+                session.NextLoginUtc = utcNow().AddHours(Math.Min(24, Math.Pow(2, Math.Min(5, session.Failures - 1))));
+                session.Ftat = ftat = null;
+                session.Sid = sid = null;
+                await SaveSessionAsync().ConfigureAwait(false);
                 sid = null;
                 await RequestAsync(Endpoint.Bootstrap, null, null, token).ConfigureAwait(false);
                 var login = await RequestAsync(Endpoint.Login, null, new()
@@ -383,7 +438,7 @@ namespace MyBook
                 if (HasText(login, "ftat") && HasText(login, "sid") && !HasText(login, "t_token")
                     && (!login.TryGetProperty("mfa", out var mfa) || mfa.ValueKind == JsonValueKind.False))
                 {
-                    AcceptSession(login);
+                    await AcceptSessionAsync(login).ConfigureAwait(false);
                     return;
                 }
                 if (!login.TryGetProperty("mfa", out var challengeType) || challengeType.ValueKind != JsonValueKind.True)
@@ -399,13 +454,39 @@ namespace MyBook
                     ["mfaCode"] = code,
                     ["remember_for"] = "30", ["t_token"] = challenge
                 }, token).ConfigureAwait(false);
-                AcceptSession(verified);
+                await AcceptSessionAsync(verified).ConfigureAwait(false);
             }
 
-            private void AcceptSession(JsonElement json)
+            private async Task AcceptSessionAsync(JsonElement json)
             {
                 ftat = RequiredText(json, "ftat");
                 sid = RequiredText(json, "sid");
+                session.Failures = 0;
+                session.NextLoginUtc = utcNow().AddMinutes(15);
+                await SaveSessionAsync().ConfigureAwait(false);
+            }
+
+            private void EnsureRequestsAllowed()
+            {
+                if (utcNow() < session.BlockedUntilUtc)
+                    throw new FirstTradeException($"requests paused until {session.BlockedUntilUtc:O} after access denial or rate limiting");
+            }
+
+            private async Task SaveSessionAsync()
+            {
+                session.Ftat = ftat;
+                session.Sid = sid;
+                if (cookies is not null)
+                    session.Cookies = cookies.GetAllCookies().Cast<Cookie>().Where(c => !c.Expired)
+                        .Select(c => new FirstTradeCookie(c.Name, c.Value, c.Path, c.Domain, c.Secure, c.HttpOnly, c.Expires)).ToList();
+                var clear = JsonSerializer.SerializeToUtf8Bytes(session);
+                try
+                {
+                    var encrypted = ProtectedData.Protect(clear, null, DataProtectionScope.CurrentUser);
+                    await WriteFirstTradeFileAsync(sessionPath, encrypted, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch { throw new FirstTradeException("cannot persist session/login cooldown; requests stopped"); }
+                finally { CryptographicOperations.ZeroMemory(clear); }
             }
 
             internal async Task<FirstTradeCapture> FetchAsync(FirstTradeCapture? previous, CancellationToken token,
@@ -442,6 +523,7 @@ namespace MyBook
                     });
                 }
                 result.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await SaveSessionAsync().ConfigureAwait(false);
                 return result;
             }
 
@@ -501,6 +583,7 @@ namespace MyBook
 
             private async Task<JsonElement> RequestAsync(Endpoint endpoint, string? query, Dictionary<string, string>? form, CancellationToken token)
             {
+                EnsureRequestsAllowed();
                 // Closed endpoint/method allowlist: there is no arbitrary URL or account mutation API.
                 var (path, method) = endpoint switch
                 {
@@ -524,8 +607,27 @@ namespace MyBook
                 try
                 {
                     using var response = await client.SendAsync(request, token).ConfigureAwait(false);
-                    if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden && method == HttpMethod.Get && endpoint != Endpoint.Bootstrap)
+                    if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)
+                    {
+                        var blockedUntil = utcNow().AddHours(1);
+                        try
+                        {
+                            var retry = response.Headers.RetryAfter;
+                            var retryUntil = retry?.Date ?? (retry?.Delta is TimeSpan delay ? utcNow().Add(delay) : (DateTimeOffset?)null);
+                            if (retryUntil > blockedUntil) blockedUntil = retryUntil.Value;
+                        }
+                        catch (FormatException) { }
+                        catch (ArgumentOutOfRangeException) { blockedUntil = DateTimeOffset.MaxValue; }
+                        if (blockedUntil > session.BlockedUntilUtc) session.BlockedUntilUtc = blockedUntil;
+                        await SaveSessionAsync().ConfigureAwait(false);
+                        throw new FirstTradeException($"{endpoint}: HTTP {(int)response.StatusCode}; requests paused until {session.BlockedUntilUtc:O}; no automatic re-login");
+                    }
+                    if (response.StatusCode == HttpStatusCode.Unauthorized && method == HttpMethod.Get && endpoint != Endpoint.Bootstrap)
+                    {
+                        ftat = sid = null;
+                        await SaveSessionAsync().ConfigureAwait(false);
                         throw new FirstTradeSessionExpiredException();
+                    }
                     if (!response.IsSuccessStatusCode)
                         throw new FirstTradeException($"{endpoint}: HTTP {(int)response.StatusCode}");
                     if (endpoint == Endpoint.Bootstrap) return default;
@@ -605,7 +707,22 @@ namespace MyBook
             {
                 client.Dispose();
                 CryptographicOperations.ZeroMemory(totpKey);
+                ftat = sid = null;
+                session.Ftat = session.Sid = null;
+                session.Cookies.Clear();
+                sessionLock.Dispose();
             }
+            private sealed class FirstTradeSessionState
+            {
+                public int Version { get; set; } = 1;
+                public string? Ftat { get; set; }
+                public string? Sid { get; set; }
+                public DateTimeOffset NextLoginUtc { get; set; }
+                public DateTimeOffset BlockedUntilUtc { get; set; }
+                public int Failures { get; set; }
+                public List<FirstTradeCookie> Cookies { get; set; } = [];
+            }
+            private sealed record FirstTradeCookie(string Name, string Value, string Path, string Domain, bool Secure, bool HttpOnly, DateTime Expires);
             private sealed class FirstTradeSessionExpiredException : Exception;
         }
     }
