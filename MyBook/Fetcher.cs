@@ -16,6 +16,7 @@ namespace MyBook
         GraphQLUtil? graphQL;
         KrakenUtil? kraken;
         CryptoUtil? crypto;
+        WebUtil? web;
         DatabaseUtil? database;
         SIMUtil? sim;
         Timer? dailyTimer;
@@ -45,6 +46,7 @@ namespace MyBook
             mail = new(config, database);
             pubWeb = new(config, database);
             graphQL = new(config, database);
+            web = new(config, database);
             var krakenPub = new KrakenPubUtil();
             var krakenApiKey = config["kraken_api_key"];
             var krakenApiSecret = config["kraken_api_secret"];
@@ -141,6 +143,9 @@ namespace MyBook
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
                 }).ConfigureAwait(false);
+                if (web is not null && web.IsFirstTradeConfigured)
+                    await RunImportTaskAsync("FirstTrade", () => true,
+                        () => web.FetchFirstTradeAsync()).ConfigureAwait(false);
                 if (graphQL is not null)
                     await RunImportTaskAsync(
                         "Nexus DP",

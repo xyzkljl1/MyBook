@@ -1,4 +1,7 @@
 ﻿{
+    "firsttrade_username": "",
+    "firsttrade_password": "",
+    "firsttrade_totp_secret": "",
     "yahoo_user":  "",
     "yahoo_pass":  "",
     "alphavantage_key":  "",

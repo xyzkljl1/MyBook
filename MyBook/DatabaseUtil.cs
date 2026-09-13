@@ -2531,6 +2531,22 @@ namespace MyBook
             return db.Queryable<Account>().ToList();
         }
 
+        public HoldingType GetKnownEquityHoldingType(string code)
+        {
+            var types = db.Queryable<Holding>()
+                .Where(holding => holding.code == code
+                    && (holding.holdingType == HoldingType.NASDAQ || holding.holdingType == HoldingType.ARCA))
+                .Select(holding => holding.holdingType).ToList()
+                .Concat(db.Queryable<Finance>()
+                    .Where(finance => finance.code == code
+                        && (finance.holdingType == HoldingType.NASDAQ || finance.holdingType == HoldingType.ARCA))
+                    .Select(finance => finance.holdingType).ToList())
+                .Distinct().ToList();
+            if (types.Count != 1)
+                throw new InvalidOperationException("Equity exchange metadata is missing or ambiguous; import product metadata first.");
+            return types[0];
+        }
+
         public void EnsureAccountInternalCardNos(IEnumerable<AccountInternalId> internalIds)
         {
             var uniqueInternalIds = new Dictionary<string, AccountInternalId>(StringComparer.OrdinalIgnoreCase);
