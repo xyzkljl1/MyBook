@@ -2422,13 +2422,6 @@ namespace MyBook
             if (recordSourceCode.StartsWith("BALANCE-", StringComparison.OrdinalIgnoreCase))
                 return recordSourceCode;
 
-            var ocbcFxMatch = Regex.Match(
-                source ?? "",
-                @"\bFX\s+Transaction\s*/\s*(?<code>[A-Za-z0-9_-]+)",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-            if (ocbcFxMatch.Success)
-                return $"OCBC-FX-{ocbcFxMatch.Groups["code"].Value.Trim()}";
-
             return "";
         }
 

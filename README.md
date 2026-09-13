@@ -181,5 +181,3 @@ The following modules are kept in the codebase but are not part of the current a
 - Account balances are derived from holdings through the `AccountBalances` view.
 - Snapshots represent database state at an import progress point, not natural-date account state.
 - `Records.expenseAllocationDays` controls allocated-expense periods. When `expenseAllocationSkipDays` is empty, the original day-count behavior is used. When both values are present, `expenseAllocationSkipDays` may be 0 or must have the same sign as `expenseAllocationDays`, and `abs(expenseAllocationSkipDays) < abs(expenseAllocationDays)`; the two values then define the relative allocation boundaries around the record date.
-
-OCBC no longer provides statement delivery by email, so the OCBC mail importer was removed.
