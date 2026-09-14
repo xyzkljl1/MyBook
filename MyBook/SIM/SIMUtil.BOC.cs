@@ -16,6 +16,9 @@ namespace MyBook
         private static readonly Regex BOCSIMIncomeTransactionRegex = new(
             @"^您的借记卡账户(?<cardTail>\d{4})[，,]于(?<month>\d{1,2})月(?<day>\d{1,2})日收入[(（](?<summary>[^)）]+)[)）]人民币(?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]交易后余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)(?:元)?【中国银行】$",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex BOCSIMParenthesizedTransactionRegex = new(
+            @"^您的借记卡账户(?<cardTail>\d{4})[，,]于(?<month>\d{1,2})月(?<day>\d{1,2})日(?<direction>支取|存入)[(（](?<summary>[^)）]+)[)）]人民币(?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]交易后余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)(?:元)?【中国银行】$",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
         private static readonly Regex BOCSIMUnionCreditTransactionRegex = new(
             @"^您的借记卡/账户(?<cardTail>\d{4})于(?<month>\d{1,2})月(?<day>\d{1,2})日银联入账人民币(?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[(（](?<summary>[^)）]+)[)）][，,]交易后余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)(?:元)?【中国银行】$",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -76,6 +79,8 @@ namespace MyBook
         {
             var text = NormalizeBOCSIMText(message.Text);
             var match = BOCSIMTransactionRegex.Match(text);
+            if (!match.Success)
+                match = BOCSIMParenthesizedTransactionRegex.Match(text);
             var direction = "";
             if (match.Success)
             {

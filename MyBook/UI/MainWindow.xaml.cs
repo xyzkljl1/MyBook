@@ -540,6 +540,19 @@ namespace MyBook
             RefreshImportRuntimeStatus();
         }
 
+        private void ClearImportFailureMarker_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                fetcher.ClearImportFailureMarker();
+                RefreshImportRuntimeStatus();
+            }
+            catch (Exception)
+            {
+                MessageBox.Show(this, "无法清除失败标记，请检查文件访问权限。", "清除失败标记", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
         private void RefreshImportRuntimeStatus(DashboardViewModel? viewModel = null)
         {
             viewModel ??= DataContext as DashboardViewModel;
@@ -672,6 +685,7 @@ namespace MyBook
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
         public List<StatementImportSummaryViewModel> LatestStatementImports { get; set; } = [];
         public string ImportRuntimeText { get; private set; } = "导入未启用";
+        public bool HasImportFailureMarker { get; private set; }
         public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
         public ObservableCollection<AccountBalanceRowViewModel> DetailAccountBalances { get; } = [];
         public ObservableCollection<AllocatedExpenseBucketViewModel> AllocatedExpenseBuckets { get; } = [];
@@ -1134,20 +1148,24 @@ namespace MyBook
             var lastText = status.LastFetchTime.HasValue
                 ? status.LastFetchTime.Value.ToString("MM-dd HH:mm", CultureInfo.InvariantCulture)
                 : "无";
-            var failurePrefix = status.HasImportFailureMarker ? "导入失败（需手动清除）；" : "";
+            if (HasImportFailureMarker != status.HasImportFailureMarker)
+            {
+                HasImportFailureMarker = status.HasImportFailureMarker;
+                OnPropertyChanged(nameof(HasImportFailureMarker));
+            }
             if (!String.IsNullOrWhiteSpace(status.CurrentTaskName))
             {
-                ImportRuntimeText = $"{failurePrefix}导入：{status.CurrentTaskName}{FormatElapsedSuffix(status.CurrentTaskStartedAt, now)}；上次：{lastText}";
+                ImportRuntimeText = $"导入：{status.CurrentTaskName}{FormatElapsedSuffix(status.CurrentTaskStartedAt, now)}；上次：{lastText}";
             }
             else if (status.IsScheduledFetchEnabled && status.NextFetchTime.HasValue)
             {
-                ImportRuntimeText = $"{failurePrefix}上次：{lastText}；下次：{status.NextFetchTime.Value:MM-dd HH:mm}";
+                ImportRuntimeText = $"上次：{lastText}；下次：{status.NextFetchTime.Value:MM-dd HH:mm}";
             }
             else
             {
                 ImportRuntimeText = status.IsScheduledFetchEnabled
-                    ? $"{failurePrefix}上次：{lastText}；下次：待定"
-                    : $"{failurePrefix}上次：{lastText}；导入未启用";
+                    ? $"上次：{lastText}；下次：待定"
+                    : $"上次：{lastText}；导入未启用";
             }
             OnPropertyChanged(nameof(ImportRuntimeText));
         }

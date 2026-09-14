@@ -31,6 +31,7 @@ namespace MyBook
         const int DefaultSIMPollIntervalMinutes = 5;
         const string ImportFailureMarkerFileName = "MyBook.import-failed.tmp";
         static readonly UTF8Encoding ImportFailureMarkerEncoding = new(false);
+        static readonly object importFailureMarkerLock = new();
 
         public void RunSchedule()
         {
@@ -331,6 +332,12 @@ namespace MyBook
             return Path.Combine(Path.GetTempPath(), ImportFailureMarkerFileName);
         }
 
+        public void ClearImportFailureMarker()
+        {
+            lock (importFailureMarkerLock)
+                File.Delete(GetImportFailureMarkerPath());
+        }
+
         private static void CreateImportFailureMarker(string taskName, Exception exception)
         {
             try
@@ -342,7 +349,8 @@ namespace MyBook
                     taskName,
                     exception.GetType().FullName ?? exception.GetType().Name)
                     + Environment.NewLine;
-                File.WriteAllText(GetImportFailureMarkerPath(), content, ImportFailureMarkerEncoding);
+                lock (importFailureMarkerLock)
+                    File.WriteAllText(GetImportFailureMarkerPath(), content, ImportFailureMarkerEncoding);
             }
             catch (Exception markerException)
             {

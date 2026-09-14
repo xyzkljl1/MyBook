@@ -10,6 +10,7 @@
         Background="#F5F7FA"
         FontFamily="Microsoft YaHei UI, Segoe UI">
     <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibility"/>
         <Style x:Key="Card" TargetType="Border">
             <Setter Property="Background" Value="White"/>
             <Setter Property="BorderBrush" Value="#E2E8F0"/>
@@ -125,8 +126,18 @@
                                VerticalAlignment="Center"
                                Margin="10,0,0,0"/>
                 </Grid>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0"
+                            Visibility="{Binding HasImportFailureMarker, Converter={StaticResource BooleanToVisibility}}">
+                    <TextBox Style="{StaticResource SelectableText}" Text="导入失败" FontSize="12" Foreground="#B91C1C"
+                             VerticalAlignment="Center"/>
+                    <Button Width="26" Height="24" Margin="6,0,0,0"
+                            FontFamily="Segoe MDL2 Assets" FontSize="13" Content="&#xE894;"
+                            ToolTip="清除失败标记（不重试导入）" AutomationProperties.Name="清除失败标记"
+                            Click="ClearImportFailureMarker_Click"/>
+                </StackPanel>
                 <TextBox Style="{StaticResource SelectableText}"
                          Text="{Binding ImportRuntimeText, Mode=OneWay}"
+                         TextWrapping="Wrap"
                          HorizontalContentAlignment="Right"
                          FontSize="12"
                          Foreground="#64748B"
