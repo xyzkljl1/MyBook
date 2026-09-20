@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using MailKit;
 using MailKit.Search;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.Core;
 
 namespace MyBook
 {
@@ -246,21 +247,62 @@ namespace MyBook
             {
                 using var document = PdfDocument.Open(pdfBytes);
                 return document.GetPages()
-                    .SelectMany(page => page.GetWords()
-                        .GroupBy(word => Math.Round(word.BoundingBox.Bottom / 2.0) * 2.0)
-                        .OrderByDescending(group => group.Key)
-                        .Select(group => new BOCPdfLine(
-                            page.Number,
-                            group.Key,
-                            group.OrderBy(word => word.BoundingBox.Left)
-                                .Select(word => new BOCPdfWord(word.Text, word.BoundingBox.Left))
-                                .ToList())))
+                    .SelectMany(page =>
+                    {
+                        var lines = page.GetWords()
+                            .GroupBy(word => Math.Round(word.BoundingBox.Bottom / 2.0) * 2.0)
+                            .OrderByDescending(group => group.Key)
+                            .Select(group => new BOCPdfLine(
+                                page.Number,
+                                group.Key,
+                                group.OrderBy(word => word.BoundingBox.Left)
+                                    .Select(word => new BOCPdfWord(word.Text, word.BoundingBox.Left))
+                                    .ToList()))
+                            .ToList();
+                        var borders = page.Paths.SelectMany(path => path)
+                            .SelectMany(path => path.Commands).OfType<PdfSubpath.Line>()
+                            .Where(line => Math.Abs(line.From.Y - line.To.Y) < 0.1
+                                && Math.Min(line.From.X, line.To.X) < 350
+                                && Math.Max(line.From.X, line.To.X) > 350)
+                            .Select(line => line.From.Y).Distinct().ToList();
+                        return MergeBOCTransactionDescriptions(lines, borders);
+                    })
                     .ToList();
             }
             catch (Exception exception)
             {
                 throw new MailParseException($"Parse BOC statement PDF fail: {exception.Message}");
             }
+        }
+
+        private static List<BOCPdfLine> MergeBOCTransactionDescriptions(List<BOCPdfLine> lines, List<double> borders)
+        {
+            var transactions = lines.Where(line =>
+                line.Words.Any(word => word.Left < 120 && BOCDateRegex.IsMatch(word.Text))
+                && line.Words.Any(word => word.Left >= 120 && word.Left < 210 && BOCDateRegex.IsMatch(word.Text)))
+                .ToList();
+            var result = lines.ToList();
+            foreach (var transaction in transactions)
+            {
+                var top = borders.Where(y => y > transaction.Bottom).DefaultIfEmpty(Double.NaN).Min();
+                var bottom = borders.Where(y => y < transaction.Bottom).DefaultIfEmpty(Double.NaN).Max();
+                if (Double.IsNaN(top) || Double.IsNaN(bottom)
+                    || transactions.Count(line => line.Bottom > bottom && line.Bottom < top) != 1)
+                    throw new MailParseException($"Parse BOC statement fail, ambiguous transaction row boundary on page {transaction.PageNumber}");
+
+                // Wrapped descriptions share a table cell, not a text baseline with the dates.
+                var description = lines.Where(line => line.Bottom > bottom && line.Bottom < top)
+                    .OrderByDescending(line => line.Bottom)
+                    .SelectMany(line => line.Words.Where(word => word.Left >= 280 && word.Left < 400)
+                        .OrderBy(word => word.Left))
+                    .ToList();
+                result[lines.IndexOf(transaction)] = transaction with
+                {
+                    Words = transaction.Words.Where(word => word.Left < 280 || word.Left >= 400)
+                        .Concat(description).ToList()
+                };
+            }
+            return result;
         }
 
         private static DateTime ParseBOCStatementTitleMonth(List<BOCPdfLine> lines)
