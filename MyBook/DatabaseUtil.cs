@@ -2261,6 +2261,16 @@ namespace MyBook
             Dictionary<string, Account> accountsByName,
             bool requireKnownCounterparty)
         {
+            if (records.Any(IsAcatsTransfer))
+            {
+                var holdingIds = records.Select(record => record._holding_Id).Distinct().ToList();
+                var holdings = db.Queryable<Holding>()
+                    .Where(holding => holdingIds.Contains(holding.Id))
+                    .ToList().ToDictionary(holding => holding.Id);
+                foreach (var record in records)
+                    record.Holding = holdings.GetValueOrDefault(record._holding_Id);
+            }
+
             foreach (var anchor in records
                          .Where(record => record.isInternal && record.matchedRecordId is null)
                          .OrderBy(record => record.date)
@@ -2308,7 +2318,7 @@ namespace MyBook
                 return false;
 
             var targetAccount = ResolveInternalTransferTargetAccount(anchor, accountsByName);
-            if (requireKnownCounterparty && targetAccount is null)
+            if ((requireKnownCounterparty || IsAcatsTransfer(anchor)) && targetAccount is null)
                 return false;
 
             var start = anchor.date.AddDays(-InternalTransferMatchWindowDays);
@@ -2324,6 +2334,13 @@ namespace MyBook
                     && record.date >= start
                     && record.date <= end)
                 .ToList();
+            candidates = candidates.Where(candidate =>
+            {
+                if (!IsAcatsTransfer(anchor) && !IsAcatsTransfer(candidate))
+                    return true;
+                var candidateTarget = ResolveInternalTransferTargetAccount(candidate, accountsByName);
+                return CanMatchAcatsTransfer(anchor, candidate, targetAccount, candidateTarget);
+            }).ToList();
             if (requireKnownCounterparty)
             {
                 candidates = candidates
@@ -2345,6 +2362,21 @@ namespace MyBook
             return true;
         }
 
+        private static bool IsAcatsTransfer(Record record) =>
+            record.Source.Contains("/ACATSTransfer/", StringComparison.Ordinal);
+
+        private static bool CanMatchAcatsTransfer(Record left, Record right, Account? leftTarget, Account? rightTarget)
+        {
+            return left._account_Id != right._account_Id
+                && leftTarget?.Id == right._account_Id
+                && rightTarget?.Id == left._account_Id
+                && left.HoldingQuantity != 0
+                && left.HoldingQuantity == -right.HoldingQuantity
+                && left.Holding is not null && right.Holding is not null
+                && left.Holding.holdingType == right.Holding.holdingType
+                && String.Equals(left.Holding.code, right.Holding.code, StringComparison.OrdinalIgnoreCase);
+        }
+
         private Account? ResolveInternalTransferTargetAccount(
             Record record,
             Dictionary<string, Account> accountsByName)
@@ -2360,10 +2392,9 @@ namespace MyBook
                 }
             }
 
-            var matchedAccount = FindAccountByInternalCardNoText(
-                null,
-                $"record {record.Id} internal transfer match",
-                accountText);
+            var matchedAccount = IsAcatsTransfer(record)
+                ? FindAccountByInternalCardNo(accountText)
+                : FindAccountByInternalCardNoText(null, $"record {record.Id} internal transfer match", accountText);
             if (matchedAccount is null || IsUndeterminedAccount(matchedAccount))
                 return null;
 
@@ -2592,6 +2623,28 @@ namespace MyBook
             internalId.cardNo = cardNo;
             db.Insertable(internalId).ExecuteCommand();
             LogAccountInternalCardNoKnown("stored", internalId, account, cardNo);
+        }
+
+        public Account? FindAccountByInternalCardNo(string cardNo)
+        {
+            return FindAccountByExactInternalId(cardNo,
+                db.Queryable<Account>().ToList(), db.Queryable<AccountInternalId>().ToList());
+        }
+
+        private static Account? FindAccountByExactInternalId(string cardNo, List<Account> accounts, List<AccountInternalId> internalIds)
+        {
+            var token = NormalizeInternalCardToken(cardNo);
+            if (token.Length == 0) return null;
+            var accountIds = internalIds
+                .Where(item => NormalizeInternalCardToken(item.cardNo) == token)
+                .Select(item => item._account_Id).ToHashSet();
+            var matches = accounts.Where(account => !IsUndeterminedAccount(account)
+                && (accountIds.Contains(account.Id)
+                    || NormalizeInternalCardToken(account.name.Split('_', 2).ElementAtOrDefault(1) ?? "") == token))
+                .ToList();
+            if (matches.Count > 1)
+                throw new InvalidOperationException("Ambiguous exact internal account id match.");
+            return matches.SingleOrDefault();
         }
 
         public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, params string?[] texts)

@@ -2131,7 +2131,8 @@ namespace MyBook
                     throw new MailParseException($"Parse IBKR Report Fail, Non-base Transfer: {FormatIBKRCsvRow(row)}");
 
                 var type = row.Fields[4];
-                if (type != "内部")
+                var isAcats = type == "自动客户账户转账服务（ACATS）";
+                if (type != "内部" && !isAcats)
                     throw new MailParseException($"Parse IBKR Report Fail, Unknown Transfer Type: {FormatIBKRCsvRow(row)}");
 
                 var direction = row.Fields[5];
@@ -2152,10 +2153,10 @@ namespace MyBook
                 builder.Add(
                     new Currency(amount, currency),
                     "内部转账",
-                    $"Transfer/{FormatIBKRCsvRow(row)}",
+                    $"{(isAcats ? "ACATSTransfer" : "Transfer")}/{FormatIBKRCsvRow(row)}",
                     isInternal: true,
                     date: ParseIBKRDate(row.Fields[3]),
-                    destAccount: BuildIBKRTransferDestAccount(account, row.Fields[7], direction),
+                    destAccount: BuildIBKRTransferDestAccount(account, row.Fields[7], direction, isAcats),
                     holdingQuantity: quantity,
                     holding: contract);
             }
@@ -2169,11 +2170,16 @@ namespace MyBook
             return new IBKRTransferTotals(true, detailTotal);
         }
 
-        private static string BuildIBKRTransferDestAccount(Account account, string transferAccount, string direction)
+        private string BuildIBKRTransferDestAccount(Account account, string transferAccount, string direction, bool isAcats)
         {
             var target = transferAccount.Trim();
             if (String.IsNullOrWhiteSpace(target) || target == "--")
                 return target;
+            if (isAcats)
+            {
+                var targetAccount = database.FindAccountByInternalCardNo(target);
+                return targetAccount is null ? target : database.GetPostingAccount(targetAccount).name;
+            }
             if (!target.StartsWith("IBKR_", StringComparison.OrdinalIgnoreCase))
                 target = $"IBKR_{target}";
 
