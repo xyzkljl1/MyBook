@@ -11,6 +11,7 @@ namespace MyBook
         private const StatementImportProvider ICBCSIMProvider = StatementImportProvider.ICBCSIMSMS;
         private const string ICBCSIMRowCodePrefix = "ICBCSIM-";
         private const string ICBCSIMCompensationCodePrefix = "ICBCSIMCompensation-";
+        private static readonly TimeSpan ICBCSIMOrderingWindow = TimeSpan.FromMinutes(2);
         private static readonly Regex ICBCSIMTransactionRegex = new(
             @"尾号(?<cardTail>\d{4})卡(?<month>\d{1,2})月(?<day>\d{1,2})日(?<hour>\d{1,2}):(?<minute>\d{2})(?:手机银行|营业网点)?(?<direction>支出|收入)[(（](?<summary>[^)）]+)[)）](?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]\s*余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)元",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -45,18 +46,30 @@ namespace MyBook
 
             foreach (var group in items
                 .Where(item => item.Transaction is not null)
-                .GroupBy(item => (item.Transaction!.CardTail, item.Transaction.TransactionTime)))
+                .GroupBy(item => (item.Transaction!.CardTail, item.Transaction.Balance.t)))
             {
-                if (group.Count() < 2)
-                    continue;
-
-                var chain = OrderICBCSIMBalanceChain(group.ToList());
-                for (var index = 0; index < chain.Count; index++)
-                    chain[index].ChainOrder = index;
+                var ordered = group.OrderBy(item => item.EffectiveTime).ToList();
+                for (var start = 0; start < ordered.Count;)
+                {
+                    var end = start + 1;
+                    // Anchor the window to its earliest transaction; do not extend it transitively.
+                    while (end < ordered.Count && ordered[end].EffectiveTime - ordered[start].EffectiveTime <= ICBCSIMOrderingWindow)
+                        end++;
+                    var window = ordered.GetRange(start, end - start);
+                    var chain = window.Count > 1 ? OrderICBCSIMBalanceChain(window) : window;
+                    if (chain.Zip(chain.Skip(1), (left, right) => left.EffectiveTime > right.EffectiveTime).Any(reversed => reversed))
+                        Console.WriteLine($"ICBC SMS balance order overrides transaction time within two-minute window {ordered[start].EffectiveTime:yyyy-MM-dd HH:mm}..{ordered[end - 1].EffectiveTime:HH:mm}; original timestamps preserved.");
+                    for (var index = 0; index < chain.Count; index++)
+                    {
+                        chain[index].SortTime = ordered[start].EffectiveTime;
+                        chain[index].ChainOrder = index;
+                    }
+                    start = end;
+                }
             }
 
             return items
-                .OrderBy(item => item.EffectiveTime)
+                .OrderBy(item => item.SortTime)
                 .ThenBy(item => item.Transaction?.CardTail ?? "", StringComparer.Ordinal)
                 .ThenBy(item => item.ChainOrder)
                 .ThenBy(item => item.Message.Index)
@@ -487,6 +500,7 @@ namespace MyBook
             public SIMMessage Message { get; } = message;
             public ICBCSIMTransaction? Transaction { get; } = transaction;
             public DateTime EffectiveTime { get; } = effectiveTime;
+            public DateTime SortTime { get; set; } = effectiveTime;
             public int ChainOrder { get; set; } = chainOrder;
         }
     }
