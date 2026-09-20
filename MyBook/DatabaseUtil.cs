@@ -354,6 +354,14 @@ namespace MyBook
                     SqlValue(account._primaryAccount_Id)
                 }));
 
+            var accountInternalIds = db.Queryable<AccountInternalId>().OrderBy(item => item.Id).ToList();
+            AppendInsertSql(builder, "AccountInternalIds", ["Id", "cardNo", "desc", "currencyType", "_account_Id"],
+                accountInternalIds.Select(item => new[]
+                {
+                    SqlValue(item.Id), SqlValue(item.cardNo), SqlValue(item.desc),
+                    item.currencyType.HasValue ? SqlValue(item.currencyType.Value) : "NULL", SqlValue(item._account_Id)
+                }));
+
             var fixedImports = GetFixedStatementImports();
             AppendInsertSql(
                 builder,
@@ -639,8 +647,30 @@ namespace MyBook
 
         private static void ExecuteSqlScript(SqlSugarClient db, string path)
         {
-            foreach (var statement in SplitSqlStatements(File.ReadAllText(path, Encoding.UTF8)))
-                db.Ado.ExecuteCommand(statement);
+            var autoClose = db.CurrentConnectionConfig.IsAutoCloseConnection;
+            int? foreignKeyChecks = null;
+            db.CurrentConnectionConfig.IsAutoCloseConnection = false;
+            try
+            {
+                // Bootstrap SET statements and dependent inserts must use the same MySQL session.
+                db.Ado.Open();
+                foreignKeyChecks = db.Ado.GetInt("select @@foreign_key_checks");
+                foreach (var statement in SplitSqlStatements(File.ReadAllText(path, Encoding.UTF8)))
+                    db.Ado.ExecuteCommand(statement);
+            }
+            finally
+            {
+                try
+                {
+                    if (foreignKeyChecks.HasValue)
+                        db.Ado.ExecuteCommand("set foreign_key_checks=" + foreignKeyChecks.Value);
+                }
+                finally
+                {
+                    db.CurrentConnectionConfig.IsAutoCloseConnection = autoClose;
+                    if (autoClose) db.Ado.Close();
+                }
+            }
         }
 
         private static List<string> SplitSqlStatements(string sql)
@@ -995,7 +1025,8 @@ namespace MyBook
                         import.Holdings,
                         import.BeginningHoldings,
                         import.InternalCardNos,
-                        recordDate: import.RecordDate);
+                        recordDate: import.RecordDate,
+                        sourceDataJson: import.SourceDataJson);
                     if (!statementImportId.HasValue)
                     {
                         saved.Add(false);
@@ -1035,7 +1066,8 @@ namespace MyBook
             Action<int>? afterSaveInTransaction = null,
             bool preserveCurrentAccountBalances = false,
             DateTime? validateCurrentBalancesRolledBackTo = null,
-            DateTime? recordDate = null)
+            DateTime? recordDate = null,
+            string? sourceDataJson = null)
         {
             if (IsStatementImported(provider, time, statementKey))
                 return null;
@@ -1081,7 +1113,7 @@ namespace MyBook
                 beginningAccountBalances,
                 holdingAccount,
                 beginningHoldings);
-            var statementImportId = InsertStatementImport(provider, time, statementKey);
+            var statementImportId = InsertStatementImport(provider, time, statementKey, sourceDataJson);
 
             if (holdingAccount is not null && holdings is not null)
             {
@@ -2625,13 +2657,13 @@ namespace MyBook
             LogAccountInternalCardNoKnown("stored", internalId, account, cardNo);
         }
 
-        public Account? FindAccountByInternalCardNo(string cardNo)
+        public Account? FindAccountByInternalCardNo(string cardNo, string? accountType = null)
         {
             return FindAccountByExactInternalId(cardNo,
-                db.Queryable<Account>().ToList(), db.Queryable<AccountInternalId>().ToList());
+                db.Queryable<Account>().ToList(), db.Queryable<AccountInternalId>().ToList(), accountType);
         }
 
-        private static Account? FindAccountByExactInternalId(string cardNo, List<Account> accounts, List<AccountInternalId> internalIds)
+        private static Account? FindAccountByExactInternalId(string cardNo, List<Account> accounts, List<AccountInternalId> internalIds, string? accountType = null)
         {
             var token = NormalizeInternalCardToken(cardNo);
             if (token.Length == 0) return null;
@@ -2639,6 +2671,7 @@ namespace MyBook
                 .Where(item => NormalizeInternalCardToken(item.cardNo) == token)
                 .Select(item => item._account_Id).ToHashSet();
             var matches = accounts.Where(account => !IsUndeterminedAccount(account)
+                && (accountType is null || String.Equals(GetAccountType(account.name), accountType, StringComparison.OrdinalIgnoreCase))
                 && (accountIds.Contains(account.Id)
                     || NormalizeInternalCardToken(account.name.Split('_', 2).ElementAtOrDefault(1) ?? "") == token))
                 .ToList();
@@ -2810,13 +2843,14 @@ namespace MyBook
             return primary;
         }
 
-        private int InsertStatementImport(StatementImportProvider provider, DateTime time, string statementKey)
+        private int InsertStatementImport(StatementImportProvider provider, DateTime time, string statementKey, string? sourceDataJson = null)
         {
             return db.Insertable(new StatementImport
             {
                 provider = provider,
                 time = NormalizeStatementImportTime(time),
-                statementKey = statementKey
+                statementKey = statementKey,
+                sourceDataJson = sourceDataJson
             }).ExecuteReturnIdentity();
         }
 
@@ -4972,11 +5006,14 @@ namespace MyBook
             var preservedFinance = ReadFinancePreservationItems();
             ExecuteLockedTransaction(() =>
             {
+                var identifiers = ReadAccountIdentifierPreservationItems();
                 if (cleanToSnapshotId.HasValue)
                     CleanToSnapshotCore(cleanToSnapshotId.Value);
                 else
                     CleanToStartSnapshotCore();
                 ValidateFinancePreserved(preservedFinance);
+                if (!identifiers.SequenceEqual(ReadAccountIdentifierPreservationItems()))
+                    throw new InvalidOperationException("Database cleanup must not change AccountInternalIds rows.");
                 ProcessAllocatedExpenseDirtyRecordsCore();
             });
 
@@ -4988,6 +5025,10 @@ namespace MyBook
                     .OrderBy(it => it.time)
                     .ToList());
         }
+
+        private List<(int, string, string, CurrencyType?, int)> ReadAccountIdentifierPreservationItems() =>
+            db.Queryable<AccountInternalId>().OrderBy(item => item.Id).ToList()
+                .Select(item => (item.Id, item.cardNo, item.desc, item.currencyType, item._account_Id)).ToList();
 
         private List<FinancePreservationItem> ReadFinancePreservationItems()
         {
@@ -5301,10 +5342,6 @@ namespace MyBook
                     new SugarParameter("@provider", StatementImportProvider.WiseMail.ToString()));
                 DeleteUnreferencedAccountHoldings(wiseAccount.Id);
                 ValidateAccountBalancesFromHoldings(wiseAccount.Id);
-                db.Deleteable<AccountInternalId>()
-                    .Where(internalId => internalId._account_Id == wiseAccount.Id
-                        && (internalId.desc == "XML statement balance id" || internalId.desc == "XML file balance id"))
-                    .ExecuteCommand();
                 db.Ado.ExecuteCommand("""
                     delete statementImport
                     from `StatementImports` statementImport
@@ -5384,6 +5421,7 @@ namespace MyBook
             return new Dictionary<string, int>
             {
                 ["Accounts"] = db.Queryable<Account>().Count(),
+                ["AccountInternalIds"] = db.Queryable<AccountInternalId>().Count(),
                 ["AccountBalances"] = db.Queryable<AccountBalance>().Count(),
                 ["StatementImports"] = db.Queryable<StatementImport>().Count(),
                 ["Records"] = db.Queryable<Record>().Count(),
@@ -6309,7 +6347,8 @@ namespace MyBook
             List<AccountBalance> beginningAccountBalances,
             List<Holding>? beginningHoldings = null,
             List<AccountInternalId>? internalCardNos = null,
-            DateTime? recordDate = null)
+            DateTime? recordDate = null,
+            string? sourceDataJson = null)
         {
             Provider = provider;
             Time = time;
@@ -6322,6 +6361,7 @@ namespace MyBook
             BeginningHoldings = beginningHoldings ?? [];
             InternalCardNos = internalCardNos ?? [];
             RecordDate = recordDate;
+            SourceDataJson = sourceDataJson;
         }
 
         public StatementImportProvider Provider { get; }
@@ -6335,5 +6375,6 @@ namespace MyBook
         public List<Holding> BeginningHoldings { get; }
         public List<AccountInternalId> InternalCardNos { get; }
         public DateTime? RecordDate { get; }
+        public string? SourceDataJson { get; }
     }
 }

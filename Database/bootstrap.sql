@@ -55,9 +55,10 @@ CREATE TABLE `finance` (
 
 CREATE TABLE `statementimports` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual','IFastMail','ZAMail','FirstTradeApi') NOT NULL DEFAULT 'Manual',
+  `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual','IFastMail','ZAMail','FirstTradeApi','SchwabReportMail') NOT NULL DEFAULT 'Manual',
   `time` datetime(6) NOT NULL,
   `statementKey` varchar(255) NOT NULL DEFAULT '',
+  `sourceDataJson` json DEFAULT NULL,
   PRIMARY KEY (`Id`),
   UNIQUE KEY `unique_StatementImports_provider_time_key` (`provider`,`time`,`statementKey`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

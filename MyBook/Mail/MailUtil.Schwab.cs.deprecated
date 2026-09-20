@@ -1,0 +1,401 @@
+// Deprecated reference implementation. Not compiled or scheduled.
+using System.Globalization;
+using System.IO;
+using System.IO.Compression;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using MailKit.Search;
+using Microsoft.VisualBasic.FileIO;
+
+namespace MyBook;
+
+partial class MailUtil
+{
+    private const string SchwabReportSender = "donotreply@interactivebrokers.com";
+    private const StatementImportProvider SchwabReportProvider = StatementImportProvider.SchwabReportMail;
+    private const string SchwabSummarySource = "SchwabPortfolioAnalyst/Summary/";
+    private static readonly SemaphoreSlim schwabMailLock = new(1, 1);
+
+    public static bool IsSchwabUnclassifiedSummary(Record record) =>
+        record.Source.StartsWith(SchwabSummarySource, StringComparison.Ordinal);
+
+    public async Task FetchSchwabReports()
+    {
+        if (!await schwabMailLock.WaitAsync(0).ConfigureAwait(false)) return;
+        var stage = "checkpoint";
+        try
+        {
+            var imports = database.GetStatementImports(SchwabReportProvider);
+            var checkpoint = database.GetStatementImportCheckpointTime(SchwabReportProvider)
+                ?? throw SchwabReportError("missing database checkpoint");
+            var lastMail = imports.Where(i => i.sourceDataJson is not null).Select(i => i.time).Append(checkpoint).Max();
+            var since = lastMail.AddDays(-7).Date;
+            if (since < checkpoint.Date) since = checkpoint.Date;
+            stage = "mail search and attachment download";
+            await RunWithMailSessionScope(async () =>
+            {
+                var messages = await SearchAttachmentMessagesCore(CreateYahooMailbox() with { Proxy = null },
+                    "Schwab PortfolioAnalyst", SearchQuery.FromContains(SchwabReportSender)
+                        .And(SearchQuery.SubjectContains("PortfolioAnalyst")).And(SearchQuery.SentSince(since)),
+                    summary => SummaryIsFrom(summary, SchwabReportSender),
+                    name => name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase), GetMailDateTime,
+                    redactAttachmentNames: true).ConfigureAwait(false);
+                // Order financial periods independently of email delivery order.
+                var batches = messages.Select(message => (Message: message,
+                    Reports: message.Attachments.SelectMany(a => ParseSchwabReportArchive(a.Content)).ToList()))
+                    .Where(batch => batch.Reports.Count != 0)
+                    .OrderBy(batch => batch.Reports.Min(report => report.End)).ThenBy(batch => batch.Message.MailDateTime).ToList();
+                foreach (var batch in batches)
+                {
+                    stage = "report validation and atomic import";
+                    ImportSchwabReports(batch.Reports, batch.Message.MailDateTime);
+                }
+            }).ConfigureAwait(false);
+        }
+        catch (MailParseException) { throw; }
+        catch (Exception) { throw SchwabReportError($"{stage} failed; private details suppressed"); }
+        finally { schwabMailLock.Release(); }
+    }
+
+    private void ImportSchwabReports(List<SchwabReport> reports, DateTime mailTime)
+    {
+        var existing = database.GetStatementImports(SchwabReportProvider)
+            .Where(i => i.sourceDataJson is not null)
+            .Select(i => JsonSerializer.Deserialize<SchwabReport>(i.sourceDataJson!)
+                ?? throw SchwabReportError("invalid stored report")).ToList();
+        var pending = new List<StatementRecordHoldingImport>();
+        foreach (var report in reports.OrderBy(r => r.End).ThenBy(r => r.Start))
+        {
+            var previousReports = existing.Where(r => r.AccountTail == report.AccountTail).ToList();
+            if (IsSchwabReportDuplicate(report, previousReports)) continue;
+            var account = database.GetAccountsByNamePrefix("SCHWAB_")
+                .SingleOrDefault(a => a.name == DatabaseUtil.BuildAccountName("SCHWAB", report.AccountTail))
+                ?? throw SchwabReportError("report account is not uniquely registered in fixed data");
+            var previous = previousReports.MaxBy(r => r.End);
+            var staged = pending.Any(p => p.HoldingAccount.Id == account.Id);
+            if (!staged)
+            {
+                var current = database.GetCurrentAccountHoldings(account);
+                if (previous is null)
+                {
+                    if (database.HasAccountHistory(account) || current.Any(IsSchwabNonzeroHolding))
+                        throw SchwabReportError("initialization requires an account without prior financial data");
+                }
+                else ValidateSchwabCurrentHoldings(current, BuildSchwabHoldings(previous, account, database.GetKnownEquityHoldingType));
+            }
+            pending.Add(BuildSchwabImport(report, previous, account, mailTime, database.GetKnownEquityHoldingType));
+            existing.Add(report);
+        }
+        if (pending.Count == 0) return;
+        database.SaveStatementRecordsAndHoldingsOnce(pending);
+        Console.WriteLine($"Schwab PortfolioAnalyst imported reports={pending.Count}; interval summary records={pending.Sum(p => p.Records.Count)}; initialization records excluded.");
+    }
+
+    internal static bool IsSchwabReportDuplicate(SchwabReport report, IEnumerable<SchwabReport> previous)
+    {
+        var sameEnd = previous.Where(p => p.AccountTail == report.AccountTail && p.End == report.End).ToList();
+        if (sameEnd.Count == 0) return false;
+        if (sameEnd.Count != 1 || JsonSerializer.Serialize(sameEnd[0]) != JsonSerializer.Serialize(report))
+            throw SchwabReportError("previously imported reporting date was revised; manual review required");
+        return true;
+    }
+
+    internal static List<SchwabReport> ParseSchwabReportArchive(byte[] bytes)
+    {
+        if (bytes.Length > 20 * 1024 * 1024) throw SchwabReportError("ZIP exceeds size limit");
+        using var stream = new MemoryStream(bytes, false);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+        if (archive.Entries.Count > 64 || archive.Entries.Sum(e => e.Length) > 50 * 1024 * 1024)
+            throw SchwabReportError("ZIP expanded size or entry count exceeds limit");
+        var reports = new List<SchwabReport>();
+        foreach (var entry in archive.Entries.Where(e => e.Name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (entry.Length > 10 * 1024 * 1024) throw SchwabReportError("CSV exceeds size limit");
+            using var input = entry.Open();
+            var report = ParseSchwabReport(input);
+            if (report is not null) reports.Add(report);
+        }
+        return reports;
+    }
+
+    internal static SchwabReport? ParseSchwabReport(Stream input)
+    {
+        using var parser = new TextFieldParser(input, new UTF8Encoding(false, true), true, true);
+        parser.SetDelimiters(",");
+        parser.HasFieldsEnclosedInQuotes = true;
+        var headers = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        var report = new SchwabReport();
+        var intro = false;
+        var statistics = false;
+        DateTime? asOf = null;
+        var totals = new List<(string Instrument, decimal Value)>();
+        while (!parser.EndOfData)
+        {
+            string[] row;
+            try { row = parser.ReadFields() ?? []; }
+            catch (MalformedLineException) { throw SchwabReportError("malformed financial CSV row"); }
+            if (row.Length < 2) throw SchwabReportError("incomplete CSV row");
+            // Disclosures include unescaped prose quotes in actual exports; they are not financial CSV rows.
+            if (row[0] == "Notes and Disclosure") break;
+            if (row[1] == "Header")
+            {
+                if (!headers.TryAdd(row[0], row.Skip(2).ToArray()) || row.Skip(2).Distinct().Count() != row.Length - 2)
+                    throw SchwabReportError("duplicate section or column header");
+                continue;
+            }
+            if (row[1] == "MetaInfo")
+            {
+                if (row.Length != 4) throw SchwabReportError("invalid section metadata");
+                if (row[0] == "Open Position Summary" && row[2] == "As Of") asOf = SchwabDate(row[3], "MMMM d, yyyy");
+                else if (row[0] == "Key Statistics" && row[2] == "Analysis Period")
+                {
+                    var period = row[3].Split(" - ", StringSplitOptions.None);
+                    if (!intro || period.Length != 2 || SchwabDate(period[0], "MMMM d, yyyy") != report.Start
+                        || SchwabDate(period[1], "MMMM d, yyyy") != report.End)
+                        throw SchwabReportError("section analysis period differs from introduction");
+                }
+                else throw SchwabReportError("unsupported section metadata");
+                continue;
+            }
+            if (row[1] != "Data" || !headers.TryGetValue(row[0], out var columns))
+                throw SchwabReportError("data row does not match its section header");
+            // PortfolioAnalyst subtotal rows omit the trailing FXRateToBase cell.
+            if (row[0] == "Open Position Summary" && row.Length > 2 && row[2] == "Total"
+                && row.Length == columns.Length + 1 && columns[^1] == "FXRateToBase") row = [.. row, ""];
+            if (row.Length != columns.Length + 2)
+                throw SchwabReportError("data row does not match its section header");
+            var fields = columns.Select((name, index) => (name, value: row[index + 2])).ToDictionary(p => p.name, p => p.value);
+            string Field(string name) => fields.TryGetValue(name, out var value) ? value : throw SchwabReportError("missing required column");
+            if (row[0] == "Introduction")
+            {
+                if (intro) throw SchwabReportError("multiple account introductions in one CSV");
+                if (!Regex.IsMatch(Field("Name"), @"^Schwab(?:\s|$)", RegexOptions.IgnoreCase)) return null;
+                var identifier = Regex.Match(Field("Account"), @"(?:^|\.{3}|\*+)\s*(?<tail>\d{3,})$");
+                if (!identifier.Success || Field("BaseCurrency") != "USD" || Field("AccountType") != "Brokerage")
+                    throw SchwabReportError("unsupported or ambiguous account summary");
+                report.AccountTail = identifier.Groups["tail"].Value;
+                var period = Regex.Match(Field("AnalysisPeriod"), @"^(?<start>.+?) to (?<end>.+?) \(Daily\)$");
+                if (!period.Success) throw SchwabReportError("unsupported analysis period format");
+                report.Start = SchwabDate(period.Groups["start"].Value, "MMMM d, yyyy");
+                report.End = SchwabDate(period.Groups["end"].Value, "MMMM d, yyyy");
+                if (report.End < report.Start) throw SchwabReportError("reversed report interval");
+                intro = true;
+            }
+            else if (row[0] == "Key Statistics")
+            {
+                if (!intro || statistics) throw SchwabReportError("missing introduction or duplicate statistics");
+                report.BeginningNav = SchwabNumber(Field("BeginningNAV"));
+                report.EndingNav = SchwabNumber(Field("EndingNAV"));
+                report.Mtm = Field("MTM") == "N/A" ? null : SchwabNumber(Field("MTM"));
+                report.Deposits = SchwabNumber(Field("Deposits & Withdrawals"));
+                report.Dividends = SchwabNumber(Field("Dividends"));
+                report.Interest = SchwabNumber(Field("Interest"));
+                report.Fees = SchwabNumber(Field("Fees & Commissions"));
+                report.Other = SchwabNumber(Field("Other"));
+                SchwabEqual(report.EndingNav - report.BeginningNav, SchwabNumber(Field("ChangeInNAV")), "NAV change");
+                SchwabEqual(report.BeginningNav + (report.Mtm ?? 0) + report.Deposits + report.Dividends
+                    + report.Interest + report.Fees + report.Other, report.EndingNav, "reported NAV components");
+                statistics = true;
+            }
+            else if (row[0] == "Open Position Summary")
+            {
+                if (!intro || Field("Currency") != "USD") throw SchwabReportError("only USD positions can currently be classified exactly");
+                if (Field("Date") == "Total")
+                {
+                    totals.Add((Field("FinancialInstrument"), SchwabNumber(Field("Value"))));
+                    continue;
+                }
+                if (SchwabDate(Field("Date"), "MM/dd/yyyy") != report.End) throw SchwabReportError("position date differs from report end");
+                if (SchwabNumber(Field("FXRateToBase"), false) != 1) throw SchwabReportError("unexpected USD exchange rate");
+                var position = new SchwabPosition(Field("FinancialInstrument"), Field("Symbol"), Field("Description"),
+                    SchwabNumber(Field("Quantity"), false), SchwabNumber(Field("ClosePrice"), false), SchwabNumber(Field("Value")),
+                    Field("FinancialInstrument") == "Cash" ? null : SchwabNumber(Field("Cost Basis")),
+                    Field("FinancialInstrument") == "Cash" ? null : SchwabNumber(Field("UnrealizedP&L")));
+                if (position.Symbol.Length is < 1 or > 255 || position.Description.Length > 255)
+                    throw SchwabReportError("invalid position identity");
+                if (position.Instrument != "Cash")
+                    SchwabEqual(position.CostBasis!.Value + position.UnrealizedPnl!.Value, position.Value, "position cost and unrealized P&L");
+                report.Positions.Add(position);
+            }
+            else throw SchwabReportError("unsupported financial section");
+        }
+        if (!intro || !statistics || asOf != report.End || report.Positions.Count == 0)
+            throw SchwabReportError("incomplete report");
+        if (report.Positions.Select(p => p.Symbol).Distinct(StringComparer.Ordinal).Count() != report.Positions.Count
+            || report.Positions.Count(p => p.Instrument == "Cash" && p.Symbol == "USD") != 1)
+            throw SchwabReportError("duplicate position or missing USD cash summary");
+        foreach (var total in totals)
+            SchwabEqual(report.Positions.Where(p => p.Instrument == total.Instrument).Sum(p => p.Value), total.Value, "asset class subtotal");
+        SchwabEqual(report.Positions.Sum(p => p.Value), report.EndingNav, "position sum and ending NAV");
+        report.Positions = report.Positions.OrderBy(p => p.Symbol, StringComparer.Ordinal).ToList();
+        return report;
+    }
+
+    internal static List<Holding> BuildSchwabHoldings(SchwabReport report, Account account, Func<string, HoldingType> resolveEquity)
+    {
+        if (report.Version != 1) throw SchwabReportError("unsupported stored report version");
+        var result = new List<Holding>();
+        foreach (var position in report.Positions)
+        {
+            Holding holding;
+            if (position.Instrument == "Cash" && position.Symbol == "USD")
+            {
+                SchwabEqual(position.Price, 1, "cash unit price");
+                SchwabEqual(position.Quantity, position.Value, "cash quantity");
+                holding = new("USD", HoldingType.Cash) { currentPrice = new(position.Value, CurrencyType.USD) };
+            }
+            else
+            {
+                var bond = Regex.Match(position.Description, @"^US TREASURY (?<coupon>\d+(?:\.\d+)?) .+ DUE (?<due>\d{2}/\d{2}/\d{2})$");
+                HoldingType type;
+                var code = position.Symbol;
+                var price = position.Price;
+                if (bond.Success && position.Instrument is "Unclassified" or "Bonds")
+                {
+                    type = HoldingType.UST;
+                    var maturity = SchwabDate(bond.Groups["due"].Value, "MM/dd/yy");
+                    code = $"T {SchwabNumber(bond.Groups["coupon"].Value, false).ToString("G29", CultureInfo.InvariantCulture)} {maturity:MM/dd/yy}";
+                    price /= 100;
+                }
+                else if (position.Instrument is "ETFs" or "Stocks")
+                {
+                    type = resolveEquity(code);
+                    if (type is not (HoldingType.NASDAQ or HoldingType.ARCA)) throw SchwabReportError("invalid equity metadata");
+                }
+                else throw SchwabReportError("unsupported financial instrument; product metadata required");
+                if (position.Quantity < 0 || price < 0) throw SchwabReportError("short positions are not supported");
+                holding = new(code, type) { quantity = position.Quantity, currentPrice = new(price, CurrencyType.USD) };
+                SchwabEqual(Decimal.Round(position.Quantity * price, 2, MidpointRounding.ToEven), position.Value, "quantity times price");
+            }
+            holding.Account = account;
+            holding._account_Id = account.Id;
+            holding.desc = position.Description;
+            holding.displayText = position.Instrument == "Cash" ? "USD (including accruals)" : position.Description;
+            // Reject prices the existing holding model cannot represent exactly; never invent a rounding record.
+            SchwabEqual(holding.totalPrice.v, position.Value, "stored holding valuation");
+            result.Add(holding);
+        }
+        if (result.Select(h => (h.code, h.holdingType)).Distinct().Count() != result.Count)
+            throw SchwabReportError("ambiguous normalized instrument identity");
+        SchwabEqual(result.Sum(h => h.totalPrice.v), report.EndingNav, "holding sum and source NAV");
+        return result;
+    }
+
+    internal static StatementRecordHoldingImport BuildSchwabImport(SchwabReport report, SchwabReport? previous,
+        Account account, DateTime mailTime, Func<string, HoldingType> resolveEquity)
+    {
+        if (account.relativeBalance || account.isCredit || account.usage != AccountUsage.Investment || account._primaryAccount_Id.HasValue)
+            throw SchwabReportError("a primary absolute-balance investment account is required");
+        var ending = BuildSchwabHoldings(report, account, resolveEquity);
+        var beginning = previous is null ? ending : BuildSchwabHoldings(previous, account, resolveEquity);
+        var records = new List<Record>();
+        if (previous is not null)
+        {
+            if (report.AccountTail != previous.AccountTail || report.End <= previous.End || report.Start < previous.Start)
+                throw SchwabReportError("out-of-order or incompatible report");
+            var samePeriod = report.Start == previous.Start;
+            if (samePeriod) SchwabEqual(report.BeginningNav, previous.BeginningNav, "cumulative opening NAV");
+            var contiguousNewPeriod = report.Start == previous.End.AddDays(1);
+            if (contiguousNewPeriod) SchwabEqual(report.BeginningNav, previous.EndingNav, "new period opening NAV");
+            var canSplitIncome = samePeriod || contiguousNewPeriod;
+            var dividends = canSplitIncome ? report.Dividends - (samePeriod ? previous.Dividends : 0) : 0;
+            var interest = canSplitIncome ? report.Interest - (samePeriod ? previous.Interest : 0) : 0;
+            var fees = canSplitIncome ? report.Fees - (samePeriod ? previous.Fees : 0) : 0;
+            var prefix = $"SchwabPortfolioAnalyst/Income/period={previous.End:yyyy-MM-dd}..{report.End:yyyy-MM-dd}; ";
+            var cash = ending.Single(h => h.holdingType == HoldingType.Cash);
+            Add(cash, dividends, 0, "股息汇总", prefix + "Dividends");
+            Add(cash, interest, 0, "利息汇总", prefix + "Interest");
+            Add(cash, fees, 0, "手续费汇总", prefix + "Fees & Commissions");
+            var old = beginning.ToDictionary(h => (h.code, h.holdingType));
+            var current = ending.ToDictionary(h => (h.code, h.holdingType));
+            foreach (var key in old.Keys.Union(current.Keys))
+            {
+                old.TryGetValue(key, out var left);
+                current.TryGetValue(key, out var right);
+                var holding = right ?? left!;
+                var amount = (right?.totalPrice.v ?? 0) - (left?.totalPrice.v ?? 0);
+                var quantity = Holding.IsSingleValueAsset(holding.holdingType) ? 0 : (right?.quantity ?? 0) - (left?.quantity ?? 0);
+                if (holding.holdingType == HoldingType.Cash) amount -= dividends + interest + fees;
+                Add(holding, amount, quantity, holding.holdingType == HoldingType.Cash ? "现金变动汇总" : "资产变动汇总",
+                    $"{SchwabSummarySource}period={previous.End:yyyy-MM-dd}..{report.End:yyyy-MM-dd}; incomeSplit={canSplitIncome}");
+            }
+            SchwabEqual(records.Sum(r => r.v), report.EndingNav - previous.EndingNav, "record total and interval NAV change");
+            foreach (var holding in beginning.Concat(ending).DistinctBy(h => (h.code, h.holdingType)))
+            {
+                var key = (holding.code, holding.holdingType);
+                var changes = records.Where(r => r.Holding?.code == key.code && r.Holding?.holdingType == key.holdingType).ToList();
+                SchwabEqual((old.GetValueOrDefault(key)?.totalPrice.v ?? 0) + changes.Sum(r => r.v),
+                    current.GetValueOrDefault(key)?.totalPrice.v ?? 0, "per-holding record value");
+                if (!Holding.IsSingleValueAsset(holding.holdingType))
+                    SchwabEqual((old.GetValueOrDefault(key)?.quantity ?? 0) + changes.Sum(r => r.HoldingQuantity),
+                        current.GetValueOrDefault(key)?.quantity ?? 0, "per-holding record quantity");
+            }
+            if (!canSplitIncome) Console.WriteLine("Schwab PortfolioAnalyst: reporting-period gap; income classification unavailable, interval changes retained as summaries.");
+        }
+        var keyText = $"Schwab:{account.Id}:{report.Start:yyyyMMdd}:{report.End:yyyyMMdd}";
+        return new(SchwabReportProvider, mailTime, keyText, account, records, ending,
+            [new(account, new(report.EndingNav, CurrencyType.USD))],
+            [new(account, new(previous?.EndingNav ?? report.EndingNav, CurrencyType.USD))], beginning,
+            recordDate: report.End, sourceDataJson: JsonSerializer.Serialize(report));
+
+        void Add(Holding holding, decimal amount, decimal quantity, string reason, string source)
+        {
+            if (amount == 0 && quantity == 0) return;
+            records.Add(new Record { Account = account, Holding = holding, _account_Id = account.Id,
+                v = amount, t = CurrencyType.USD, HoldingQuantity = quantity, Reason = reason,
+                Source = source, DestAccount = holding.displayText, date = report.End, postingDate = report.End, updateTime = DateTime.Now });
+        }
+    }
+
+    private static bool IsSchwabNonzeroHolding(Holding holding) =>
+        holding.totalPrice.v != 0 || (!Holding.IsSingleValueAsset(holding.holdingType) && holding.quantity != 0);
+
+    internal static void ValidateSchwabCurrentHoldings(List<Holding> current, List<Holding> expected)
+    {
+        var left = current.Where(IsSchwabNonzeroHolding).OrderBy(h => h.code).ThenBy(h => h.holdingType)
+            .Select(h => (h.code, h.holdingType, h.quantity, h.currentPrice.t, h.totalPrice.v));
+        var right = expected.Where(IsSchwabNonzeroHolding).OrderBy(h => h.code).ThenBy(h => h.holdingType)
+            .Select(h => (h.code, h.holdingType, h.quantity, h.currentPrice.t, h.totalPrice.v));
+        if (!left.SequenceEqual(right)) throw SchwabReportError("current holdings differ from the last report; manual review required");
+    }
+
+    private static DateTime SchwabDate(string value, string format) =>
+        DateTime.TryParseExact(value, format, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
+            ? date : throw SchwabReportError("invalid report date");
+
+    private static decimal SchwabNumber(string value, bool money = true)
+    {
+        if (!Decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var number)
+            || (money && Decimal.Round(number, 2) != number)) throw SchwabReportError("invalid numeric field or unsupported precision");
+        MySqlDecimalColumnTypes.ValidateCurrencyValue(number, "Schwab report numeric field");
+        return number;
+    }
+
+    private static void SchwabEqual(decimal actual, decimal expected, string field)
+    {
+        if (actual != expected) throw SchwabReportError($"{field} mismatch");
+    }
+
+    private static MailParseException SchwabReportError(string message) => new("Schwab PortfolioAnalyst: " + message);
+
+    internal sealed class SchwabReport
+    {
+        public int Version { get; set; } = 1;
+        public string AccountTail { get; set; } = "";
+        public DateTime Start { get; set; }
+        public DateTime End { get; set; }
+        public decimal BeginningNav { get; set; }
+        public decimal EndingNav { get; set; }
+        public decimal? Mtm { get; set; }
+        public decimal Deposits { get; set; }
+        public decimal Dividends { get; set; }
+        public decimal Interest { get; set; }
+        public decimal Fees { get; set; }
+        public decimal Other { get; set; }
+        public List<SchwabPosition> Positions { get; set; } = [];
+    }
+
+    internal sealed record SchwabPosition(string Instrument, string Symbol, string Description, decimal Quantity, decimal Price,
+        decimal Value, decimal? CostBasis, decimal? UnrealizedPnl);
+}

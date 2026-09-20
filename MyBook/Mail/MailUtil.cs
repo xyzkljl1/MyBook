@@ -627,7 +627,8 @@ namespace MyBook
             SearchQuery query,
             Func<IMessageSummary, bool>? summaryFilter,
             Func<string, bool> attachmentFileNameFilter,
-            Func<MailAttachmentMessage, DateTime>? orderDateSelector)
+            Func<MailAttachmentMessage, DateTime>? orderDateSelector,
+            bool redactAttachmentNames = false)
         {
             var uids = await UseMailFolderAsync(
                 mailbox,
@@ -667,7 +668,7 @@ namespace MyBook
                 {
                     var entity = await UseMailFolderAsync(
                         mailbox,
-                        $"{label} uid={summary.UniqueId.Id} attachment={GetAttachmentFileName(part)}",
+                        redactAttachmentNames ? $"{label} attachment" : $"{label} uid={summary.UniqueId.Id} attachment={GetAttachmentFileName(part)}",
                         folder => RunMailOperation(token => folder.GetBodyPartAsync(summary.UniqueId, part, token))).ConfigureAwait(false);
                     if (entity is not MimePart mimePart)
                         continue;

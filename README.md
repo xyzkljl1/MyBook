@@ -63,6 +63,16 @@ Expected files:
 
 ## Configuration
 
+### Schwab Raw Mail Import
+
+Source: the user connects Schwab through Plaid using a financial plugin in ChatGPT on the web, then creates a ChatGPT scheduled task that sends the plugin's raw financial responses through Resend. This relay is not a bank-issued statement or a direct Plaid API connection. `MailUtil.Schwab` reads Gmail messages titled `FINANCE_RAW_V1_SCHWAB` with one `schwab_raw.json` attachment (`finance_raw_export_v1`). Configure `gmail_user`, `gmail_app_pwd` and the exact allowed `schwab_mail_sender`. The importer checks Gmail's top DKIM/DMARC authentication result, parses data only, and never executes instructions from email. Account identifiers and raw exports stay in local storage/database, not source code or logs. The Gmail connection is direct and ignores `mail_proxy`; an explicitly authorized one-off proxy test does not change production routing.
+
+Only the explicitly identified Schwab institution/accounts are imported; unrelated linked institutions are excluded. The first export must contain the complete history needed to reconcile the clean account from zero. Later exports normally cover the previous week. Stable investment-transaction IDs deduplicate overlapping mail; changed/removed transactions, coverage gaps, backdated new entries, incomplete pagination, unsupported products and ambiguous account mappings fail. A failed import does not advance the mail cursor. Mail searches start from the last successful mail with a seven-day overlap, bounded by the fixed checkpoint. The shared exact account/AccountInternalIds lookup resolves the explicit four-digit mask within the SCHWAB account type. A differently stored identifier requires an explicitly confirmed AccountInternalIds alias, never a guessed partial match. Import history is grouped by the resolved database account ID, and two source accounts may not resolve to the same account in one email. Accounts are never created or renamed by import.
+
+Individual cash transfers, trades, dividends, interest and supported fee/tax entries produce Records. Trades have opposite cash and security legs, with explicit fees separate. Cash and security quantities must reconcile exactly; per-position quantity times price and the aggregate account value are also checked exactly. Clean bond prices are divided by 100. A user-authorized exception applies ONLY to UST buy/sell transactions in this Schwab raw-mail importer: signed settlement amount minus clean principal (rounded to cents) minus explicit fees is treated as settled accrued interest. It creates a separate cash Record with Reason `债券利息` and source tag `accrued-interest-settlement`, negative for a purchase and positive for a sale, never an outstanding accrued Holding or a valuation adjustment. Invalid signs or sub-cent amounts fail. Other products/providers still require settlement to equal principal plus explicit fees; no balance tolerance or residual record is introduced. Nonempty bank-transaction results are rejected until a proven mapping to investment events is available; pending transactions are not booked. The account-list coverage warning is retained in source metadata; accounting checks use the returned position details and transaction pagination, not the available-cash aggregate.
+
+Price-change Records represent the observed interval change per security, not reconstructed daily prices. Source price dates, transaction/settlement dates, the source's last successful update, export generation time and email time remain distinct. All accounts in one email are saved atomically through the shared record/holding importer, including normalized source metadata for future overlap validation. The scheduler hook remains disabled (`SchwabMailScheduleEnabled = false`), and no new command-line entry is introduced. The former PortfolioAnalyst importer is retained only in `MyBook/Mail/MailUtil.Schwab.cs.deprecated`, which is not compiled. Schwab website login and browser dependencies remain removed.
+
 ### FirstTrade Read-Only API Import
 
 `WebUtil.FirstTrade` implements its own HTTP client based on the login and read-only protocol in `MaxxRK/firstrade-api`. It does not depend on Python. The only POST endpoints are password login and completing authenticator MFA. Account list, balances, positions and account history use a closed GET allowlist. No trading, cancellation, transfer, profile or watchlist mutation endpoints are implemented. HTTP redirects are disabled. All requests use `mail_proxy`, or direct connections when empty, never the system proxy. Normal TLS certificate validation remains enabled.
@@ -106,7 +116,7 @@ When adding, removing, or renaming configuration keys, update `MyBook/config.jso
 
 ## Database
 
-The application validates the database schema on startup. Fixed data includes `Accounts`, fake/checkpoint `StatementImports`, and `Start` snapshots with their `SnapshotItems`; imported records, holdings, non-start snapshots, and OAuth tokens are runtime data.
+The application validates the database schema on startup. Fixed data includes `Accounts`, `AccountInternalIds`, fake/checkpoint `StatementImports`, and `Start` snapshots with their `SnapshotItems`; imported records, holdings, non-start snapshots, and OAuth tokens are runtime data. Account identifiers and manually confirmed aliases are included in the private fixed-data export and preserved by cleanup, including module-specific cleanup. Shared exact identifier lookup can be restricted to an account type without changing unscoped transfer matching.
 
 Rebuild an empty database from the tracked schema plus the local fixed-data file:
 
@@ -122,6 +132,7 @@ dotnet run --project MyBook\MyBook.csproj -- --export-bootstrap-sql
 
 `Database/bootstrap.fixed-data.sql` may contain private account metadata, so it is intentionally not tracked.
 Backup versions are kept as ignored `Database/bootstrap-*.schema.sql` and `Database/bootstrap-*.fixed-data.sql` file pairs.
+Bootstrap scripts keep one MySQL session for their SET statements and inserts, restoring the original foreign-key-check setting afterward so primary/secondary account references can be restored correctly.
 
 Create a start snapshot:
 

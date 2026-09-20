@@ -34,3 +34,4 @@
 **/schwab-callback.local.txt
 **/ifast-interest-rates.local.json*
 **/*.firsttrade.dpapi*
+**/*.schwab.dpapi*

@@ -29,6 +29,8 @@ namespace MyBook
         const int ICBCHistoryDetailFetchIntervalDays = 90;
         const int ICBCHistoryDetailSearchWindowMonths = 5;
         const int DefaultSIMPollIntervalMinutes = 5;
+        // Keep disabled until the new mail source reconciles and scheduled imports are approved.
+        private static readonly bool SchwabMailScheduleEnabled = false;
         const string ImportFailureMarkerFileName = "MyBook.import-failed.tmp";
         static readonly UTF8Encoding ImportFailureMarkerEncoding = new(false);
         static readonly object importFailureMarkerLock = new();
@@ -143,6 +145,8 @@ namespace MyBook
                         FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
+                    if (SchwabMailScheduleEnabled)
+                        await RunImportTaskAsync("Schwab", () => true, mail.FetchSchwabReports).ConfigureAwait(false);
                 }).ConfigureAwait(false);
                 if (web is not null && web.IsFirstTradeConfigured)
                     await RunImportTaskAsync("FirstTrade", () => true,
