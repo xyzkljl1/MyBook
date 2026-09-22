@@ -148,8 +148,9 @@ partial class GoogleDriveUtil
         }
         var positions = ReadRawPages(responses, "investment_holdings", "investment_holdings", itemId, accountIds);
         var transactions = ReadRawPages(responses, "investment_transactions", "investment_transactions", itemId, accountIds);
-        var posted = ReadRawPages(responses, "posted_transactions", "transactions", itemId, accountIds);
-        _ = ReadRawPages(responses, "pending_transactions", "transactions", itemId, accountIds);
+        // posted/pending 的 is_complete_for_query 似乎没什么用，暂时忽略。
+        var posted = ReadRawPages(responses, "posted_transactions", "transactions", itemId, accountIds, requireCompleteCoverage: false);
+        _ = ReadRawPages(responses, "pending_transactions", "transactions", itemId, accountIds, requireCompleteCoverage: false);
         // Investments and bank transactions can describe the same event. Never double-book an unproven mapping.
         if (posted.Count != 0) throw SchwabRawError("nonempty posted bank transactions require an explicit investment-event mapping");
         var result = new List<SchwabRawReport>();
@@ -208,7 +209,8 @@ partial class GoogleDriveUtil
         return result;
     }
 
-    private static List<JsonElement> ReadRawPages(JsonElement responses, string name, string queryType, string itemId, HashSet<string> accounts)
+    private static List<JsonElement> ReadRawPages(JsonElement responses, string name, string queryType, string itemId,
+        HashSet<string> accounts, bool requireCompleteCoverage = true)
     {
         var pages = responses.GetProperty(name + "_pages").EnumerateArray().ToList();
         if (pages.Count == 0 || pages.Count > 100) throw SchwabRawError("missing or excessive result pages");
@@ -228,7 +230,8 @@ partial class GoogleDriveUtil
             if (more != (index < pages.Count - 1) || more == (result.GetProperty("next_cursor").ValueKind == JsonValueKind.Null))
                 throw SchwabRawError("incomplete pagination: " + name);
             if (more && !cursors.Add(RawText(result, "next_cursor"))) throw SchwabRawError("repeated pagination cursor: " + name);
-            if (result.TryGetProperty("coverage", out var coverage) && !coverage.GetProperty("is_complete_for_query").GetBoolean())
+            if (requireCompleteCoverage && result.TryGetProperty("coverage", out var coverage)
+                && !coverage.GetProperty("is_complete_for_query").GetBoolean())
                 throw SchwabRawError("incomplete query coverage: " + name);
             foreach (var row in result.GetProperty("items").EnumerateArray())
             {
