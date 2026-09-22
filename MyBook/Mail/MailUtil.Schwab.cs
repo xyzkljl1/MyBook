@@ -86,6 +86,7 @@ partial class MailUtil
         using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 40 });
         var root = document.RootElement;
         CheckUniqueProperties(root);
+        CheckSchwabRawFields(root, "$", "schema_version generated_at institution query_spec_id window resolved_identifiers requests responses");
         if (RawText(root, "schema_version") != "finance_raw_export_v1" || RawText(root, "institution") != "Charles Schwab")
             throw SchwabRawError("unsupported export schema or institution");
         var generated = RawTimestamp(root, "generated_at");
@@ -95,6 +96,7 @@ partial class MailUtil
         if (RawText(window, "basis") != "inclusive_calendar_dates" || start > end || end > generated.Date)
             throw SchwabRawError("invalid reporting window");
         var responses = root.GetProperty("responses");
+        CheckSchwabRawFields(responses, "$.responses", "get_linked_accounts investment_holdings_pages investment_transactions_pages posted_transactions_pages pending_transactions_pages");
         var institutions = responses.GetProperty("get_linked_accounts").GetProperty("institutions").EnumerateArray()
             .Where(i => RawText(i.GetProperty("institution"), "name") == "Charles Schwab").ToList();
         if (institutions.Count != 1) throw SchwabRawError("Schwab institution is missing or ambiguous");
@@ -110,6 +112,7 @@ partial class MailUtil
         if (accounts.Count == 0 || accounts.Count != accountIds.Count || !accountIds.SetEquals(resolved))
             throw SchwabRawError("account selection is incomplete or ambiguous");
         var requests = root.GetProperty("requests");
+        CheckSchwabRawFields(requests, "$.requests", "investment_holdings investment_transactions posted_transactions pending_transactions");
         foreach (var name in new[] { "investment_holdings", "investment_transactions", "posted_transactions", "pending_transactions" })
         {
             var request = requests.GetProperty(name);
@@ -129,10 +132,14 @@ partial class MailUtil
         var result = new List<SchwabRawReport>();
         foreach (var account in accounts)
         {
+            CheckSchwabRawFields(account, "$.responses.get_linked_accounts.institutions[].accounts[]",
+                "account_id item_id institution_id name official_name mask type subtype balances balances_updated_at last_successful_update holder_category persistent_account_id provider");
             var id = RawText(account, "account_id");
             if (RawText(account, "type") != "investment" || RawText(account, "subtype") != "brokerage"
                 || RawText(account, "item_id") != itemId) throw SchwabRawError("unsupported account type or identity");
             var balances = account.GetProperty("balances");
+            CheckSchwabRawFields(balances, "$.responses.get_linked_accounts.institutions[].accounts[].balances",
+                "current available limit iso_currency_code unofficial_currency_code balance_date last_updated_datetime last_updated_datetime_source net_balance display_balance");
             RequireRawUsd(balances);
             var report = new SchwabRawReport
             {
@@ -148,6 +155,8 @@ partial class MailUtil
             RawEqual(report.Total, RawNumber(balances, "display_balance"), "account display balance");
             foreach (var row in positions.Where(r => RawText(r, "account_id") == id))
             {
+                CheckSchwabRawFields(row, "$.responses.investment_holdings_pages[].results[].result.items[]",
+                    "account_id account_name item_id security_id name type subtype ticker_symbol quantity institution_price institution_value institution_price_as_of cost_basis is_cash_equivalent iso_currency_code");
                 RequireRawUsd(row);
                 report.Positions.Add(new(RawText(row, "security_id"), RawText(row, "name"), RawText(row, "type"),
                     RawOptionalText(row, "ticker_symbol"), RawNumber(row, "quantity"), RawNumber(row, "institution_price"),
@@ -155,6 +164,8 @@ partial class MailUtil
             }
             foreach (var row in transactions.Where(r => RawText(r, "account_id") == id))
             {
+                CheckSchwabRawFields(row, "$.responses.investment_transactions_pages[].results[].result.items[]",
+                    "account_id account_name item_id investment_transaction_id security_id name type subtype ticker_symbol date transaction_datetime quantity amount price fees is_cash_equivalent iso_currency_code");
                 RequireRawUsd(row);
                 var date = RawDate(row, "date");
                 var tradeDate = row.TryGetProperty("transaction_datetime", out var stamp) && stamp.ValueKind != JsonValueKind.Null
@@ -401,6 +412,19 @@ partial class MailUtil
         return holding;
     }
 
+    private static void CheckSchwabRawFields(JsonElement element, string path, string fields)
+    {
+        if (element.ValueKind != JsonValueKind.Object) throw new SchwabRawSchemaException("expected object", path);
+        var allowed = fields.Split(' ').ToHashSet(StringComparer.Ordinal);
+        var propertyIndex = 0;
+        foreach (var property in element.EnumerateObject())
+        {
+            // Unknown keys can themselves contain private values; report their ordinal, not the raw key.
+            if (!allowed.Contains(property.Name)) throw new SchwabRawSchemaException("unknown field", $"{path}[property#{propertyIndex}]");
+            propertyIndex++;
+        }
+    }
+
     private static void CheckUniqueProperties(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Object)
@@ -412,7 +436,14 @@ partial class MailUtil
                 CheckUniqueProperties(property.Value);
             }
         }
-        else if (element.ValueKind == JsonValueKind.Array) foreach (var item in element.EnumerateArray()) CheckUniqueProperties(item);
+        else if (element.ValueKind == JsonValueKind.Array)
+            foreach (var item in element.EnumerateArray()) CheckUniqueProperties(item);
+    }
+
+    internal sealed class SchwabRawSchemaException : MailParseException
+    {
+        internal SchwabRawSchemaException(string category, string path)
+            : base($"Schwab raw JSON {category} at {path}") { }
     }
     private static string RawText(JsonElement row, string field) => row.TryGetProperty(field, out var value)
         && value.ValueKind == JsonValueKind.String && !String.IsNullOrWhiteSpace(value.GetString()) && value.GetString()!.Length <= 512

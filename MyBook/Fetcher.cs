@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace MyBook
 {
-    class Fetcher : IDisposable
+    partial class Fetcher : IDisposable
     {
         IConfigurationRoot? config;
         MailUtil? mail;
@@ -28,6 +28,8 @@ namespace MyBook
         const int MonthlyFetchIntervalDays = 27;
         const int ICBCHistoryDetailFetchIntervalDays = 90;
         const int ICBCHistoryDetailSearchWindowMonths = 5;
+        // Temporarily disabled pending history overlap reconciliation fixes.
+        private static readonly bool ICBCHistoryDetailScheduleEnabled = false;
         const int DefaultSIMPollIntervalMinutes = 5;
         // Keep disabled until the new mail source reconciles and scheduled imports are approved.
         private static readonly bool SchwabMailScheduleEnabled = false;
@@ -139,10 +141,11 @@ namespace MyBook
                         "BOC",
                         () => ShouldFetchMonthlyProvider("BOC", StatementImportProvider.BOCBillMail),
                         mail.FetchBOCBills).ConfigureAwait(false);
-                    await RunImportTaskAsync(
-                        "ICBC history detail",
-                        () => ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays),
-                        FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
+                    if (ICBCHistoryDetailScheduleEnabled)
+                        await RunImportTaskAsync(
+                            "ICBC history detail",
+                            () => ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays),
+                            FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
                     if (SchwabMailScheduleEnabled)
@@ -344,6 +347,7 @@ namespace MyBook
 
         private static void CreateImportFailureMarker(string taskName, Exception exception)
         {
+            OnImportFailed(taskName, exception);
             try
             {
                 var content = String.Join(
@@ -361,6 +365,8 @@ namespace MyBook
                 Console.WriteLine($"write import failure marker fail: {markerException.Message}");
             }
         }
+
+        static partial void OnImportFailed(string taskName, Exception exception);
 
         private void UpdateRuntimeStatus(Action<FetchRuntimeStatus> update)
         {
