@@ -13,10 +13,14 @@ using DriveFile = Google.Apis.Drive.v3.Data.File;
 
 namespace MyBook;
 
-// Read-only transport for report files. The public surface deliberately has no
-// arbitrary file-id operation: callers can only use files returned from a direct
-// child of the single top-level Reports folder resolved by this instance.
-sealed class GoogleDriveUtil : IDisposable
+// Setup: create a Google Cloud service account and a JSON key, but assign the
+// service account no Google Cloud/IAM roles. In Google Drive, share only the
+// Reports folder with the key's client_email as Viewer (read-only).
+//
+// This read-only transport deliberately has no arbitrary file-id operation:
+// callers can only use files returned from a direct child of the single
+// top-level Reports folder resolved by this instance.
+sealed partial class GoogleDriveUtil : IDisposable
 {
     private const string CredentialSectionName = "GoogleCloudServeAccountKey";
     private const string ReportsFolderName = "Reports";
@@ -33,14 +37,16 @@ sealed class GoogleDriveUtil : IDisposable
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly DriveService service;
+    private readonly DatabaseUtil? database;
     private readonly SemaphoreSlim reportsFolderLock = new(1, 1);
     private readonly object scopeToken = new();
     private string? reportsFolderId;
     private bool disposed;
 
-    public GoogleDriveUtil(IConfiguration config)
+    public GoogleDriveUtil(IConfiguration config, DatabaseUtil? database = null)
     {
         ArgumentNullException.ThrowIfNull(config);
+        this.database = database;
         var credential = CreateCredential(config.GetSection(CredentialSectionName));
         service = new DriveService(new BaseClientService.Initializer
         {
@@ -48,6 +54,14 @@ sealed class GoogleDriveUtil : IDisposable
             HttpClientInitializer = credential
         });
         service.HttpClient.Timeout = RequestTimeout;
+    }
+
+    public static bool IsConfigured(IConfiguration config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        var section = config.GetSection(CredentialSectionName);
+        return new[] { "type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "token_uri" }
+            .All(field => !String.IsNullOrWhiteSpace(section[field]));
     }
 
     public async Task<IReadOnlyList<ReportFile>> ListReportFilesAsync(

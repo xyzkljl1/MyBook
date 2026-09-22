@@ -12,6 +12,7 @@ namespace MyBook
     {
         IConfigurationRoot? config;
         MailUtil? mail;
+        GoogleDriveUtil? googleDrive;
         PubWebUtil? pubWeb;
         GraphQLUtil? graphQL;
         KrakenUtil? kraken;
@@ -31,8 +32,8 @@ namespace MyBook
         // Temporarily disabled pending history overlap reconciliation fixes.
         private static readonly bool ICBCHistoryDetailScheduleEnabled = false;
         const int DefaultSIMPollIntervalMinutes = 5;
-        // Keep disabled until the new mail source reconciles and scheduled imports are approved.
-        private static readonly bool SchwabMailScheduleEnabled = false;
+        // Keep disabled until the Google Drive source reconciles and scheduled imports are approved.
+        private static readonly bool SchwabGoogleDriveScheduleEnabled = false;
         const string ImportFailureMarkerFileName = "MyBook.import-failed.tmp";
         static readonly UTF8Encoding ImportFailureMarkerEncoding = new(false);
         static readonly object importFailureMarkerLock = new();
@@ -49,6 +50,7 @@ namespace MyBook
             config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
             database = new(config);
             mail = new(config, database);
+            googleDrive = GoogleDriveUtil.IsConfigured(config) ? new(config, database) : null;
             pubWeb = new(config, database);
             graphQL = new(config, database);
             web = new(config, database);
@@ -148,9 +150,15 @@ namespace MyBook
                             FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
-                    if (SchwabMailScheduleEnabled)
-                        await RunImportTaskAsync("Schwab", () => true, mail.FetchSchwabReports).ConfigureAwait(false);
                 }).ConfigureAwait(false);
+                if (SchwabGoogleDriveScheduleEnabled)
+                    await RunImportTaskAsync(
+                        "Schwab",
+                        () => true,
+                        () => googleDrive is null
+                            ? Task.FromException(new InvalidOperationException(
+                                "Schwab Google Drive import requires a complete GoogleCloudServeAccountKey configuration."))
+                            : googleDrive.FetchSchwabReports()).ConfigureAwait(false);
                 if (web is not null && web.IsFirstTradeConfigured)
                     await RunImportTaskAsync("FirstTrade", () => true,
                         () => web.FetchFirstTradeAsync()).ConfigureAwait(false);
@@ -413,6 +421,7 @@ namespace MyBook
             dailyTimer?.Dispose();
             simTimer?.Dispose();
             pubWeb?.Dispose();
+            googleDrive?.Dispose();
             fetchLock.Dispose();
             simPollLock.Dispose();
         }

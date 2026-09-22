@@ -1,88 +1,111 @@
 // Source: ChatGPT web financial plugin -> Plaid-linked Schwab account -> ChatGPT
-// scheduled task -> Resend email containing the plugin's raw financial responses.
+// scheduled task -> Google Drive Reports/SchwabDaily files containing the raw responses.
+// Drive replaces email because GPT email delivery receives stricter security review
+// and can sometimes fail to send.
 // This is an untrusted relay export, not a bank-issued statement or a direct Plaid API response.
 using System.Globalization;
-using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using MailKit.Search;
-using MimeKit;
 
 namespace MyBook;
 
-partial class MailUtil
+partial class GoogleDriveUtil
 {
-    private const string SchwabRawSubject = "FINANCE_RAW_V1_SCHWAB";
+    private const string SchwabReportSubfolderName = "SchwabDaily";
+    private const int SchwabRawMaximumBytes = 2 * 1024 * 1024;
     private const string SchwabRawPrefix = "SchwabRaw/";
+    private static readonly Regex SchwabRawFileNameRegex = new(
+        @"\Aschwab_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json\z",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    // Retain the legacy persisted enum value so existing fixed checkpoints and
+    // successful import history continue unchanged after the transport migration.
     private const StatementImportProvider SchwabRawProvider = StatementImportProvider.SchwabReportMail;
     private static readonly SemaphoreSlim schwabRawLock = new(1, 1);
 
     public async Task FetchSchwabReports()
     {
         if (!await schwabRawLock.WaitAsync(0).ConfigureAwait(false)) return;
-        var stage = "configuration";
+        var stage = "checkpoint lookup";
         try
         {
-            var sender = config["schwab_mail_sender"];
-            if (String.IsNullOrWhiteSpace(sender) || !MailboxAddress.TryParse(sender, out var address)
-                || address.Address != sender) throw SchwabRawError("missing or invalid schwab_mail_sender");
+            var database = this.database ?? throw SchwabRawError("database is unavailable");
             var checkpoint = database.GetStatementImportCheckpointTime(SchwabRawProvider)
-                ?? throw SchwabRawError("missing fixed mail checkpoint");
+                ?? throw SchwabRawError("missing fixed import checkpoint");
             var imports = database.GetStatementImports(SchwabRawProvider).Where(i => i.statementKey != "").ToList();
             var since = imports.Select(i => i.time.Date.AddDays(-7)).Append(checkpoint.Date).Max();
-            stage = "Gmail search and download";
-            await RunWithMailSessionScope(async () =>
+            stage = "Google Drive file listing";
+            var listedFiles = await ListReportFilesAsync(SchwabReportSubfolderName).ConfigureAwait(false);
+            stage = "Google Drive folder content validation";
+            var files = SelectSchwabRawReportFiles(listedFiles)
+                .Select(file => (File: file, SourceTime: GetSchwabDriveFileTime(file)))
+                .Where(item => item.SourceTime.Date >= since)
+                .OrderBy(item => item.SourceTime)
+                .ToList();
+
+            stage = "Google Drive file download and JSON validation";
+            var batches = new List<(DateTime SourceTime, List<SchwabRawReport> Reports)>();
+            foreach (var file in files)
             {
-                var messages = await SearchMessagesFromMailbox(
-                    CreateGmailMailbox("Schwab raw export", config["gmail_user"] ?? "") with { Proxy = null },
-                    "Schwab raw export", SearchQuery.DeliveredAfter(since).And(SearchQuery.SubjectContains(SchwabRawSubject))
-                        .And(SearchQuery.FromContains(sender)),
-                    summary => summary.Envelope.Subject == SchwabRawSubject && SummaryIsFrom(summary, sender),
-                    message => message.Subject == SchwabRawSubject, GetMailDateTime).ConfigureAwait(false);
-                stage = "mail authentication and JSON validation";
-                var batches = messages.Select(m => (Mail: m, Reports: ParseSchwabRawMail(m, sender)))
-                    .OrderBy(b => b.Reports.Min(r => r.GeneratedAt)).ToList();
-                foreach (var batch in batches)
-                {
-                    stage = "financial reconciliation and atomic import";
-                    ImportSchwabRawReports(batch.Reports, GetMailDateTime(batch.Mail));
-                }
-            }).ConfigureAwait(false);
+                var downloaded = await DownloadReportFileAsync(file.File, SchwabRawMaximumBytes).ConfigureAwait(false);
+                batches.Add((file.SourceTime, ParseSchwabRawContent(downloaded.Content)));
+            }
+
+            foreach (var batch in batches.OrderBy(item => item.Reports.Min(report => report.GeneratedAt)))
+            {
+                stage = "financial reconciliation and atomic import";
+                ImportSchwabRawReports(batch.Reports, batch.SourceTime);
+            }
         }
         catch (MailParseException) { throw; }
+        catch (GoogleDriveAccessException e)
+        {
+            throw SchwabRawError($"{stage} failed at {e.Stage}; category={e.Category}");
+        }
         catch (Exception e) { throw SchwabRawError($"{stage} failed ({e.GetType().Name}); private details suppressed"); }
         finally { schwabRawLock.Release(); }
     }
 
-    internal static List<SchwabRawReport> ParseSchwabRawMail(MimeMessage message, string sender)
+    internal static IReadOnlyList<ReportFile> SelectSchwabRawReportFiles(IReadOnlyList<ReportFile> files)
     {
-        if (message.Subject != SchwabRawSubject || message.From.Mailboxes.Count() != 1
-            || !String.Equals(message.From.Mailboxes.Single().Address, sender, StringComparison.OrdinalIgnoreCase))
-            throw SchwabRawError("unexpected subject or sender");
-        // Only trust Gmail's top Authentication-Results, never authentication claims inside the body.
-        var auth = message.Headers.FirstOrDefault(h => h.Id == HeaderId.AuthenticationResults)?.Value ?? "";
-        var domain = sender.Split('@').Last();
-        if (!auth.TrimStart().StartsWith("mx.google.com;", StringComparison.OrdinalIgnoreCase)
-            || !Regex.IsMatch(auth, @"\bdkim=pass\b", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(auth, @"\bdmarc=pass\b[^;]*\bheader\.from=" + Regex.Escape(domain) + @"(?=\s|;|$)", RegexOptions.IgnoreCase))
-            throw SchwabRawError("Gmail DKIM/DMARC authentication failed or missing");
-        var parts = message.Attachments.ToList();
-        if (parts.Count != 1 || parts[0] is not MimePart part || part.FileName != "schwab_raw.json"
-            || part.Content.Stream.Length > 4 * 1024 * 1024)
-            throw SchwabRawError("expected one bounded schwab_raw.json attachment");
-        using var output = new MemoryStream();
-        part.Content.DecodeTo(output);
-        if (output.Length > 2 * 1024 * 1024) throw SchwabRawError("JSON attachment exceeds size limit");
-        try { return ParseSchwabRawJson(new UTF8Encoding(false, true).GetString(output.ToArray())); }
+        // If there are too many transactions, the financial plugin can generate
+        // additional CSV files. CSV is not handled yet, so never ignore it silently.
+        var unsupportedCount = files.Count(file =>
+            !file.Name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+            || !String.Equals(file.MimeType, "application/json", StringComparison.OrdinalIgnoreCase));
+        if (unsupportedCount != 0)
+            throw SchwabRawError($"Google Drive report folder contains unsupported non-JSON files; count={unsupportedCount}");
+        return files.Where(file => SchwabRawFileNameRegex.IsMatch(file.Name)).ToList();
+    }
+
+    private static DateTime GetSchwabDriveFileTime(ReportFile file)
+    {
+        return file.ModifiedTime?.LocalDateTime
+            ?? throw SchwabRawError("Google Drive report file is missing modified time");
+    }
+
+    internal static List<SchwabRawReport> ParseSchwabRawContent(byte[] content)
+    {
+        if (content.Length > SchwabRawMaximumBytes) throw SchwabRawError("JSON file exceeds size limit");
+        string json;
+        try { json = new UTF8Encoding(false, true).GetString(content); }
+        catch (DecoderFallbackException) { throw SchwabRawError("JSON file is not valid UTF-8"); }
+        if (json.Length != 0 && json[0] == '\uFEFF') json = json[1..];
+        try { return ParseSchwabRawJson(json); }
         catch (MailParseException) { throw; }
-        catch (Exception) { throw SchwabRawError("invalid JSON attachment"); }
+        catch (JsonException e)
+        {
+            throw SchwabRawError($"invalid JSON syntax at line {e.LineNumber}, byte {e.BytePositionInLine}");
+        }
+        catch (KeyNotFoundException) { throw SchwabRawError("required JSON property is missing"); }
+        catch (InvalidOperationException) { throw SchwabRawError("JSON property has an invalid type"); }
+        catch (Exception e) { throw SchwabRawError($"JSON parser failed ({e.GetType().Name}); private details suppressed"); }
     }
 
     internal static List<SchwabRawReport> ParseSchwabRawJson(string json)
     {
-        if (Encoding.UTF8.GetByteCount(json) > 2 * 1024 * 1024) throw SchwabRawError("JSON attachment exceeds size limit");
+        if (Encoding.UTF8.GetByteCount(json) > SchwabRawMaximumBytes) throw SchwabRawError("JSON file exceeds size limit");
         using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 40 });
         var root = document.RootElement;
         CheckUniqueProperties(root);
@@ -193,7 +216,11 @@ partial class MailUtil
         var cursors = new HashSet<string>(StringComparer.Ordinal);
         for (var index = 0; index < pages.Count; index++)
         {
-            var results = pages[index].GetProperty("results").EnumerateArray().ToList();
+            if (pages[index].ValueKind != JsonValueKind.Object
+                || !pages[index].TryGetProperty("results", out var resultsElement)
+                || resultsElement.ValueKind != JsonValueKind.Array)
+                throw SchwabRawError($"missing or invalid page results: {name}[{index}]");
+            var results = resultsElement.EnumerateArray().ToList();
             if (results.Count != 1 || RawText(results[0], "query_type") != queryType || results[0].GetProperty("is_error").GetBoolean())
                 throw SchwabRawError("failed or unexpected query result: " + name);
             var result = results[0].GetProperty("result");
@@ -213,8 +240,9 @@ partial class MailUtil
         return rows;
     }
 
-    internal void ImportSchwabRawReports(List<SchwabRawReport> reports, DateTime mailTime)
+    internal void ImportSchwabRawReports(List<SchwabRawReport> reports, DateTime sourceTime)
     {
+        var database = this.database ?? throw SchwabRawError("database is unavailable");
         if (reports.Count == 0 || reports.Select(r => r.AccountTail).Distinct().Count() != reports.Count)
             throw SchwabRawError("empty or duplicate account batch");
         var imports = database.GetStatementImports(SchwabRawProvider).Where(i => i.statementKey != "").ToList();
@@ -237,7 +265,7 @@ partial class MailUtil
             var beginning = database.GetCurrentAccountHoldings(account);
             if (prior.Count == 0 && (database.HasAccountHistory(account) || beginning.Any(h => h.totalPrice.v != 0 || h.holdingType != HoldingType.Cash && h.quantity != 0)))
                 throw SchwabRawError("first raw import requires a clean account or an explicit migration");
-            pending.Add(BuildSchwabRawImport(report, prior, account, beginning, mailTime, database.GetKnownEquityHoldingType));
+            pending.Add(BuildSchwabRawImport(report, prior, account, beginning, sourceTime, database.GetKnownEquityHoldingType));
         }
         if (pending.Count == 0) return;
         database.SaveStatementRecordsAndHoldingsOnce(pending);
@@ -245,7 +273,7 @@ partial class MailUtil
     }
 
     internal static StatementRecordHoldingImport BuildSchwabRawImport(SchwabRawReport report, List<SchwabRawReport> history,
-        Account account, List<Holding> beginning, DateTime mailTime, Func<string, HoldingType> resolveEquity)
+        Account account, List<Holding> beginning, DateTime sourceTime, Func<string, HoldingType> resolveEquity)
     {
         if (account.relativeBalance || account.isCredit || account.usage != AccountUsage.Investment || account._primaryAccount_Id.HasValue)
             throw SchwabRawError("a primary absolute-balance investment account is required");
@@ -299,7 +327,7 @@ partial class MailUtil
                     || (tx.Type == "buy" ? tx.Quantity <= 0 || tx.Amount <= 0 : tx.Quantity >= 0 || tx.Amount >= 0))
                     throw SchwabRawError("invalid signed security trade");
                 var principal = Decimal.Round(tx.Quantity * tx.Price / (holding.holdingType == HoldingType.UST ? 100m : 1m), 2, MidpointRounding.AwayFromZero);
-                // User-authorized exception ONLY for Schwab raw-mail UST trades: the signed
+                // User-authorized exception ONLY for Schwab raw-export UST trades: the signed
                 // settlement minus clean principal and explicit fees is settled accrued interest.
                 // Do not generalize this to other products, providers, or balance reconciliation.
                 var settledAccruedInterest = 0m;
@@ -358,7 +386,7 @@ partial class MailUtil
         }
         var beginningValue = beginning.Sum(h => h.totalPrice.v);
         RawEqual(beginningValue + records.Sum(r => r.v), report.Total, "opening value plus records");
-        return new(SchwabRawProvider, mailTime, SchwabRawPrefix + account.Id + "/" + RawHash(JsonSerializer.Serialize(report)),
+        return new(SchwabRawProvider, sourceTime, SchwabRawPrefix + account.Id + "/" + RawHash(JsonSerializer.Serialize(report)),
             account, records, ending, [new(account, new(report.Total, CurrencyType.USD))],
             [new(account, new(beginningValue, CurrencyType.USD))], beginning, recordDate: report.AsOf.Date,
             sourceDataJson: JsonSerializer.Serialize(report));
