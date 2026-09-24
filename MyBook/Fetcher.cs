@@ -157,7 +157,6 @@ namespace MyBook
                 if (plaid is not null)
                 {
                     await RunImportTaskAsync("Plaid Schwab", () => true, () => plaid.FetchSchwabAsync()).ConfigureAwait(false);
-                    await RunImportTaskAsync("Plaid Wise", () => true, () => plaid.FetchWiseAsync()).ConfigureAwait(false);
                 }
                 if (graphQL is not null)
                     await RunImportTaskAsync(

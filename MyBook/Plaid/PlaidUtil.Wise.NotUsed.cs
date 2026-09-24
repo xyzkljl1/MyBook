@@ -1,3 +1,4 @@
+// 无法自动化
 using System.Globalization;
 using System.Text.Json;
 using Newtonsoft.Json.Linq;
@@ -25,24 +26,19 @@ partial class PlaidUtil
             var latest = db.GetLatestStatementImport(WisePlaidProvider);
             var previous = latest is null ? null : JsonSerializer.Deserialize<WiseSyncState>(latest.sourceDataJson
                 ?? throw WiseError("stored sync metadata missing")) ?? throw WiseError("invalid stored sync metadata");
-            stage = "local initial statement";
-            DateTimeOffset cutoff;
-            List<AccountBalance>? initialBalances = null;
+            stage = "initialization validation";
+            var beginning = db.GetCurrentAccountHoldings(account);
+            var cutoff = previous?.Cutoff ?? DateTimeOffset.MinValue;
             if (previous is null)
             {
-                var files = new FileUtil(config, db);
-                await files.ImportWiseInitialReportsAsync().ConfigureAwait(false);
-                (cutoff, initialBalances) = files.GetWisePlaidBaseline();
+                if (db.HasAccountHistory(account) || beginning.Any(h => h.holdingType != HoldingType.Cash || h.totalPrice.v != 0))
+                    throw WiseError("existing account data requires explicit migration before initialization");
             }
             else
             {
                 if (previous.ItemId != item.itemId || previous.LocalAccountId != account.Id || String.IsNullOrEmpty(previous.Cursor))
                     throw WiseError("stored Item/account identity or cursor changed; explicit migration required");
-                cutoff = previous.Cutoff;
             }
-            var beginning = db.GetCurrentAccountHoldings(account);
-            if (initialBalances is not null)
-                VerifyWiseBalances(beginning, initialBalances.ToDictionary(b => b.t, b => b.v), "initial XML versus database");
             stage = "transaction sync";
             var data = await GetTransactionUpdatesAsync(item, previous?.Cursor, deadline.Token).ConfigureAwait(false);
             stage = "financial reconciliation";
@@ -118,16 +114,16 @@ partial class PlaidUtil
                 throw WiseError("a posted transaction was revised or removed; manual reconciliation required");
         var records = new List<Record>();
         var opening = WiseHoldingBalances(beginning);
+        if (previous is null && (opening.Values.Any(value => value != 0) || cutoff != DateTimeOffset.MinValue))
+            throw WiseError("initial sync requires an empty account and no local statement baseline");
         foreach (var tx in current.Values.Where(t => !t.Pending).OrderBy(t => t.Time).ThenBy(t => t.Id, StringComparer.Ordinal))
         {
             if (oldTransactions.TryGetValue(tx.Id, out var old) && !old.Pending) continue;
             if (!tx.HasTime && tx.Time.UtcDateTime.Date == cutoff.UtcDateTime.Date)
-                throw WiseError("date-only transaction overlaps the XML cutover; exact timestamp required");
+                throw WiseError("date-only transaction overlaps the stored cutover; exact timestamp required");
             if (tx.Time < cutoff)
             {
-                if (previous is not null) throw WiseError("newly posted transaction predates the XML cutover");
-                if (!opening.ContainsKey(tx.Currency)) throw WiseError("a pre-cutover currency is missing from initial XML");
-                continue;
+                throw WiseError("newly posted transaction predates the stored cutover");
             }
             var reason = WiseReason(tx);
             records.Add(new Record
@@ -139,6 +135,15 @@ partial class PlaidUtil
                 // Plaid does not provide the principal/fee split for these transfers. Never auto-match the gross amount.
                 isInternal = false
             });
+        }
+        if (previous is null)
+        {
+            // Only the first Plaid import may infer an opening balance. The shared
+            // database writer creates initialization Records in the same transaction.
+            opening = balances.ToDictionary(a => a.Currency,
+                a => a.Balance - records.Where(r => r.t == a.Currency).Sum(r => r.v));
+            beginning = opening.Select(pair => new Holding(pair.Key.ToString(), HoldingType.Cash)
+                { Account = account, currentPrice = new(pair.Value, pair.Key) }).ToList();
         }
         foreach (var currency in opening.Keys.Union(balances.Select(a => a.Currency)))
         {
@@ -156,7 +161,7 @@ partial class PlaidUtil
         return new(WisePlaidProvider, observedAt.Date, "PlaidWise/" + RawHash(source), account, records, ending,
             balances.Select(a => new AccountBalance(account, new(a.Balance, a.Currency))).ToList(),
             balances.Select(a => new AccountBalance(account, new(opening.GetValueOrDefault(a.Currency), a.Currency))).ToList(),
-            beginning, sourceDataJson: source, forceValidateBeginningBalances: true);
+            beginning, sourceDataJson: source, forceValidateBeginningBalances: previous is not null);
     }
 
     private static List<WiseCurrencyAccount> ParseWiseAccounts(JObject data)

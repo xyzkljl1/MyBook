@@ -1,3 +1,4 @@
+// 无法自动化
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -39,24 +40,6 @@ namespace MyBook
         {
             ImportWiseInitialReportsIfNeeded();
             return Task.CompletedTask;
-        }
-
-        internal (DateTimeOffset Cutoff, List<AccountBalance> Balances) GetWisePlaidBaseline()
-        {
-            var imported = database.GetStatementImports(WiseProvider)
-                .Where(i => !String.IsNullOrEmpty(i.statementKey)).OrderBy(i => i.time).LastOrDefault()
-                ?? throw new MailParseException("Wise Plaid requires imported initial XML statements.");
-            var statements = LoadWiseInitialStatements();
-            var latest = statements.LastOrDefault();
-            if (latest is null || latest.StatementKey != imported.statementKey)
-                throw new MailParseException("Wise initial XML does not match the latest imported statement.");
-            var cutoffs = FindWiseInitialStatementXmlFiles().Select(file => XDocument.Load(file))
-                .SelectMany(doc => doc.Descendants(WiseCamtNamespace + "FrToDt"))
-                .Select(period => ParseWiseXmlDateTime(RequireText(period, WiseCamtNamespace + "ToDtTm", "Wise period")))
-                .Where(time => GetWiseStatementEndDate(time) == latest.StatementEndDate).Distinct().ToList();
-            if (cutoffs.Count != 1)
-                throw new MailParseException("Wise initial XML has inconsistent period boundaries.");
-            return (cutoffs[0], latest.EndingBalances);
         }
 
         private bool ImportWiseInitialReportsIfNeeded()
