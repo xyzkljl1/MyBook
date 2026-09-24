@@ -33,6 +33,7 @@ namespace MyBook
         [
             new("fk_Accounts_primaryAccount", "Accounts", "_primaryAccount_Id", "Accounts", "Id"),
             new("fk_AccountInternalIds_account", "AccountInternalIds", "_account_Id", "Accounts", "Id"),
+            new("fk_PlaidItems_account", "PlaidItems", "_account_Id", "Accounts", "Id"),
             new("fk_Holdings_account", "Holdings", "_account_Id", "Accounts", "Id"),
             new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
             new("fk_Records_holding", "Records", "_holding_Id", "Holdings", "Id"),
@@ -306,6 +307,7 @@ namespace MyBook
         public List<PlaidItem> GetPlaidItems(PlaidEnvironment environment)
         {
             return db.Queryable<PlaidItem>()
+                .Includes(item => item.Account)
                 .Where(item => item.environment == environment)
                 .OrderBy(item => item.Id)
                 .ToList();
@@ -4805,10 +4807,10 @@ namespace MyBook
             db.Queryable<AccountInternalId>().OrderBy(item => item.Id).ToList()
                 .Select(item => (item.Id, item.cardNo, item.desc, item.currencyType, item._account_Id)).ToList();
 
-        private List<(int, PlaidEnvironment, string, string, string?, string?, DateTime, DateTime)> ReadPlaidItemPreservationItems() =>
+        private List<(int, PlaidEnvironment, string, string, string?, string?, DateTime, DateTime, int?)> ReadPlaidItemPreservationItems() =>
             db.Queryable<PlaidItem>().OrderBy(item => item.Id).ToList()
                 .Select(item => (item.Id, item.environment, item.itemId, item.accessToken,
-                    item.institutionId, item.institutionName, item.createdAtUtc, item.updateTimeUtc)).ToList();
+                    item.institutionId, item.institutionName, item.createdAtUtc, item.updateTimeUtc, item._account_Id)).ToList();
 
         private List<FinancePreservationItem> ReadFinancePreservationItems()
         {

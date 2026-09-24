@@ -12,9 +12,6 @@ partial class PlaidUtil
     private const string SchwabRawPrefix = "PlaidSchwab/";
     private const StatementImportProvider SchwabRawProvider = StatementImportProvider.PlaidSchwab;
     private static readonly SemaphoreSlim schwabLock = new(1, 1);
-    public Task<PlaidItem?> FindSchwabItemAsync(CancellationToken cancellationToken = default) =>
-        FindItemByInstitutionAsync(SchwabInstitutionId, cancellationToken);
-
     public async Task FetchSchwabAsync(CancellationToken cancellationToken = default)
     {
         if (!await schwabLock.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
@@ -23,9 +20,11 @@ partial class PlaidUtil
         var stage = "Item selection";
         try
         {
-            var item = await FindSchwabItemAsync(deadline.Token).ConfigureAwait(false)
+            var item = await FindItemByInstitutionAsync(SchwabInstitutionId, deadline.Token).ConfigureAwait(false)
                 ?? throw SchwabRawError("no Schwab Item linked in the active environment");
             var db = database ?? throw SchwabRawError("database unavailable");
+            stage = "account binding";
+            var account = GetLinkedAccount(item, "SCHWAB");
             var checkpoint = db.GetStatementImportCheckpointTime(SchwabRawProvider)
                 ?? throw SchwabRawError("missing fixed import checkpoint");
             var history = db.GetStatementImports(SchwabRawProvider).Where(i => i.statementKey != "").OrderBy(i => i.Id)
@@ -37,36 +36,29 @@ partial class PlaidUtil
             var data = await GetInvestmentsAsync(item, since, queryEnd, deadline.Token).ConfigureAwait(false);
             stage = "financial reconciliation";
             var reports = ParseSchwabInvestments(data, item.itemId, since, queryEnd);
-            var imports = new List<StatementRecordHoldingImport>();
-            var accounts = new HashSet<int>();
-            foreach (var report in reports)
+            if (reports.Count != 1)
+                throw SchwabRawError("a linked Item must return exactly one investment account; no accounts were saved");
+            var report = reports[0];
+            var prior = history.Where(r => r.AccountId == report.AccountId).ToList();
+            var beginning = db.GetCurrentAccountHoldings(account);
+            if (prior.Count == 0 && (db.HasAccountHistory(account) || beginning.Any(h => h.totalPrice.v != 0 || h.quantity != 0)))
+                throw SchwabRawError("existing account data requires explicit migration");
+            HoldingType Resolve(string symbol)
             {
-                var account = db.FindAccountByInternalCardNo(report.AccountTail, "SCHWAB")
-                    ?? throw SchwabRawError("explicit account identifier is not registered");
-                if (!accounts.Add(account.Id)) throw SchwabRawError("multiple source accounts resolve to one local account");
-                var prior = history.Where(r => r.AccountId == report.AccountId).ToList();
-                var beginning = db.GetCurrentAccountHoldings(account);
-                if (prior.Count == 0 && (db.HasAccountHistory(account) || beginning.Any(h => h.totalPrice.v != 0 || h.quantity != 0)))
-                    throw SchwabRawError("existing account data requires explicit migration");
-                HoldingType Resolve(string symbol)
+                var codes = prior.Append(report).SelectMany(r => r.Markets).Where(m => m.Key == symbol).Select(m => m.Value).Distinct().ToList();
+                return codes.Count == 1 ? codes[0] switch
                 {
-                    var codes = prior.Append(report).SelectMany(r => r.Markets).Where(m => m.Key == symbol).Select(m => m.Value).Distinct().ToList();
-                    return codes.Count == 1 ? codes[0] switch
-                    {
-                        "XNAS" => HoldingType.NASDAQ, "ARCX" => HoldingType.ARCA,
-                        _ => throw SchwabRawError("unsupported equity market")
-                    } : throw SchwabRawError("missing or inconsistent equity market");
-                }
-                var import = BuildSchwabRawImport(report, prior, account, beginning, report.AsOf.Date, Resolve);
-                // A successful empty day must also advance the query boundary.
-                if (prior.Count == 0 || import.Records.Count != 0 || report.End > prior[^1].End) imports.Add(import);
+                    "XNAS" => HoldingType.NASDAQ, "ARCX" => HoldingType.ARCA,
+                    _ => throw SchwabRawError("unsupported equity market")
+                } : throw SchwabRawError("missing or inconsistent equity market");
             }
-            if (db.GetAccountsByNamePrefix("SCHWAB_").Any(account => !accounts.Contains(account.Id)))
-                throw SchwabRawError("response is missing a configured Schwab account; no accounts were saved");
+            var import = BuildSchwabRawImport(report, prior, account, beginning, report.AsOf.Date, Resolve);
+            // A successful empty day must also advance the query boundary.
+            var shouldSave = prior.Count == 0 || import.Records.Count != 0 || report.End > prior[^1].End;
             deadline.Token.ThrowIfCancellationRequested();
             stage = "atomic database write";
-            db.SaveStatementRecordsAndHoldingsOnce(imports);
-            Console.WriteLine($"Plaid Schwab: accounts={reports.Count}, saved={imports.Count}, records={imports.Sum(i => i.Records.Count)}");
+            db.SaveStatementRecordsAndHoldingsOnce(shouldSave ? [import] : []);
+            Console.WriteLine($"Plaid Schwab: accounts=1, saved={(shouldSave ? 1 : 0)}, records={(shouldSave ? import.Records.Count : 0)}");
         }
         catch (MailParseException) { throw; }
         catch (PlaidRequestException e) { throw SchwabRawError(stage + ": " + e.Message); }

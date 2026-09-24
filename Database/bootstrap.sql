@@ -53,6 +53,7 @@ CREATE TABLE `firsttradesessions` (
 
 CREATE TABLE `plaiditems` (
   `Id` int NOT NULL AUTO_INCREMENT,
+  `_account_Id` int DEFAULT NULL,
   `environment` enum('Production','Sandbox') NOT NULL DEFAULT 'Production',
   `itemId` varchar(255) NOT NULL DEFAULT '',
   `accessToken` varchar(4096) NOT NULL DEFAULT '',
@@ -61,7 +62,9 @@ CREATE TABLE `plaiditems` (
   `createdAtUtc` datetime(6) NOT NULL,
   `updateTimeUtc` datetime(6) NOT NULL,
   PRIMARY KEY (`Id`),
-  UNIQUE KEY `unique_PlaidItems_environment_item_id` (`environment`,`itemId`)
+  UNIQUE KEY `unique_PlaidItems_environment_item_id` (`environment`,`itemId`),
+  KEY `fk_PlaidItems_account` (`_account_Id`),
+  CONSTRAINT `fk_PlaidItems_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `finance` (

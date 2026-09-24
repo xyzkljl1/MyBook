@@ -77,6 +77,8 @@ dotnet MyBook.dll --plaid-link --country US --product investments
 
 Production is the default. Sandbox requires changing the compile-time environment switch and using `plaid_sandbox_secret`. Authorizations are stored in the local database. If saving a new authorization fails, a plaintext `plaid-token-recovery-*.local.json` file is created beside the application for manual recovery; delete it after use.
 
+Before importing Schwab data, bind the Plaid connection to the corresponding local account. Each connection supports only one investment account. Missing or invalid bindings stop the import.
+
 ### Wise
 
 Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wise; the old importer is no longer compiled. The retained Plaid importer does not use Plaid's inferred personal finance categories; descriptions remain generic payments or receipts pending further detail. Switching existing Wise data requires cleanup before the first API import. Some details, including conversion fees, are unavailable through the API and remain marked as pending.

@@ -103,6 +103,18 @@ namespace MyBook
         }
 
         private sealed class PlaidRequestException(string message) : Exception(message);
+
+        internal static Account GetLinkedAccount(PlaidItem item, string accountType)
+        {
+            var account = item.Account;
+            if (!item._account_Id.HasValue || account is null || account.Id != item._account_Id.Value)
+                throw new PlaidRequestException("Plaid Item account foreign key is missing or invalid.");
+            if (!String.Equals(account.name, accountType, StringComparison.OrdinalIgnoreCase)
+                && !account.name.StartsWith(accountType + "_", StringComparison.OrdinalIgnoreCase))
+                throw new PlaidRequestException("Plaid Item is linked to an unexpected account type.");
+            return account;
+        }
+
         // Shared transport for provider modules. Never include response bodies or tokens in errors.
         private async Task<JObject> PostAsync(string path, PlaidItem item, JObject? arguments, CancellationToken cancellationToken)
         {

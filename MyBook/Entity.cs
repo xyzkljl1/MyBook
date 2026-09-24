@@ -309,6 +309,12 @@ namespace MyBook
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
 
+        [Navigate(NavigateType.ManyToOne, nameof(_account_Id), nameof(MyBook.Account.Id))]
+        public Account? Account { get; set; }
+
+        [SugarColumn(IsNullable = true)]
+        public int? _account_Id { get; set; }
+
         [SugarColumn(DefaultValue = "Production", ColumnDataType = MySqlEnumColumnTypes.PlaidEnvironment, SqlParameterDbType = typeof(EnumToStringConvert))]
         public PlaidEnvironment environment { get; set; } = PlaidEnvironment.Production;
 

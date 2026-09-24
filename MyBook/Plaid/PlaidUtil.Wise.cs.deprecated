@@ -22,7 +22,8 @@ partial class PlaidUtil
             var db = database ?? throw WiseError("database unavailable");
             var item = await FindItemByInstitutionAsync(WiseInstitutionId, deadline.Token).ConfigureAwait(false)
                 ?? throw WiseError("no Wise Item linked in the active environment");
-            var account = db.GetAccountByName("WISE");
+            stage = "account binding";
+            var account = GetLinkedAccount(item, "WISE");
             var latest = db.GetLatestStatementImport(WisePlaidProvider);
             var previous = latest is null ? null : JsonSerializer.Deserialize<WiseSyncState>(latest.sourceDataJson
                 ?? throw WiseError("stored sync metadata missing")) ?? throw WiseError("invalid stored sync metadata");
