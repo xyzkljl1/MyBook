@@ -1,0 +1,7 @@
+// 废弃：过于不稳定、放弃。
+namespace MyBook
+{
+    partial class WebhookUtil
+    {
+    }
+}

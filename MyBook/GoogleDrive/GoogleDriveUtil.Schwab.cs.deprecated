@@ -1,3 +1,4 @@
+// 废弃原因：改为使用直连 Plaid，不再依赖模型序列化，更稳定。
 // Deprecated reference implementation. Not compiled or scheduled.
 // Source: ChatGPT web financial plugin -> Plaid-linked Schwab account -> ChatGPT
 // scheduled task -> Google Drive Reports/SchwabDaily files containing the raw responses.

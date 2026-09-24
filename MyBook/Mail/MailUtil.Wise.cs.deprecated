@@ -1,3 +1,4 @@
+// 废弃原因：改为使用 Plaid 方案。
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -1002,4 +1003,3 @@ namespace MyBook
         }
     }
 }
-

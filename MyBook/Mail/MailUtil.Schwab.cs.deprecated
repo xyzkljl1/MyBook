@@ -1,3 +1,4 @@
+// 废弃原因：因定时任务发送邮件容易被安全审查拦截，改为用 Drive。
 // Deprecated reference implementation. Not compiled or scheduled.
 using System.Globalization;
 using System.IO;
