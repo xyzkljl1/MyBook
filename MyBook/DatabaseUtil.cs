@@ -2298,6 +2298,34 @@ namespace MyBook
             return Currency.RoundMoney(total - baseAmount * (dayCount - 1));
         }
 
+        private static bool IsAcatsCancellation(Record record) => IsAcatsTransfer(record)
+            && record.Source[(record.Source.LastIndexOf(',') + 1)..]
+                .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Contains("Ca", StringComparer.Ordinal);
+
+        internal static Record FindAcatsCancellationOriginal(Record cancellation, IEnumerable<Record> records)
+        {
+            if (!IsAcatsCancellation(cancellation) || !cancellation.isInternal || cancellation.isRefundMatched
+                || cancellation.v == 0 || cancellation.HoldingQuantity == 0
+                || cancellation._holding_Id <= 0 || String.IsNullOrWhiteSpace(cancellation.DestAccount))
+                throw new InvalidOperationException("Invalid ACATS cancellation record.");
+            var candidates = records.Where(record => record.Id != cancellation.Id
+                && IsAcatsTransfer(record) && !IsAcatsCancellation(record)
+                && record._account_Id == cancellation._account_Id
+                && record._holding_Id == cancellation._holding_Id
+                && record.date == cancellation.date && record.t == cancellation.t
+                && record.v == -cancellation.v && record.HoldingQuantity == -cancellation.HoldingQuantity
+                && String.Equals(record.DestAccount.Trim(), cancellation.DestAccount.Trim(), StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (candidates.Count != 1)
+                throw new InvalidOperationException("ACATS cancellation requires exactly one original transfer.");
+            var original = candidates[0];
+            if (!original.isInternal || original.isRefundMatched
+                || original.matchedRecordId.HasValue || cancellation.matchedRecordId.HasValue)
+                throw new InvalidOperationException("ACATS cancellation conflicts with an existing record match.");
+            return original;
+        }
+
         private void MatchInternalTransfersAroundStatement(int statementImportId)
         {
             var importedRecords = GetRecordsByStatementImport(statementImportId);
@@ -2332,6 +2360,17 @@ namespace MyBook
                     && record.matchedRecordId == null
                     && !record.isRefundMatched)
                 .ToList();
+            foreach (var cancellation in records.Where(IsAcatsCancellation))
+            {
+                // Include matched originals to detect conflicts before ordinary transfer matching.
+                var candidates = db.Queryable<Record>()
+                    .Where(record => record._account_Id == cancellation._account_Id
+                        && record._holding_Id == cancellation._holding_Id && record.date == cancellation.date)
+                    .ToList();
+                var original = FindAcatsCancellationOriginal(cancellation, candidates);
+                MatchInternalTransferPair(records.FirstOrDefault(record => record.Id == original.Id) ?? original,
+                    cancellation, "ACATSCancellation");
+            }
             if (records.Count < 2)
                 return;
 
