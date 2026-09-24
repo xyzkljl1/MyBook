@@ -125,7 +125,7 @@ partial class PlaidUtil
             {
                 throw WiseError("newly posted transaction predates the stored cutover");
             }
-            var reason = WiseReason(tx);
+            var reason = tx.Amount < 0 ? "付款（待拆分）" : "收款（待拆分）";
             records.Add(new Record
             {
                 Account = account, date = tx.Time.LocalDateTime, postingDate = tx.Time.LocalDateTime.Date,
@@ -195,21 +195,9 @@ partial class PlaidUtil
         if (time.UtcDateTime > DateTime.UtcNow.AddDays(1)) throw WiseError("future transaction date");
         var description = OptionalText(row, "original_description");
         if (description == "") description = Text(row, "name");
-        var category = row["personal_finance_category"] as JObject;
         return new(Text(row, "transaction_id"), accountId, currency, -WiseMoney(row, "amount"), time, stamp != "",
-            row["pending"]!.Value<bool>(), description, category is null ? "" : OptionalText(category, "primary"),
-            category is null ? "" : OptionalText(category, "detailed"));
+            row["pending"]!.Value<bool>(), description);
     }
-
-    private static string WiseReason(WiseTransaction transaction) => transaction.Category switch
-    {
-        "BANK_FEES" => "手续费",
-        "INCOME" when transaction.Detail == "INCOME_INTEREST_EARNED" => "利息",
-        "TRANSFER_IN" or "TRANSFER_OUT" => "转账（待拆分）",
-        "INCOME" => "收入（待拆分）",
-        // Wise conversions can have spending categories; a category alone cannot establish a fee-free purchase or refund.
-        _ => transaction.Amount < 0 ? "付款（待拆分）" : "收款（待拆分）"
-    };
 
     private static CurrencyType WiseCurrency(JToken row)
     {
@@ -247,7 +235,7 @@ partial class PlaidUtil
     private static MailParseException WiseError(string message) => new("Plaid Wise: " + message);
     internal sealed record WiseCurrencyAccount(string Id, CurrencyType Currency, decimal Balance);
     internal sealed record WiseTransaction(string Id, string AccountId, CurrencyType Currency, decimal Amount,
-        DateTimeOffset Time, bool HasTime, bool Pending, string Description, string Category, string Detail);
+        DateTimeOffset Time, bool HasTime, bool Pending, string Description);
     internal sealed record WiseSyncState(string ItemId, int LocalAccountId, DateTimeOffset Cutoff, string Cursor,
         List<WiseCurrencyAccount> Accounts, List<WiseTransaction> Transactions);
 }

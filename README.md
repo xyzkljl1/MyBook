@@ -79,7 +79,7 @@ Production is the default. Sandbox requires changing the compile-time environmen
 
 ### Wise
 
-Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wise; the old importer is no longer compiled. Switching existing Wise data requires cleanup before the first API import. Some details, including conversion fees, are unavailable through the API and remain marked as pending.
+Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wise; the old importer is no longer compiled. The retained Plaid importer does not use Plaid's inferred personal finance categories; descriptions remain generic payments or receipts pending further detail. Switching existing Wise data requires cleanup before the first API import. Some details, including conversion fees, are unavailable through the API and remain marked as pending.
 
 ### FirstTrade
 
