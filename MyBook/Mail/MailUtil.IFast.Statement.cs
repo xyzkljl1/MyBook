@@ -276,7 +276,7 @@ partial class MailUtil
         .Where(word => Regex.IsMatch(word.Text, @"^(?:\d+|\d{1,3}(?:,\d{3})+)\.\d{2}$")).ToList();
     private static decimal ParseIFastPdfAmount(string text) => Decimal.Parse(text, NumberStyles.Number, CultureInfo.InvariantCulture);
 
-    private static void CompleteIFastPdfRecord(Record record, string description)
+    private void CompleteIFastPdfRecord(Record record, string description)
     {
         var reference = Regex.Match(description, @"\b\d{16}\b").Value;
         var interest = Regex.Match(description, @"^Credit interest for ([A-Za-z]{3} \d{4})\b");
@@ -307,5 +307,6 @@ partial class MailUtil
         else throw new MailParseException("Unsupported IFast statement transaction description.");
         record.DestAccount = description.Length > 200 ? description[..200] : description;
         record.Source = $"code={code}; {record.Source}";
+        ResolveIFastTransferAccount(record, description);
     }
 }

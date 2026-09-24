@@ -151,7 +151,28 @@ partial class MailUtil
             Source = $"code={code}; IFast mail", isInternal = isInternal
         };
         record.CopyFrom(amount);
+        ResolveIFastTransferAccount(record, counterparty);
         return record;
+    }
+
+    private void ResolveIFastTransferAccount(Record record, string counterparty)
+    {
+        if (record.Reason is not ("转入" or "转出")) return;
+        // Payment references and payer names are not account identity evidence.
+        var ibans = Regex.Matches(counterparty, @"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+            .Select(match => match.Value).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (ibans.Count > 1)
+            throw new MailParseException("Ambiguous IFast counterparty IBAN.");
+        if (ibans.Count == 0) return;
+        var account = database.FindAccountByInternalCardNo(ibans[0]);
+        if (account is null) return;
+        account = database.GetPostingAccount(account);
+        if (account.Id == record._account_Id)
+            throw new MailParseException("IFast transfer counterparty resolves to the source account.");
+        record.Source += $"; counterparty={counterparty}";
+        record.DestAccount = account.name;
+        record.isInternal = true;
     }
 
     private Account GetIFastAccount()
