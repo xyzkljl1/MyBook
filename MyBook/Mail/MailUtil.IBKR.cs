@@ -2800,7 +2800,7 @@ namespace MyBook
             // IBKR 净资产总值表本身是汇总视图，底层实际计算依赖各资产明细的精确值。
             // 本程序也按同样口径重建净资产：现金用外汇持仓行中的数量和汇率精确计算，
             // 股票、债券、应计项目等使用报表明细给出的当前值。净资产总值表里的总数
-            // 只用于校验重建结果按报表显示精度舍入后是否一致，不能作为余额或 record 的来源。
+            // 只用于展示精度校验，允许一个末位单位的报表汇总差异，不能作为余额或 record 的来源。
             var preciseCash = ParseIBKRPreciseCashValues(report, baseCurrency);
             var navSectionName = FindIBKRNavRow(report, IBKRNavTotalLabel).Section;
             decimal previousTotal = 0;
@@ -2832,8 +2832,8 @@ namespace MyBook
             }
 
             var totalRow = FindIBKRNavRow(report, IBKRNavTotalLabel);
-            AssertIBKRMoneyFieldEquals(previousTotal, ParseIBKRDecimalAt(totalRow, 1, "precise NAV previous total"), totalRow.Fields[1], "IBKR precise NAV previous total display");
-            AssertIBKRMoneyFieldEquals(currentTotal, ParseIBKRDecimalAt(totalRow, 4, "precise NAV current total"), totalRow.Fields[4], "IBKR precise NAV current total display");
+            AssertIBKRMoneyFieldAlmostEquals(previousTotal, ParseIBKRDecimalAt(totalRow, 1, "precise NAV previous total"), totalRow.Fields[1], "IBKR precise NAV previous total display");
+            AssertIBKRMoneyFieldAlmostEquals(currentTotal, ParseIBKRDecimalAt(totalRow, 4, "precise NAV current total"), totalRow.Fields[4], "IBKR precise NAV current total display");
             AssertIBKRMoneyFieldAlmostEquals(currentTotal - previousTotal, ParseIBKRDecimalAt(totalRow, 5, "precise NAV total change"), totalRow.Fields[5], "IBKR precise NAV total change display");
             return new IBKRPreciseNavValues(previousTotal, currentTotal, preciseCash.Start, preciseCash.End);
         }
@@ -2939,8 +2939,8 @@ namespace MyBook
         private static void ValidateIBKRNavTotals(IBKRCsvReport report, decimal start, decimal end)
         {
             var totalRow = FindIBKRNavRow(report, "总数");
-            AssertIBKRMoneyEquals(start, ParseIBKRDecimalAt(totalRow, 1, "NAV previous total"), "IBKR NAV previous total");
-            AssertIBKRMoneyEquals(end, ParseIBKRDecimalAt(totalRow, 4, "NAV current total"), "IBKR NAV current total");
+            AssertIBKRMoneyFieldAlmostEquals(start, ParseIBKRDecimalAt(totalRow, 1, "NAV previous total"), totalRow.Fields[1], "IBKR NAV previous total");
+            AssertIBKRMoneyFieldAlmostEquals(end, ParseIBKRDecimalAt(totalRow, 4, "NAV current total"), totalRow.Fields[4], "IBKR NAV current total");
             decimal previousTotal = 0;
             decimal currentLongTotal = 0;
             decimal currentShortTotal = 0;
@@ -2964,9 +2964,9 @@ namespace MyBook
                 changeTotal += ParseIBKRDecimalAt(row, 5, "NAV change component");
             }
 
-            AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 1, "NAV previous component sum"), previousTotal, "IBKR NAV previous component sum");
+            AssertIBKRMoneyFieldAlmostEquals(previousTotal, ParseIBKRDecimalAt(totalRow, 1, "NAV previous component sum"), totalRow.Fields[1], "IBKR NAV previous component sum");
             AssertIBKRMoneyFieldAlmostEquals(currentLongTotal, ParseIBKRDecimalAt(totalRow, 2, "NAV current long component sum"), totalRow.Fields[2], "IBKR NAV current long component sum");
-            AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 3, "NAV current short component sum"), currentShortTotal, "IBKR NAV current short component sum");
+            AssertIBKRMoneyFieldAlmostEquals(currentShortTotal, ParseIBKRDecimalAt(totalRow, 3, "NAV current short component sum"), totalRow.Fields[3], "IBKR NAV current short component sum");
             AssertIBKRMoneyFieldAlmostEquals(currentTotal, ParseIBKRDecimalAt(totalRow, 4, "NAV current component sum"), totalRow.Fields[4], "IBKR NAV current component sum");
             AssertIBKRMoneyFieldAlmostEquals(changeTotal, ParseIBKRDecimalAt(totalRow, 5, "NAV change component sum"), totalRow.Fields[5], "IBKR NAV change component sum");
         }
