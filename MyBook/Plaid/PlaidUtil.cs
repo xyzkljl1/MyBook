@@ -3,7 +3,6 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Globalization;
 using System.IO;
-using System.Net;
 using System.Net.Http;
 using System.Text;
 
@@ -98,45 +97,6 @@ namespace MyBook
             if (matches.Count > 1)
                 throw new InvalidOperationException("Multiple Plaid Items match this institution in the active environment; explicit resolution is required.");
             return matches.SingleOrDefault();
-        }
-
-        public async Task<List<PlaidInstitution>> SearchInstitutions(
-            string query,
-            IReadOnlyCollection<string> countryCodes,
-            IReadOnlyCollection<string> products,
-            CancellationToken cancellationToken = default)
-        {
-            if (String.IsNullOrWhiteSpace(query))
-                throw new ArgumentException("Plaid institution search query is empty.", nameof(query));
-            if (countryCodes.Count == 0)
-                throw new ArgumentException("Plaid institution search country codes are empty.", nameof(countryCodes));
-            if (products.Count == 0)
-                throw new ArgumentException("Plaid institution search products are empty.", nameof(products));
-
-            var requestBody = JsonConvert.SerializeObject(new
-            {
-                client_id = clientId,
-                secret,
-                query = query.Trim(),
-                products,
-                country_codes = countryCodes
-            });
-
-            using var client = CreateHttpClient();
-            using var content = new StringContent(requestBody, Encoding.UTF8, "application/json");
-            using var response = await client.PostAsync(
-                    $"{apiBaseUrl}/institutions/search",
-                    content,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            var responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            if (response.StatusCode != HttpStatusCode.OK)
-                throw new InvalidOperationException(FormatPlaidError(response, responseText));
-
-            var json = JObject.Parse(responseText);
-            return (json["institutions"] as JArray ?? new JArray())
-                .Select(ParseInstitution)
-                .ToList();
         }
 
         private sealed class PlaidRequestException(string message) : Exception(message);
@@ -264,24 +224,6 @@ namespace MyBook
             return client;
         }
 
-        private static PlaidInstitution ParseInstitution(JToken token)
-        {
-            return new PlaidInstitution(
-                token["institution_id"]?.ToString() ?? "",
-                token["name"]?.ToString() ?? "",
-                ReadStringArray(token["products"]),
-                ReadStringArray(token["country_codes"]),
-                token["oauth"]?.Value<bool>() ?? false,
-                token["url"]?.ToString());
-        }
-
-        private static List<string> ReadStringArray(JToken? token)
-        {
-            return token is JArray array
-                ? array.Select(item => item.ToString()).Where(value => !String.IsNullOrWhiteSpace(value)).ToList()
-                : new List<string>();
-        }
-
         private static string RequiredConfig(IConfigurationRoot config, string key)
         {
             var value = config[key];
@@ -311,12 +253,4 @@ namespace MyBook
             }
         }
     }
-
-    sealed record PlaidInstitution(
-        string InstitutionId,
-        string Name,
-        List<string> Products,
-        List<string> CountryCodes,
-        bool OAuth,
-        string? Url);
 }

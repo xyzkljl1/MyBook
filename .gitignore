@@ -31,6 +31,7 @@
 
 # 本地 OAuth token 与回调内容
 **/schwab-token.local.json
+**/plaid-token-recovery-*.local.json
 **/schwab-callback.local.txt
 **/ifast-interest-rates.local.json*
 **/*.firsttrade.dpapi*

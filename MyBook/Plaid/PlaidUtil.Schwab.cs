@@ -34,10 +34,11 @@ partial class PlaidUtil
                 .Select(i => JsonSerializer.Deserialize<SchwabRawReport>(i.sourceDataJson
                     ?? throw SchwabRawError("stored source metadata missing")) ?? throw SchwabRawError("invalid stored metadata")).ToList();
             var since = history.Select(r => r.End.AddDays(-7)).Append(checkpoint.Date).Max();
+            var queryEnd = DateTime.UtcNow.Date;
             stage = "investment retrieval";
-            var data = await GetInvestmentsAsync(item, since, DateTime.UtcNow.Date, deadline.Token).ConfigureAwait(false);
+            var data = await GetInvestmentsAsync(item, since, queryEnd, deadline.Token).ConfigureAwait(false);
             stage = "financial reconciliation";
-            var reports = ParseSchwabInvestments(data, item.itemId, since, DateTime.UtcNow.Date);
+            var reports = ParseSchwabInvestments(data, item.itemId, since, queryEnd);
             var imports = new List<StatementRecordHoldingImport>();
             var accounts = new HashSet<int>();
             foreach (var report in reports)
@@ -62,6 +63,8 @@ partial class PlaidUtil
                 // A successful empty day must also advance the query boundary.
                 if (prior.Count == 0 || import.Records.Count != 0 || report.End > prior[^1].End) imports.Add(import);
             }
+            if (db.GetAccountsByNamePrefix("SCHWAB_").Any(account => !accounts.Contains(account.Id)))
+                throw SchwabRawError("response is missing a configured Schwab account; no accounts were saved");
             deadline.Token.ThrowIfCancellationRequested();
             stage = "atomic database write";
             db.SaveStatementRecordsAndHoldingsOnce(imports);
@@ -119,9 +122,10 @@ partial class PlaidUtil
                     Number(row, "institution_value"), Date(row, "institution_price_as_of")));
             }
             if (report.Positions.Count == 0) throw SchwabRawError("missing holdings or cash detail");
-            report.AsOf = new DateTimeOffset(DateTime.SpecifyKind(report.Positions.Max(p => p.PriceDate), DateTimeKind.Utc));
+            // Observation/query date, not a bank update timestamp. Quotes retain their own dates.
+            report.AsOf = new DateTimeOffset(DateTime.SpecifyKind(end.Date, DateTimeKind.Utc));
             report.GeneratedAt = report.AsOf;
-            if (report.AsOf.Date > end) throw SchwabRawError("future holdings date");
+            if (report.Positions.Any(p => p.PriceDate > end)) throw SchwabRawError("future holdings date");
             foreach (var row in data.Transactions.Where(t => Text(t, "account_id") == report.AccountId))
             {
                 CheckFields(row, "account_id amount cancel_transaction_id date fees investment_transaction_id iso_currency_code name price quantity security_id subtype transaction_datetime type unofficial_currency_code");
@@ -187,8 +191,7 @@ partial class PlaidUtil
             throw SchwabRawError("a primary absolute-balance investment account is required");
         // Import revision order matters when quotes change more than once on the same date.
         var previous = history.LastOrDefault();
-        if (previous is not null && (report.AsOf < previous.AsOf
-            || report.Start > previous.End || report.End < previous.End
+        if (previous is not null && (report.Start > previous.End || report.End < previous.End
             || report.AccountId != previous.AccountId || report.ItemId != previous.ItemId))
             throw SchwabRawError("report order, overlapping coverage or persistent account identity changed");
         var known = new Dictionary<string, SchwabRawTransaction>(StringComparer.Ordinal);
@@ -210,7 +213,7 @@ partial class PlaidUtil
             || ending.Count(h => h.holdingType == HoldingType.Cash) != 1)
             throw SchwabRawError("ambiguous holding identity or missing USD cash holding");
         RawEqual(ending.Sum(h => h.totalPrice.v), report.Total, "holding details versus account total");
-        if (report.Positions.Any(p => p.PriceDate > report.AsOf.Date)) throw SchwabRawError("holding price is newer than source update time");
+        if (report.Positions.Any(p => p.PriceDate > report.End)) throw SchwabRawError("holding price is newer than query coverage");
         if (previous is not null)
         {
             var expected = previous.Positions.Select(p => BuildRawHolding(p, account, resolveEquity)).ToList();
@@ -220,17 +223,20 @@ partial class PlaidUtil
         var cash = beginning.Where(h => h.holdingType == HoldingType.Cash).Sum(h => h.totalPrice.v);
         var quantities = beginning.Where(h => h.holdingType != HoldingType.Cash).ToDictionary(h => (h.code, h.holdingType), h => h.quantity);
         var values = beginning.Where(h => h.holdingType != HoldingType.Cash).ToDictionary(h => (h.code, h.holdingType), h => h.totalPrice.v);
+        var latestTradeDates = new Dictionary<(string, HoldingType), DateTime>();
         var records = new List<Record>();
         foreach (var tx in report.Transactions)
         {
             if (known.ContainsKey(tx.Id)) continue;
             RawEqual(tx.Amount, Decimal.Round(tx.Amount, 2), "transaction amount precision");
             RawEqual(tx.Fees, Decimal.Round(tx.Fees, 2), "transaction fee precision");
-            if (tx.Date > report.AsOf.Date || previous is not null && tx.TradeDate < previous.AsOf.Date)
-                throw SchwabRawError("transaction is later than holdings or backdated before the prior valuation");
+            if (tx.Date > report.End) throw SchwabRawError("transaction is later than query coverage");
             var source = SchwabRawPrefix + "transaction/" + RawHash(tx.Id);
             if (tx.Type is "buy" or "sell")
             {
+                var priorPosition = previous?.Positions.SingleOrDefault(p => p.Id == tx.SecurityId);
+                if (priorPosition is not null && tx.TradeDate < priorPosition.PriceDate)
+                    throw SchwabRawError("trade is backdated before this security's prior valuation");
                 if (!securities.TryGetValue(tx.SecurityId, out var security)) throw SchwabRawError("trade security metadata is missing");
                 var holding = BuildRawHolding(security, account, resolveEquity);
                 if (holding.holdingType == HoldingType.Cash || tx.Price <= 0 || tx.Fees < 0
@@ -251,6 +257,7 @@ partial class PlaidUtil
                 else
                     RawEqual(tx.Amount, principal + tx.Fees, $"trade settlement on {tx.Date:yyyy-MM-dd} ({tx.Type}); explicit interest/fee detail required");
                 var key = (holding.code, holding.holdingType);
+                if (tx.TradeDate > latestTradeDates.GetValueOrDefault(key)) latestTradeDates[key] = tx.TradeDate;
                 quantities[key] = quantities.GetValueOrDefault(key) + tx.Quantity;
                 values[key] = values.GetValueOrDefault(key) + principal;
                 Add(principal, tx.Type == "buy" ? "买入" : "卖出", source + "/asset", tx.TradeDate, tx.Date, true, holding, tx.Quantity);
@@ -288,8 +295,21 @@ partial class PlaidUtil
             var change = (endingAssets.GetValueOrDefault(key)?.totalPrice.v ?? 0) - values.GetValueOrDefault(key);
             if (change != 0)
             {
-                var priceDate = report.Positions.FirstOrDefault(p => BuildRawHolding(p, account, resolveEquity).code == key.code)?.PriceDate ?? report.AsOf.Date;
-                if (previous is not null && priceDate < previous.AsOf.Date) throw SchwabRawError("changed valuation has stale price date");
+                var position = report.Positions.FirstOrDefault(p =>
+                {
+                    var current = BuildRawHolding(p, account, resolveEquity);
+                    return (current.code, current.holdingType) == key;
+                });
+                var priorPosition = previous?.Positions.FirstOrDefault(p =>
+                {
+                    var prior = BuildRawHolding(p, account, resolveEquity);
+                    return (prior.code, prior.holdingType) == key;
+                });
+                if (position is not null && priorPosition is not null && position.PriceDate < priorPosition.PriceDate)
+                    throw SchwabRawError("changed valuation has stale price date");
+                // A trade can change value using an older quote; the resulting value cannot predate that trade.
+                var priceDate = position?.PriceDate ?? priorPosition?.PriceDate ?? report.End;
+                if (latestTradeDates.GetValueOrDefault(key) > priceDate) priceDate = latestTradeDates[key];
                 Add(change, "持仓价格变动", SchwabRawPrefix + "valuation/" + RawHash(JsonSerializer.Serialize(report)) + "/" + holding.code,
                     priceDate, report.AsOf.Date, false, holding, 0);
             }
