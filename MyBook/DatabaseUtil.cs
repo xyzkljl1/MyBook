@@ -30,8 +30,8 @@ namespace MyBook
         private static readonly Regex BootstrapBackupFileRegex = new(
             @"^(?<prefix>bootstrap-\d{8}-\d{6}-\d{6}-(?<hash>[0-9a-f]{12}))\.(?<kind>schema|fixed-data)\.sql$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
-        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(AllocatedExpenseItem), typeof(Snapshot), typeof(SnapshotItem)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(PlaidItem), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(AllocatedExpenseItem), typeof(Snapshot), typeof(SnapshotItem)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -228,6 +228,29 @@ namespace MyBook
             });
         }
 
+        public List<PlaidItem> GetPlaidItems(PlaidEnvironment environment)
+        {
+            return db.Queryable<PlaidItem>()
+                .Where(item => item.environment == environment)
+                .OrderBy(item => item.Id)
+                .ToList();
+        }
+
+        public int AddPlaidItem(PlaidItem item)
+        {
+            return ExecuteLockedTransaction(() =>
+            {
+                var exists = db.Queryable<PlaidItem>()
+                    .Where(existing => existing.environment == item.environment && existing.itemId == item.itemId)
+                    .Any();
+                if (exists)
+                    throw new InvalidOperationException("Plaid Item is already stored in the database.");
+
+                item.Id = db.Insertable(item).ExecuteReturnIdentity();
+                return item.Id;
+            });
+        }
+
         public BootstrapSqlBackupResult EnsureBootstrapSqlBackupIfChanged(string reason)
         {
             var scripts = ExecuteLockedTransaction(BuildBootstrapSqlScripts);
@@ -360,6 +383,16 @@ namespace MyBook
                 {
                     SqlValue(item.Id), SqlValue(item.cardNo), SqlValue(item.desc),
                     item.currencyType.HasValue ? SqlValue(item.currencyType.Value) : "NULL", SqlValue(item._account_Id)
+                }));
+
+            var plaidItems = db.Queryable<PlaidItem>().OrderBy(item => item.Id).ToList();
+            AppendInsertSql(builder, "PlaidItems",
+                ["Id", "environment", "itemId", "accessToken", "institutionId", "institutionName", "createdAtUtc", "updateTimeUtc"],
+                plaidItems.Select(item => new[]
+                {
+                    SqlValue(item.Id), SqlValue(item.environment), SqlValue(item.itemId), SqlValue(item.accessToken),
+                    SqlValue(item.institutionId), SqlValue(item.institutionName),
+                    SqlValue(item.createdAtUtc), SqlValue(item.updateTimeUtc)
                 }));
 
             var fixedImports = GetFixedStatementImports();
@@ -5007,6 +5040,7 @@ namespace MyBook
             ExecuteLockedTransaction(() =>
             {
                 var identifiers = ReadAccountIdentifierPreservationItems();
+                var plaidItems = ReadPlaidItemPreservationItems();
                 if (cleanToSnapshotId.HasValue)
                     CleanToSnapshotCore(cleanToSnapshotId.Value);
                 else
@@ -5014,6 +5048,8 @@ namespace MyBook
                 ValidateFinancePreserved(preservedFinance);
                 if (!identifiers.SequenceEqual(ReadAccountIdentifierPreservationItems()))
                     throw new InvalidOperationException("Database cleanup must not change AccountInternalIds rows.");
+                if (!plaidItems.SequenceEqual(ReadPlaidItemPreservationItems()))
+                    throw new InvalidOperationException("Database cleanup must not change PlaidItems rows.");
                 ProcessAllocatedExpenseDirtyRecordsCore();
             });
 
@@ -5029,6 +5065,11 @@ namespace MyBook
         private List<(int, string, string, CurrencyType?, int)> ReadAccountIdentifierPreservationItems() =>
             db.Queryable<AccountInternalId>().OrderBy(item => item.Id).ToList()
                 .Select(item => (item.Id, item.cardNo, item.desc, item.currencyType, item._account_Id)).ToList();
+
+        private List<(int, PlaidEnvironment, string, string, string?, string?, DateTime, DateTime)> ReadPlaidItemPreservationItems() =>
+            db.Queryable<PlaidItem>().OrderBy(item => item.Id).ToList()
+                .Select(item => (item.Id, item.environment, item.itemId, item.accessToken,
+                    item.institutionId, item.institutionName, item.createdAtUtc, item.updateTimeUtc)).ToList();
 
         private List<FinancePreservationItem> ReadFinancePreservationItems()
         {
@@ -5782,7 +5823,7 @@ namespace MyBook
                 "accountname",
                 "_account_id",
                 "_currentprice_t",
-                "holdingtype in ('ust','crypto')",
+                "holdingtype in ('ust','crypto','nasdaq','arca')",
                 "round",
                 "quantity *",
                 "_currentprice_v",
@@ -5902,6 +5943,8 @@ namespace MyBook
                 return "AccountBalances";
             if (type == typeof(OAuthToken))
                 return "OAuthTokens";
+            if (type == typeof(PlaidItem))
+                return "PlaidItems";
             if (type == typeof(Record))
                 return "Records";
             if (type == typeof(AllocatedExpenseItem))

@@ -1,3 +1,4 @@
+// Deprecated reference implementation. Not compiled or scheduled.
 // Source: ChatGPT web financial plugin -> Plaid-linked Schwab account -> ChatGPT
 // scheduled task -> Google Drive Reports/SchwabDaily files containing the raw responses.
 // Drive replaces email because GPT email delivery receives stricter security review

@@ -27,6 +27,31 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--plaid-link", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = 0;
+                try
+                {
+                    var options = PlaidLink.ParseCommandLine(e.Args);
+                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+                    var database = new DatabaseUtil(config);
+                    using var plaidLink = new PlaidLink(config, database);
+                    var result = plaidLink.ConnectAndStoreAsync(options.CountryCodes, options.Products)
+                        .GetAwaiter()
+                        .GetResult();
+                    Console.WriteLine($"Plaid Item connected and stored in database row {result.DatabaseId}.");
+                }
+                catch (Exception exception)
+                {
+                    exitCode = 1;
+                    Console.WriteLine($"Plaid Link failed: {exception.Message}");
+                }
+
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
             if (e.Args.Any(arg => arg.Equals("--export-bootstrap-sql", StringComparison.OrdinalIgnoreCase)))
             {
                 var exitCode = 0;

@@ -116,8 +116,8 @@ namespace MyBook
             try
             {
                 var value = checked(quantity * unitPrice);
-                // 美债和加密资产的市值按货币金额精确到分。
-                if (holdingType is HoldingType.UST or HoldingType.Crypto)
+                // 保留精确单价；股票、美债和加密资产的市值按货币金额精确到分。
+                if (holdingType is HoldingType.UST or HoldingType.Crypto or HoldingType.NASDAQ or HoldingType.ARCA)
                     value = Decimal.Round(value, 2, MidpointRounding.AwayFromZero);
                 MySqlDecimalColumnTypes.ValidateCurrencyValue(value, "Holding total value");
                 return value;
@@ -217,11 +217,12 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD','GBP','EUR')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual','IFastMail','ZAMail','FirstTradeApi','SchwabReportMail')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual','IFastMail','ZAMail','FirstTradeApi','SchwabReportMail','PlaidSchwab')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
         public const string OAuthTokenProvider = "enum('Nexus')";
+        public const string PlaidEnvironment = "enum('Production','Sandbox')";
     }
 
     static class MySqlDecimalColumnTypes
@@ -246,6 +247,12 @@ namespace MyBook
     public enum OAuthTokenProvider
     {
         Nexus
+    }
+
+    public enum PlaidEnvironment
+    {
+        Production,
+        Sandbox
     }
 
     [SugarIndex("unique_OAuthTokens_provider", nameof(provider), OrderByType.Asc, true)]
@@ -275,6 +282,35 @@ namespace MyBook
 
         [SugarColumn(ColumnDataType = "datetime(6)")]
         public DateTime updateTime { get; set; }
+    }
+
+    [SugarIndex("unique_PlaidItems_environment_item_id", nameof(environment), OrderByType.Asc, nameof(itemId), OrderByType.Asc, true)]
+    [SugarTable("PlaidItems")]
+    public class PlaidItem
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [SugarColumn(DefaultValue = "Production", ColumnDataType = MySqlEnumColumnTypes.PlaidEnvironment, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public PlaidEnvironment environment { get; set; } = PlaidEnvironment.Production;
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(255)")]
+        public string itemId { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(4096)")]
+        public string accessToken { get; set; } = "";
+
+        [SugarColumn(IsNullable = true, ColumnDataType = "varchar(255)")]
+        public string? institutionId { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = "varchar(255)")]
+        public string? institutionName { get; set; }
+
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime createdAtUtc { get; set; }
+
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime updateTimeUtc { get; set; }
     }
 
     [SugarIndex("unique_AccountInternalIds_account_card_no", nameof(AccountInternalId._account_Id), OrderByType.Asc, nameof(AccountInternalId.cardNo), OrderByType.Asc, true)]
@@ -635,6 +671,7 @@ namespace MyBook
         ZAMail,
         FirstTradeApi,
         SchwabReportMail,
+        PlaidSchwab,
     }
 
     [SugarIndex("unique_StatementImports_provider_time_key", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.time), OrderByType.Asc, nameof(StatementImport.statementKey), OrderByType.Asc, true)]

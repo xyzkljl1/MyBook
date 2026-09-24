@@ -42,6 +42,19 @@ CREATE TABLE `oauthtokens` (
   UNIQUE KEY `unique_OAuthTokens_provider` (`provider`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `plaiditems` (
+  `Id` int NOT NULL AUTO_INCREMENT,
+  `environment` enum('Production','Sandbox') NOT NULL DEFAULT 'Production',
+  `itemId` varchar(255) NOT NULL DEFAULT '',
+  `accessToken` varchar(4096) NOT NULL DEFAULT '',
+  `institutionId` varchar(255) DEFAULT NULL,
+  `institutionName` varchar(255) DEFAULT NULL,
+  `createdAtUtc` datetime(6) NOT NULL,
+  `updateTimeUtc` datetime(6) NOT NULL,
+  PRIMARY KEY (`Id`),
+  UNIQUE KEY `unique_PlaidItems_environment_item_id` (`environment`,`itemId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE `finance` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `code` varchar(255) NOT NULL DEFAULT '',
@@ -55,7 +68,7 @@ CREATE TABLE `finance` (
 
 CREATE TABLE `statementimports` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual','IFastMail','ZAMail','FirstTradeApi','SchwabReportMail') NOT NULL DEFAULT 'Manual',
+  `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual','IFastMail','ZAMail','FirstTradeApi','SchwabReportMail','PlaidSchwab') NOT NULL DEFAULT 'Manual',
   `time` datetime(6) NOT NULL,
   `statementKey` varchar(255) NOT NULL DEFAULT '',
   `sourceDataJson` json DEFAULT NULL,
@@ -162,7 +175,7 @@ CREATE TABLE `snapshotitems` (
   CONSTRAINT `fk_SnapshotItems_snapshot` FOREIGN KEY (`_snapshot_Id`) REFERENCES `snapshots` (`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `accountbalances` AS select cast(row_number() OVER (ORDER BY `grouped`.`_account_Id`,`grouped`.`currency_type` )  as signed) AS `Id`,`grouped`.`accountName` AS `accountName`,`grouped`.`amount` AS `amount`,`grouped`.`currency_type` AS `currency_type`,`grouped`.`_account_Id` AS `_account_Id` from (select `holding`.`_account_Id` AS `_account_Id`,`account`.`name` AS `accountName`,`holding`.`_currentPrice_t` AS `currency_type`,sum((case when (`holding`.`holdingType` in ('UST','Crypto')) then round((`holding`.`quantity` * `holding`.`_currentPrice_v`),2) else (`holding`.`quantity` * `holding`.`_currentPrice_v`) end)) AS `amount` from (`holdings` `holding` join `accounts` `account` on((`account`.`Id` = `holding`.`_account_Id`))) group by `holding`.`_account_Id`,`account`.`name`,`holding`.`_currentPrice_t` having (`amount` <> 0)) `grouped`;
+CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `accountbalances` AS select cast(row_number() OVER (ORDER BY `grouped`.`_account_Id`,`grouped`.`currency_type` )  as signed) AS `Id`,`grouped`.`accountName` AS `accountName`,`grouped`.`amount` AS `amount`,`grouped`.`currency_type` AS `currency_type`,`grouped`.`_account_Id` AS `_account_Id` from (select `holding`.`_account_Id` AS `_account_Id`,`account`.`name` AS `accountName`,`holding`.`_currentPrice_t` AS `currency_type`,sum((case when (`holding`.`holdingType` in ('UST','Crypto','NASDAQ','ARCA')) then round((`holding`.`quantity` * `holding`.`_currentPrice_v`),2) else (`holding`.`quantity` * `holding`.`_currentPrice_v`) end)) AS `amount` from (`holdings` `holding` join `accounts` `account` on((`account`.`Id` = `holding`.`_account_Id`))) group by `holding`.`_account_Id`,`account`.`name`,`holding`.`_currentPrice_t` having (`amount` <> 0)) `grouped`;
 
 CREATE TRIGGER `trg_Records_alloc_exp_ins`
 BEFORE INSERT ON `Records`
