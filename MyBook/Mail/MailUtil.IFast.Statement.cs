@@ -30,8 +30,7 @@ partial class MailUtil
         return TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(record.date, DateTimeKind.Local), IFastTimeZone).Date;
     }
 
-    private List<Record> GetIFastAccountRecords() => IFastCurrencies
-        .SelectMany(currency => database.GetAccountRecords(database.GetAccountByName(IFastAccountName(currency)))).ToList();
+    private List<Record> GetIFastAccountRecords() => database.GetAccountRecords(GetIFastAccount());
 
     private List<IFastStatement> ReadIFastStatements()
     {

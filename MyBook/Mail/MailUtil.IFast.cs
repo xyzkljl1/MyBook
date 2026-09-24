@@ -120,9 +120,10 @@ partial class MailUtil
                 throw new MailParseException("IFast conversion currencies must differ.");
             sell.v = -sell.v;
             var code = $"BALANCE-IFAST-{reference}";
+            var accountName = GetIFastAccount().name;
             return ($"IFast-conversion-{reference}",
-                [BuildIFastRecord(sell, time, "换汇", IFastAccountName(buy.t), code, true),
-                 BuildIFastRecord(buy, time, "换汇", IFastAccountName(sell.t), code, true)]);
+                [BuildIFastRecord(sell, time, "换汇", accountName, code, true),
+                 BuildIFastRecord(buy, time, "换汇", accountName, code, true)]);
         }
         if (message.Subject == IFastPaymentSubject)
         {
@@ -140,7 +141,7 @@ partial class MailUtil
 
     private Record BuildIFastRecord(Currency amount, DateTime time, string reason, string counterparty, string code, bool isInternal = false)
     {
-        var account = database.GetAccountByName(IFastAccountName(amount.t));
+        var account = GetIFastAccount();
         var record = new Record
         {
             Account = account, _account_Id = account.Id,
@@ -153,7 +154,13 @@ partial class MailUtil
         return record;
     }
 
-    private static string IFastAccountName(CurrencyType currency) => $"IFAST_{currency}";
+    private Account GetIFastAccount()
+    {
+        var accounts = database.GetAccountsByNamePrefix("IFAST_");
+        if (accounts.Count != 1)
+            throw new InvalidOperationException("IFast requires exactly one configured account.");
+        return accounts[0];
+    }
 
     private static string IFastMessageKey(string? messageId)
     {

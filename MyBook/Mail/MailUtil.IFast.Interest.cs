@@ -53,14 +53,14 @@ partial class MailUtil
     {
         var result = new List<Record>();
         var end = month.AddMonths(1);
+        var account = GetIFastAccount();
+        if (records.Any(record => record._account_Id != account.Id || !IFastCurrencies.Contains(record.t)))
+            throw new InvalidOperationException("IFast interest inputs contain an unexpected account or currency.");
         foreach (var currency in IFastCurrencies)
         {
             if (!rates.TryGetValue(currency, out var rate) || rate < 0 || rate >= 1)
                 throw new InvalidOperationException($"Missing or invalid IFast latest Gross rate: {currency}.");
-            var account = database.GetAccountByName(IFastAccountName(currency));
-            var entries = records.Where(record => record._account_Id == account.Id).ToList();
-            if (entries.Any(record => record.t != currency))
-                throw new InvalidOperationException($"IFast account contains an unexpected currency: {currency}.");
+            var entries = records.Where(record => record.t == currency).ToList();
             var balance = entries.Where(record => IFastBankDate(record) < month).Sum(record => record.v);
             var movements = entries.Where(record => IFastBankDate(record) >= month && IFastBankDate(record) < end)
                 .GroupBy(IFastBankDate).ToDictionary(group => group.Key, group => group.Sum(record => record.v));

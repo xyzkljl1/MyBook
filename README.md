@@ -36,7 +36,7 @@ Expected files:
 
 - **ICBC / BOC:** credit-card email statements and supported debit-card SMS. ICBC historical-detail imports remain available on demand; their scheduled task is temporarily disabled.
 - **IBKR:** daily CSV email reports and local initial reports, including transactions, holdings, dividends, interest, fees and valuation changes.
-- **iFAST:** transaction emails plus local monthly statements for GBP, USD, EUR, HKD, SGD and RMB. Missing monthly interest uses the latest published rate and a provisional daily-balance calculation; later statements must agree exactly.
+- **iFAST:** one account with separate GBP, USD, EUR, HKD, SGD and RMB cash holdings, imported from transaction emails and local monthly statements. Missing monthly interest uses the latest published rate and a provisional daily-balance calculation; later statements must agree exactly.
 - **ZA:** transaction emails on demand, not scheduled. Email notices do not provide a complete ledger or verified ending balance.
 - **FirstTrade:** read-only account balances, positions and transaction history through its web API.
 - **Schwab:** direct Plaid investment imports.
