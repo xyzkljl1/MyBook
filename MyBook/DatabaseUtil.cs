@@ -250,7 +250,7 @@ namespace MyBook
                 EnsureLock();
                 try
                 {
-                    // Session/cooldown writes commit independently of financial import validation.
+                    // Session writes commit independently of financial import validation.
                     var affected = connection.Ado.ExecuteCommand("""
                         insert into FirstTradeSessions (loginHash, stateJson, updateTimeUtc)
                         select @hash, @state, utc_timestamp(6)

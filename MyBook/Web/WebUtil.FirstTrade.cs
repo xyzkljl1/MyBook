@@ -311,8 +311,7 @@ namespace MyBook
             private readonly HttpClient client;
             private readonly string username, password;
             private readonly byte[] totpKey;
-            private string? ftat, sid;
-            private int loginAttempts;
+            private bool sessionRefreshAttempted;
             private long responseBytes;
             private readonly Func<DateTimeOffset> utcNow;
             private readonly DatabaseUtil.FirstTradeSessionLease sessionStore;
@@ -343,11 +342,9 @@ namespace MyBook
                             throw new FirstTradeException("invalid database session state");
                         session = JsonSerializer.Deserialize<FirstTradeSessionState>(stored)
                             ?? throw new FirstTradeException("invalid database session state");
-                        if (session.Version != 1 || session.Failures is < 0 or > 24 || session.Cookies is null)
+                        if (session.Version != 1 || session.Cookies is null)
                             throw new FirstTradeException("invalid database session state");
                     }
-                    ftat = session.Ftat;
-                    sid = session.Sid;
                     if (cookies is not null)
                         foreach (var cookie in session.Cookies.Where(c => c.Expires == DateTime.MinValue || c.Expires.ToUniversalTime() > this.utcNow().UtcDateTime))
                             cookies.Add(new Cookie(cookie.Name, cookie.Value, cookie.Path, cookie.Domain)
@@ -383,20 +380,11 @@ namespace MyBook
 
             internal async Task LoginAsync(CancellationToken token)
             {
-                EnsureRequestsAllowed();
-                if (!String.IsNullOrEmpty(ftat) && !String.IsNullOrEmpty(sid)) return;
-                if (utcNow() < session.NextLoginUtc)
-                    throw new FirstTradeException($"login cooldown active until {session.NextLoginUtc:O}");
-                if (++loginAttempts > 2)
-                    throw new FirstTradeException("automatic login retry limit reached");
+                EnsureSessionLock();
+                if (!String.IsNullOrEmpty(session.Ftat) && !String.IsNullOrEmpty(session.Sid)) return;
                 token.ThrowIfCancellationRequested();
-                // Reserve the failure delay before any request, so crashes/restarts cannot reset the budget.
-                session.Failures = Math.Min(24, session.Failures + 1);
-                session.NextLoginUtc = utcNow().AddHours(Math.Min(24, Math.Pow(2, Math.Min(5, session.Failures - 1))));
-                session.Ftat = ftat = null;
-                session.Sid = sid = null;
-                await SaveSessionAsync().ConfigureAwait(false);
-                sid = null;
+                session.Ftat = session.Sid = null;
+                SaveSession();
                 await RequestAsync(Endpoint.Bootstrap, null, null, token).ConfigureAwait(false);
                 var login = await RequestAsync(Endpoint.Login, null, new()
                 {
@@ -405,7 +393,7 @@ namespace MyBook
                 if (HasText(login, "ftat") && HasText(login, "sid") && !HasText(login, "t_token")
                     && (!login.TryGetProperty("mfa", out var mfa) || mfa.ValueKind == JsonValueKind.False))
                 {
-                    await AcceptSessionAsync(login).ConfigureAwait(false);
+                    AcceptSession(login);
                     return;
                 }
                 if (!login.TryGetProperty("mfa", out var challengeType) || challengeType.ValueKind != JsonValueKind.True)
@@ -421,30 +409,24 @@ namespace MyBook
                     ["mfaCode"] = code,
                     ["remember_for"] = "30", ["t_token"] = challenge
                 }, token).ConfigureAwait(false);
-                await AcceptSessionAsync(verified).ConfigureAwait(false);
+                AcceptSession(verified);
             }
 
-            private async Task AcceptSessionAsync(JsonElement json)
+            private void AcceptSession(JsonElement json)
             {
-                ftat = RequiredText(json, "ftat");
-                sid = RequiredText(json, "sid");
-                session.Failures = 0;
-                session.NextLoginUtc = utcNow().AddMinutes(15);
-                await SaveSessionAsync().ConfigureAwait(false);
+                session.Ftat = RequiredText(json, "ftat");
+                session.Sid = RequiredText(json, "sid");
+                SaveSession();
             }
 
-            private void EnsureRequestsAllowed()
+            private void EnsureSessionLock()
             {
                 try { sessionStore.EnsureLock(); }
                 catch { throw new FirstTradeException("database session lock lost; requests stopped"); }
-                if (utcNow() < session.BlockedUntilUtc)
-                    throw new FirstTradeException($"requests paused until {session.BlockedUntilUtc:O} after access denial or rate limiting");
             }
 
-            private Task SaveSessionAsync()
+            private void SaveSession()
             {
-                session.Ftat = ftat;
-                session.Sid = sid;
                 if (cookies is not null)
                     session.Cookies = cookies.GetAllCookies().Cast<Cookie>().Where(c => !c.Expired)
                         .Select(c => new FirstTradeCookie(c.Name, c.Value, c.Path, c.Domain, c.Secure, c.HttpOnly, c.Expires)).ToList();
@@ -452,8 +434,7 @@ namespace MyBook
                 {
                     sessionStore.Save(JsonSerializer.Serialize(session));
                 }
-                catch { throw new FirstTradeException("cannot persist database session/login cooldown; requests stopped"); }
-                return Task.CompletedTask;
+                catch { throw new FirstTradeException("cannot persist database session; requests stopped"); }
             }
 
             internal async Task<FirstTradeCapture> FetchAsync(FirstTradeCapture? previous, CancellationToken token,
@@ -490,7 +471,7 @@ namespace MyBook
                     });
                 }
                 result.CompletedAtUtc = DateTimeOffset.UtcNow;
-                await SaveSessionAsync().ConfigureAwait(false);
+                SaveSession();
                 return result;
             }
 
@@ -540,17 +521,23 @@ namespace MyBook
 
             private async Task<JsonElement> ReadAsync(Endpoint endpoint, string? query, CancellationToken token)
             {
-                try { return await RequestAsync(endpoint, query, null, token).ConfigureAwait(false); }
-                catch (FirstTradeSessionExpiredException)
+                // Only an expired session permits a retry, at most once for this import client.
+                while (true)
                 {
-                    await LoginAsync(token).ConfigureAwait(false);
-                    return await RequestAsync(endpoint, query, null, token).ConfigureAwait(false);
+                    try { return await RequestAsync(endpoint, query, null, token).ConfigureAwait(false); }
+                    catch (FirstTradeSessionExpiredException)
+                    {
+                        if (sessionRefreshAttempted)
+                            throw new FirstTradeException($"{endpoint}: HTTP 401 after session refresh; no further login");
+                        sessionRefreshAttempted = true;
+                        await LoginAsync(token).ConfigureAwait(false);
+                    }
                 }
             }
 
             private async Task<JsonElement> RequestAsync(Endpoint endpoint, string? query, Dictionary<string, string>? form, CancellationToken token)
             {
-                EnsureRequestsAllowed();
+                EnsureSessionLock();
                 // Closed endpoint/method allowlist: there is no arbitrary URL or account mutation API.
                 var (path, method) = endpoint switch
                 {
@@ -568,31 +555,16 @@ namespace MyBook
                 using var request = new HttpRequestMessage(method, new Uri(Origin, path + (query is null ? "" : "?" + query)));
                 if (endpoint != Endpoint.Bootstrap)
                     request.Headers.Add("access-token", ClientToken);
-                if (ftat is not null) request.Headers.Add("ftat", ftat);
-                if (sid is not null) request.Headers.Add("sid", sid);
+                if (session.Ftat is not null) request.Headers.Add("ftat", session.Ftat);
+                if (session.Sid is not null) request.Headers.Add("sid", session.Sid);
                 if (form is not null) request.Content = new FormUrlEncodedContent(form);
                 try
                 {
                     using var response = await client.SendAsync(request, token).ConfigureAwait(false);
-                    if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)
-                    {
-                        var blockedUntil = utcNow().AddHours(1);
-                        try
-                        {
-                            var retry = response.Headers.RetryAfter;
-                            var retryUntil = retry?.Date ?? (retry?.Delta is TimeSpan delay ? utcNow().Add(delay) : (DateTimeOffset?)null);
-                            if (retryUntil > blockedUntil) blockedUntil = retryUntil.Value;
-                        }
-                        catch (FormatException) { }
-                        catch (ArgumentOutOfRangeException) { blockedUntil = DateTimeOffset.MaxValue; }
-                        if (blockedUntil > session.BlockedUntilUtc) session.BlockedUntilUtc = blockedUntil;
-                        await SaveSessionAsync().ConfigureAwait(false);
-                        throw new FirstTradeException($"{endpoint}: HTTP {(int)response.StatusCode}; requests paused until {session.BlockedUntilUtc:O}; no automatic re-login");
-                    }
                     if (response.StatusCode == HttpStatusCode.Unauthorized && method == HttpMethod.Get && endpoint != Endpoint.Bootstrap)
                     {
-                        ftat = sid = null;
-                        await SaveSessionAsync().ConfigureAwait(false);
+                        session.Ftat = session.Sid = null;
+                        SaveSession();
                         throw new FirstTradeSessionExpiredException();
                     }
                     if (!response.IsSuccessStatusCode)
@@ -674,7 +646,6 @@ namespace MyBook
             {
                 client.Dispose();
                 CryptographicOperations.ZeroMemory(totpKey);
-                ftat = sid = null;
                 session.Ftat = session.Sid = null;
                 session.Cookies.Clear();
             }
@@ -683,9 +654,6 @@ namespace MyBook
                 public int Version { get; set; } = 1;
                 public string? Ftat { get; set; }
                 public string? Sid { get; set; }
-                public DateTimeOffset NextLoginUtc { get; set; }
-                public DateTimeOffset BlockedUntilUtc { get; set; }
-                public int Failures { get; set; }
                 public List<FirstTradeCookie> Cookies { get; set; } = [];
             }
             private sealed record FirstTradeCookie(string Name, string Value, string Path, string Domain, bool Secure, bool HttpOnly, DateTime Expires);
