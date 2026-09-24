@@ -1,0 +1,248 @@
+using System.Globalization;
+using System.Text.Json;
+using Newtonsoft.Json.Linq;
+
+namespace MyBook;
+
+partial class PlaidUtil
+{
+    private const string WiseInstitutionId = "ins_132616";
+    private const StatementImportProvider WisePlaidProvider = StatementImportProvider.PlaidWise;
+    private static readonly SemaphoreSlim wiseLock = new(1, 1);
+
+    public async Task FetchWiseAsync(CancellationToken cancellationToken = default)
+    {
+        if (!await wiseLock.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromMinutes(3));
+        var stage = "Item selection";
+        try
+        {
+            var db = database ?? throw WiseError("database unavailable");
+            var item = await FindItemByInstitutionAsync(WiseInstitutionId, deadline.Token).ConfigureAwait(false)
+                ?? throw WiseError("no Wise Item linked in the active environment");
+            var account = db.GetAccountByName("WISE");
+            var latest = db.GetLatestStatementImport(WisePlaidProvider);
+            var previous = latest is null ? null : JsonSerializer.Deserialize<WiseSyncState>(latest.sourceDataJson
+                ?? throw WiseError("stored sync metadata missing")) ?? throw WiseError("invalid stored sync metadata");
+            stage = "local initial statement";
+            DateTimeOffset cutoff;
+            List<AccountBalance>? initialBalances = null;
+            if (previous is null)
+            {
+                var files = new FileUtil(config, db);
+                await files.ImportWiseInitialReportsAsync().ConfigureAwait(false);
+                (cutoff, initialBalances) = files.GetWisePlaidBaseline();
+            }
+            else
+            {
+                if (previous.ItemId != item.itemId || previous.LocalAccountId != account.Id || String.IsNullOrEmpty(previous.Cursor))
+                    throw WiseError("stored Item/account identity or cursor changed; explicit migration required");
+                cutoff = previous.Cutoff;
+            }
+            var beginning = db.GetCurrentAccountHoldings(account);
+            if (initialBalances is not null)
+                VerifyWiseBalances(beginning, initialBalances.ToDictionary(b => b.t, b => b.v), "initial XML versus database");
+            stage = "transaction sync";
+            var data = await GetTransactionUpdatesAsync(item, previous?.Cursor, deadline.Token).ConfigureAwait(false);
+            stage = "financial reconciliation";
+            var import = BuildWiseImport(data, item.itemId, account, beginning, cutoff, previous, DateTime.Now);
+            deadline.Token.ThrowIfCancellationRequested();
+            stage = "atomic database write";
+            db.SaveStatementRecordsAndHoldingsOnce([import]);
+            Console.WriteLine($"Plaid Wise: currencies={import.Holdings.Count}, records={import.Records.Count}");
+        }
+        catch (MailParseException e)
+        {
+            if (e.Message.StartsWith("Plaid Wise: ", StringComparison.Ordinal)) throw;
+            throw WiseError(stage + ": source validation failed; private details suppressed");
+        }
+        catch (PlaidRequestException e) { throw WiseError(stage + ": " + e.Message); }
+        catch (TimeoutException e) { throw WiseError(stage + ": " + e.Message); }
+        catch (OperationCanceledException) { throw WiseError(stage + ": cancelled or overall timeout"); }
+        catch (Exception e) { throw WiseError(stage + " failed (" + e.GetType().Name + "); private details suppressed"); }
+        finally { wiseLock.Release(); }
+    }
+
+    internal static StatementRecordHoldingImport BuildWiseImport(TransactionSyncData data, string itemId, Account account,
+        List<Holding> beginning, DateTimeOffset cutoff, WiseSyncState? previous, DateTime observedAt)
+    {
+        if (account.relativeBalance || account.isCredit || account._primaryAccount_Id.HasValue)
+            throw WiseError("a primary absolute-balance cash account is required");
+        if (previous is not null && (previous.ItemId != itemId || previous.LocalAccountId != account.Id || previous.Cutoff != cutoff))
+            throw WiseError("stored source identity changed");
+        var balances = ParseWiseAccounts(data.Accounts);
+        var accountMap = balances.ToDictionary(a => a.Id, a => a.Currency, StringComparer.Ordinal);
+        if (previous is not null)
+        {
+            foreach (var old in previous.Accounts)
+                if (!accountMap.TryGetValue(old.Id, out var currency) || currency != old.Currency)
+                    throw WiseError("a previously observed currency account is missing or changed");
+            VerifyWiseBalances(beginning, previous.Accounts.ToDictionary(a => a.Currency, a => a.Balance), "previous sync versus database");
+        }
+        var oldTransactions = (previous?.Transactions ?? []).ToDictionary(t => t.Id, StringComparer.Ordinal);
+        var current = new Dictionary<string, WiseTransaction>(oldTransactions, StringComparer.Ordinal);
+        if (data.Pages.Count == 0) throw WiseError("missing sync pages");
+        foreach (var page in data.Pages)
+        {
+            var pageAccounts = Rows(page, "accounts").ToDictionary(a => Text(a, "account_id"),
+                a => WiseCurrency(a["balances"] ?? throw WiseError("missing account balances")), StringComparer.Ordinal);
+            // Sync may omit accounts without transactions; /accounts/get is the complete account inventory.
+            if (pageAccounts.Any(a => !accountMap.TryGetValue(a.Key, out var c) || c != a.Value))
+                throw WiseError("currency accounts changed during pagination");
+            var addedIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var row in Rows(page, "added"))
+            {
+                var tx = ParseWiseTransaction(row, accountMap);
+                if (!addedIds.Add(tx.Id) || current.TryGetValue(tx.Id, out var old) && old != tx)
+                    throw WiseError("duplicate or conflicting added transaction");
+                current[tx.Id] = tx;
+            }
+            foreach (var row in Rows(page, "modified"))
+            {
+                var tx = ParseWiseTransaction(row, accountMap);
+                if (!current.ContainsKey(tx.Id)) throw WiseError("modified transaction was never observed");
+                current[tx.Id] = tx;
+            }
+            foreach (var row in Rows(page, "removed"))
+            {
+                var id = Text(row, "transaction_id");
+                if (!current.TryGetValue(id, out var tx) || tx.AccountId != Text(row, "account_id"))
+                    throw WiseError("removed transaction identity was never observed");
+                current.Remove(id);
+            }
+        }
+        // Posted history is immutable here. Corrections require deliberate reconciliation, never silent deletion or offsets.
+        foreach (var old in oldTransactions.Values.Where(t => !t.Pending))
+            if (!current.TryGetValue(old.Id, out var tx) || tx != old)
+                throw WiseError("a posted transaction was revised or removed; manual reconciliation required");
+        var records = new List<Record>();
+        var opening = WiseHoldingBalances(beginning);
+        foreach (var tx in current.Values.Where(t => !t.Pending).OrderBy(t => t.Time).ThenBy(t => t.Id, StringComparer.Ordinal))
+        {
+            if (oldTransactions.TryGetValue(tx.Id, out var old) && !old.Pending) continue;
+            if (!tx.HasTime && tx.Time.UtcDateTime.Date == cutoff.UtcDateTime.Date)
+                throw WiseError("date-only transaction overlaps the XML cutover; exact timestamp required");
+            if (tx.Time < cutoff)
+            {
+                if (previous is not null) throw WiseError("newly posted transaction predates the XML cutover");
+                if (!opening.ContainsKey(tx.Currency)) throw WiseError("a pre-cutover currency is missing from initial XML");
+                continue;
+            }
+            var reason = WiseReason(tx);
+            records.Add(new Record
+            {
+                Account = account, date = tx.Time.LocalDateTime, postingDate = tx.Time.LocalDateTime.Date,
+                updateTime = observedAt, v = tx.Amount, t = tx.Currency, Reason = reason,
+                DestAccount = tx.Description.Length > 200 ? tx.Description[..200] : tx.Description,
+                Source = "PlaidWise/transaction/" + RawHash(tx.Id),
+                // Plaid does not provide the principal/fee split for these transfers. Never auto-match the gross amount.
+                isInternal = false
+            });
+        }
+        foreach (var currency in opening.Keys.Union(balances.Select(a => a.Currency)))
+        {
+            var end = balances.SingleOrDefault(a => a.Currency == currency)
+                ?? throw WiseError("a local currency is missing from Plaid accounts");
+            var expected = opening.GetValueOrDefault(currency) + records.Where(r => r.t == currency).Sum(r => r.v);
+            if (expected != end.Balance)
+                throw WiseError($"{currency} balance mismatch: opening plus new records={expected}, Plaid current={end.Balance}; no data saved");
+        }
+        var state = new WiseSyncState(itemId, account.Id, cutoff, Text(data.Pages[^1], "next_cursor"), balances,
+            current.Values.OrderBy(t => t.Id, StringComparer.Ordinal).ToList());
+        var source = JsonSerializer.Serialize(state);
+        var ending = balances.Select(a => new Holding(a.Currency.ToString(), HoldingType.Cash)
+            { Account = account, currentPrice = new(a.Balance, a.Currency) }).ToList();
+        return new(WisePlaidProvider, observedAt.Date, "PlaidWise/" + RawHash(source), account, records, ending,
+            balances.Select(a => new AccountBalance(account, new(a.Balance, a.Currency))).ToList(),
+            balances.Select(a => new AccountBalance(account, new(opening.GetValueOrDefault(a.Currency), a.Currency))).ToList(),
+            beginning, sourceDataJson: source, forceValidateBeginningBalances: true);
+    }
+
+    private static List<WiseCurrencyAccount> ParseWiseAccounts(JObject data)
+    {
+        var result = new List<WiseCurrencyAccount>();
+        foreach (var row in Rows(data, "accounts"))
+        {
+            if (Text(row, "type") != "depository" || Text(row, "subtype") != "checking")
+                throw WiseError("unsupported Wise account type");
+            var balance = row["balances"] ?? throw WiseError("missing balances");
+            result.Add(new(Text(row, "account_id"), WiseCurrency(balance), WiseMoney(balance, "current")));
+        }
+        if (result.Count == 0 || result.Select(a => a.Id).Distinct().Count() != result.Count
+            || result.Select(a => a.Currency).Distinct().Count() != result.Count)
+            throw WiseError("empty or duplicate currency accounts");
+        return result.OrderBy(a => a.Currency).ToList();
+    }
+
+    private static WiseTransaction ParseWiseTransaction(JObject row, Dictionary<string, CurrencyType> accounts)
+    {
+        var accountId = Text(row, "account_id");
+        var currency = WiseCurrency(row);
+        if (!accounts.TryGetValue(accountId, out var expected) || expected != currency)
+            throw WiseError("transaction currency/account mismatch");
+        if (row["pending"]?.Type != JTokenType.Boolean) throw WiseError("missing pending flag");
+        var date = Date(row, "date");
+        var stamp = OptionalText(row, "datetime");
+        var time = new DateTimeOffset(DateTime.SpecifyKind(date, DateTimeKind.Utc));
+        if (stamp != "" && !DateTimeOffset.TryParse(stamp, CultureInfo.InvariantCulture, DateTimeStyles.None, out time))
+            throw WiseError("invalid transaction timestamp");
+        if (time.UtcDateTime > DateTime.UtcNow.AddDays(1)) throw WiseError("future transaction date");
+        var description = OptionalText(row, "original_description");
+        if (description == "") description = Text(row, "name");
+        var category = row["personal_finance_category"] as JObject;
+        return new(Text(row, "transaction_id"), accountId, currency, -WiseMoney(row, "amount"), time, stamp != "",
+            row["pending"]!.Value<bool>(), description, category is null ? "" : OptionalText(category, "primary"),
+            category is null ? "" : OptionalText(category, "detailed"));
+    }
+
+    private static string WiseReason(WiseTransaction transaction) => transaction.Category switch
+    {
+        "BANK_FEES" => "手续费",
+        "INCOME" when transaction.Detail == "INCOME_INTEREST_EARNED" => "利息",
+        "TRANSFER_IN" or "TRANSFER_OUT" => "转账（待拆分）",
+        "INCOME" => "收入（待拆分）",
+        // Wise conversions can have spending categories; a category alone cannot establish a fee-free purchase or refund.
+        _ => transaction.Amount < 0 ? "付款（待拆分）" : "收款（待拆分）"
+    };
+
+    private static CurrencyType WiseCurrency(JToken row)
+    {
+        if (OptionalText(row, "unofficial_currency_code") != "") throw WiseError("unsupported unofficial currency");
+        return Text(row, "iso_currency_code") switch
+        {
+            "USD" => CurrencyType.USD, "CNY" => CurrencyType.RMB, "HKD" => CurrencyType.HKD,
+            "SGD" => CurrencyType.SGD, "GBP" => CurrencyType.GBP, "EUR" => CurrencyType.EUR,
+            "JPY" => CurrencyType.JPY, _ => throw WiseError("unsupported currency")
+        };
+    }
+
+    private static decimal WiseMoney(JToken row, string field)
+    {
+        var value = Number(row, field);
+        if (Decimal.Round(value, 2) != value) throw WiseError("cash amount has unsupported sub-cent precision");
+        return value;
+    }
+
+    private static Dictionary<CurrencyType, decimal> WiseHoldingBalances(List<Holding> holdings)
+    {
+        if (holdings.Any(h => h.holdingType != HoldingType.Cash || h.code != h.currentPrice.t.ToString())
+            || holdings.Select(h => h.currentPrice.t).Distinct().Count() != holdings.Count)
+            throw WiseError("unexpected non-cash or duplicate local holdings");
+        return holdings.ToDictionary(h => h.currentPrice.t, h => h.totalPrice.v);
+    }
+
+    private static void VerifyWiseBalances(List<Holding> holdings, Dictionary<CurrencyType, decimal> expected, string context)
+    {
+        var actual = WiseHoldingBalances(holdings);
+        if (actual.Keys.Union(expected.Keys).Any(c => actual.GetValueOrDefault(c) != expected.GetValueOrDefault(c)))
+            throw WiseError(context + ": balances differ; explicit reconciliation required");
+    }
+
+    private static MailParseException WiseError(string message) => new("Plaid Wise: " + message);
+    internal sealed record WiseCurrencyAccount(string Id, CurrencyType Currency, decimal Balance);
+    internal sealed record WiseTransaction(string Id, string AccountId, CurrencyType Currency, decimal Amount,
+        DateTimeOffset Time, bool HasTime, bool Pending, string Description, string Category, string Detail);
+    internal sealed record WiseSyncState(string ItemId, int LocalAccountId, DateTimeOffset Cutoff, string Cursor,
+        List<WiseCurrencyAccount> Accounts, List<WiseTransaction> Transactions);
+}

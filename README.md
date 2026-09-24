@@ -40,7 +40,7 @@ Expected files:
 - **IBKR:** daily CSV email reports and local initial reports, including transactions, holdings, dividends, interest, fees and valuation changes.
 - **iFAST:** transaction emails plus local monthly statements for GBP, USD, EUR, HKD, SGD and RMB. Missing monthly interest uses the latest published rate and a provisional daily-balance calculation; later statements must agree exactly.
 - **ZA:** transaction emails on demand, not scheduled. Email notices do not provide a complete ledger or verified ending balance.
-- **Wise:** local initial XML statements only; recurring statement-email downloads are disabled.
+- **Wise:** local initial XML statements followed by daily Plaid transaction updates for all linked currencies. Statement-email downloads remain disabled.
 - **FirstTrade:** read-only account balances, positions and transaction history through its web API.
 - **Schwab:** direct Plaid investment imports. Former email and Google Drive importers are disabled.
 - **Kraken / Ethereum:** completed-day transactions and asset valuations. Crypto quantities use `decimal(30,18)`; unsupported precision fails. Matching internal transfers requires the same chain event and opposite asset quantities.
@@ -51,7 +51,7 @@ Imports require existing accounts and fixed starting checkpoints. They do not cr
 
 ## Configuration
 
-### Plaid Schwab Import
+### Plaid Imports
 
 Configure `plaid_client_id` and `plaid_production_secret`, then authorize from the build-output directory:
 
@@ -60,6 +60,10 @@ dotnet MyBook.dll --plaid-link --country US --product investments
 ```
 
 Production is the default; Sandbox requires changing the compile-time environment switch. Each import must include every configured Schwab account or the entire batch fails. Imported history starts at the fixed checkpoint, then advances with a seven-day overlap. Transactions, holdings and values must reconcile exactly.
+
+Wise uses an existing Transactions-enabled Item and maps its currency accounts to the single local Wise account. Initial XML statements establish the opening history; subsequent imports use an incremental cursor and validate every currency balance exactly. Pending transactions are not booked. Revised or removed posted transactions fail for manual review, without advancing the cursor. Transfers with an unknown fee split are recorded at their actual gross amount, marked pending split, and are not classified as internal transfers. Spending categories alone do not establish purchases or refunds, so those payments and receipts also remain pending split. Later XML enrichment is not implemented.
+
+Local Wise XML parsing lives under `File/`; the former mail module is retained with a `.deprecated` suffix and is not compiled.
 
 Plaid Items and their unencrypted access tokens are private fixed data. Changing them requires explicit approval; imports never repair authorization automatically. Quote dates are separate from the query date and do not indicate when the entire account last changed.
 
@@ -99,7 +103,7 @@ Notable configuration keys:
 - `nexus_api_key` - legacy/personal Nexus API key fallback.
 - `kraken_api_key` / `kraken_api_secret` - Kraken read-only API credentials for authenticated account queries.
 - `nexus_oauth_client_id` - Nexus OAuth PKCE token refresh client id. `nexus_oauth_client_secret` is retained for local compatibility but is not sent by the PKCE refresh flow.
-- `plaid_client_id` / `plaid_sandbox_secret` / `plaid_production_secret` - Plaid credentials used for account authorization and investment imports. The compile-time environment switch uses the Production secret by default; secrets must match the selected environment.
+- `plaid_client_id` / `plaid_sandbox_secret` / `plaid_production_secret` - Plaid credentials used for account authorization and financial imports. The compile-time environment switch uses the Production secret by default; secrets must match the selected environment.
 - `etherscan_api_key` - Etherscan API key for read-only Ethereum mainnet address balance and transaction queries.
 - `sim_imsi` - expected IMSI for the local USB SIM modem. Leave empty to disable scheduled SMS polling.
 - `sim_poll_interval_minutes` - optional SMS polling interval. Values less than 1 use the built-in default of 5 minutes.

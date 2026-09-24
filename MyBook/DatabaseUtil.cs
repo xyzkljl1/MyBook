@@ -1053,7 +1053,7 @@ namespace MyBook
                         import.Records,
                         import.AccountBalances,
                         import.BeginningAccountBalances,
-                        shouldValidateBeginningBalances[import.Provider],
+                        import.ForceValidateBeginningBalances || shouldValidateBeginningBalances[import.Provider],
                         import.HoldingAccount,
                         import.Holdings,
                         import.BeginningHoldings,
@@ -5361,8 +5361,10 @@ namespace MyBook
             {
                 var wiseAccount = GetAccountByName("WISE");
                 ClearRecordMatchesForStatementProvider(StatementImportProvider.WiseMail);
+                ClearRecordMatchesForStatementProvider(StatementImportProvider.PlaidWise);
                 var wiseImportIds = db.Queryable<StatementImport>()
-                    .Where(import => import.provider == StatementImportProvider.WiseMail)
+                    .Where(import => (import.provider == StatementImportProvider.WiseMail
+                        || import.provider == StatementImportProvider.PlaidWise) && import.statementKey != "")
                     .Select(import => import.Id)
                     .ToList();
                 var wiseRecords = wiseImportIds.Count == 0
@@ -5373,39 +5375,12 @@ namespace MyBook
                 foreach (var record in wiseRecords)
                     ApplyRecordDeltaToHolding(record, -1);
 
-                db.Ado.ExecuteCommand("""
-                    delete record
-                    from `Records` record
-                    join `StatementImports` statementImport
-                        on record.`_statementImport_Id` = statementImport.`Id`
-                    where statementImport.`provider` = @provider
-                    """,
-                    new SugarParameter("@provider", StatementImportProvider.WiseMail.ToString()));
+                if (wiseImportIds.Count > 0)
+                    db.Deleteable<Record>().Where(record => wiseImportIds.Contains(record._statementImport_Id)).ExecuteCommand();
                 DeleteUnreferencedAccountHoldings(wiseAccount.Id);
                 ValidateAccountBalancesFromHoldings(wiseAccount.Id);
-                db.Ado.ExecuteCommand("""
-                    delete statementImport
-                    from `StatementImports` statementImport
-                    left join (
-                        select `Id`
-                        from `StatementImports`
-                        where `provider` = @provider
-                        order by `time`, `Id`
-                        limit 1
-                    ) fixedImport
-                        on statementImport.`Id` = fixedImport.`Id`
-                    where statementImport.`provider` = @provider
-                        and fixedImport.`Id` is null
-                    """,
-                    new SugarParameter("@provider", StatementImportProvider.WiseMail.ToString()));
-
-                if (wiseAccount.relativeBalance)
-                {
-                    wiseAccount.relativeBalance = false;
-                    db.Updateable(wiseAccount)
-                        .UpdateColumns(account => new { account.relativeBalance })
-                        .ExecuteCommand();
-                }
+                if (wiseImportIds.Count > 0)
+                    db.Deleteable<StatementImport>().In(wiseImportIds).ExecuteCommand();
 
                 ProcessAllocatedExpenseDirtyRecordsCore();
             });
@@ -5556,6 +5531,14 @@ namespace MyBook
             return db.Queryable<StatementImport>()
                 .Where(statementImport => statementImport.provider == provider)
                 .ToList();
+        }
+
+        public StatementImport? GetLatestStatementImport(StatementImportProvider provider)
+        {
+            return db.Queryable<StatementImport>()
+                .Where(statementImport => statementImport.provider == provider && statementImport.statementKey != "")
+                .OrderByDescending(statementImport => statementImport.Id)
+                .First();
         }
 
         public HashSet<string> GetRecordSourceCodes(string prefix)
@@ -6391,7 +6374,8 @@ namespace MyBook
             List<Holding>? beginningHoldings = null,
             List<AccountInternalId>? internalCardNos = null,
             DateTime? recordDate = null,
-            string? sourceDataJson = null)
+            string? sourceDataJson = null,
+            bool forceValidateBeginningBalances = false)
         {
             Provider = provider;
             Time = time;
@@ -6405,6 +6389,7 @@ namespace MyBook
             InternalCardNos = internalCardNos ?? [];
             RecordDate = recordDate;
             SourceDataJson = sourceDataJson;
+            ForceValidateBeginningBalances = forceValidateBeginningBalances;
         }
 
         public StatementImportProvider Provider { get; }
@@ -6419,5 +6404,6 @@ namespace MyBook
         public List<AccountInternalId> InternalCardNos { get; }
         public DateTime? RecordDate { get; }
         public string? SourceDataJson { get; }
+        public bool ForceValidateBeginningBalances { get; }
     }
 }

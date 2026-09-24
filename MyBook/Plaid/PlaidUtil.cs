@@ -4,6 +4,7 @@ using Newtonsoft.Json.Linq;
 using System.Globalization;
 using System.IO;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace MyBook
@@ -47,9 +48,11 @@ namespace MyBook
         private readonly string secret;
         private readonly string apiBaseUrl;
         private readonly DatabaseUtil? database;
+        private readonly IConfigurationRoot config;
 
         public PlaidUtil(IConfigurationRoot config, DatabaseUtil? database = null)
         {
+            this.config = config;
             clientId = RequiredConfig(config, "plaid_client_id");
             secret = RequiredConfig(config, SelectedSecretConfigKey);
             apiBaseUrl = SelectedApiBaseUrl;
@@ -116,11 +119,15 @@ namespace MyBook
                     throw new PlaidRequestException($"Plaid POST {path}: " + FormatPlaidError(response,
                         await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false)));
                 var json = ParseResponse(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
-                var institution = ReadItemInstitution(json, item.itemId);
-                if (!String.IsNullOrWhiteSpace(item.institutionId) && institution.Id != item.institutionId)
-                    throw new PlaidRequestException($"Plaid POST {path}: institution identity changed.");
-                if (json["item"]!["error"]?.Type is not (null or JTokenType.Null))
-                    throw new PlaidRequestException($"Plaid POST {path}: Item reports a connection error; repair is required.");
+                // Sync does not return an Item; its caller verifies identity with /item/get and /accounts/get.
+                if (path != "/transactions/sync")
+                {
+                    var institution = ReadItemInstitution(json, item.itemId);
+                    if (!String.IsNullOrWhiteSpace(item.institutionId) && institution.Id != item.institutionId)
+                        throw new PlaidRequestException($"Plaid POST {path}: institution identity changed.");
+                    if (json["item"]!["error"]?.Type is not (null or JTokenType.Null))
+                        throw new PlaidRequestException($"Plaid POST {path}: Item reports a connection error; repair is required.");
+                }
                 return json;
             }
             catch (JsonException) { throw new PlaidRequestException($"Plaid POST {path}: invalid JSON."); }
@@ -139,6 +146,44 @@ namespace MyBook
         }
 
         internal sealed record InvestmentData(JObject Holdings, List<JObject> Transactions, List<JObject> Securities);
+
+        private static string RawHash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+        internal sealed record TransactionSyncData(JObject Accounts, List<JObject> Pages);
+
+        internal async Task<TransactionSyncData> GetTransactionUpdatesAsync(PlaidItem item, string? cursor, CancellationToken cancellationToken)
+        {
+            var status = await PostAsync("/item/get", item, null, cancellationToken).ConfigureAwait(false);
+            if (status["item"]?["billed_products"] is not JArray products || !products.Values<string>().Contains("transactions")
+                || status["status"]?["transactions"]?["last_successful_update"]?.Type != JTokenType.String)
+                throw new PlaidRequestException("Plaid POST /item/get: Transactions is not initialized; explicit authorization is required.");
+            var accounts = await PostAsync("/accounts/get", item, null, cancellationToken).ConfigureAwait(false);
+            var pages = new List<JObject>();
+            var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+            if (cursor is not null) seenCursors.Add(cursor);
+            while (true)
+            {
+                var arguments = new JObject { ["count"] = 500,
+                    ["options"] = new JObject { ["include_original_description"] = true } };
+                if (cursor is not null) arguments["cursor"] = cursor;
+                var page = await PostAsync("/transactions/sync", item, arguments, cancellationToken).ConfigureAwait(false);
+                if (page["has_more"]?.Type != JTokenType.Boolean)
+                    throw new PlaidRequestException("Plaid POST /transactions/sync: missing pagination flag.");
+                pages.Add(page);
+                cursor = Text(page, "next_cursor");
+                if (!page["has_more"]!.Value<bool>()) break;
+                if (pages.Count >= 100 || !seenCursors.Add(cursor))
+                    throw new PlaidRequestException("Plaid POST /transactions/sync: pagination failed to advance or exceeded limit.");
+            }
+            if (Text(pages[^1], "transactions_update_status") != "HISTORICAL_UPDATE_COMPLETE")
+                throw new PlaidRequestException("Plaid POST /transactions/sync: historical transactions are not ready.");
+            // Never commit a partial cursor. A failed page causes the next run to restart from the stored cursor.
+            var verification = await PostAsync("/accounts/get", item, null, cancellationToken).ConfigureAwait(false);
+            JArray Ordered(JObject response) => new(Rows(response, "accounts").OrderBy(a => Text(a, "account_id"), StringComparer.Ordinal));
+            if (!JToken.DeepEquals(Ordered(accounts), Ordered(verification)))
+                throw new PlaidRequestException("Plaid POST /accounts/get: accounts changed during sync; retry on the next run.");
+            return new(accounts, pages);
+        }
 
         internal async Task<InvestmentData> GetInvestmentsAsync(PlaidItem item, DateTime start, DateTime end, CancellationToken cancellationToken)
         {
@@ -242,7 +287,8 @@ namespace MyBook
                 {
                     "ITEM_LOGIN_REQUIRED" or "ITEM_LOCKED" or "INVALID_ACCESS_TOKEN" or "INVALID_API_KEYS"
                         or "PRODUCT_NOT_READY" or "PRODUCT_NOT_SUPPORTED" or "INSTITUTION_DOWN"
-                        or "INSTITUTION_NOT_RESPONDING" or "RATE_LIMIT_EXCEEDED" => errorCode,
+                        or "INSTITUTION_NOT_RESPONDING" or "RATE_LIMIT_EXCEEDED"
+                        or "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION" => errorCode,
                     _ => "unrecognized_error"
                 };
                 return $"HTTP {(int)response.StatusCode}; category={category}";

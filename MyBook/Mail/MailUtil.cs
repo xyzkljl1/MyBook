@@ -139,7 +139,7 @@ namespace MyBook
             return new DateTime(date.Year, date.Month, 1);
         }
 
-        private static string? FindInitialReportsDirectory()
+        internal static string? FindInitialReportsDirectory()
         {
             foreach (var root in EnumerateInitialReportSearchRoots())
             {

@@ -1,6 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
@@ -374,7 +372,6 @@ partial class PlaidUtil
     {
         if (left != right) throw SchwabRawError(field + $" mismatch: expected={left}, actual={right}");
     }
-    private static string RawHash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
     private static MailParseException SchwabRawError(string message) => new("Plaid Schwab: " + message);
 
     internal sealed class SchwabRawReport
