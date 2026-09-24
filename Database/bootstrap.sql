@@ -42,6 +42,15 @@ CREATE TABLE `oauthtokens` (
   UNIQUE KEY `unique_OAuthTokens_provider` (`provider`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `firsttradesessions` (
+  `Id` int NOT NULL AUTO_INCREMENT,
+  `loginHash` varchar(64) NOT NULL,
+  `stateJson` json NOT NULL,
+  `updateTimeUtc` datetime(6) NOT NULL,
+  PRIMARY KEY (`Id`),
+  UNIQUE KEY `unique_FirstTradeSessions_login_hash` (`loginHash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE `plaiditems` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `environment` enum('Production','Sandbox') NOT NULL DEFAULT 'Production',

@@ -284,6 +284,24 @@ namespace MyBook
         public DateTime updateTime { get; set; }
     }
 
+    // A login can own multiple investment accounts; this is not an Account relationship.
+    [SugarIndex("unique_FirstTradeSessions_login_hash", nameof(loginHash), OrderByType.Asc, true)]
+    [SugarTable("FirstTradeSessions")]
+    public class FirstTradeSession
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [SugarColumn(ColumnDataType = "varchar(64)")]
+        public required string loginHash { get; set; }
+
+        [SugarColumn(ColumnDataType = "json")]
+        public required string stateJson { get; set; }
+
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime updateTimeUtc { get; set; }
+    }
+
     [SugarIndex("unique_PlaidItems_environment_item_id", nameof(environment), OrderByType.Asc, nameof(itemId), OrderByType.Asc, true)]
     [SugarTable("PlaidItems")]
     public class PlaidItem

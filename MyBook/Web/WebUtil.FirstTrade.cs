@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Globalization;
-using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -30,13 +29,13 @@ namespace MyBook
                 var username = Required("firsttrade_username");
                 var password = Required("firsttrade_password");
                 var totpSecret = Required("firsttrade_totp_secret");
-                var directory = FirstTradeDirectory(username);
-                var latestPath = Path.Combine(directory, "latest.firsttrade.dpapi");
                 stage = "read database checkpoint";
                 var imports = database.GetStatementImports(StatementImportProvider.FirstTradeApi);
                 var checkpoint = database.GetStatementImportCheckpointTime(StatementImportProvider.FirstTradeApi)
                     ?? throw new FirstTradeException("initial database checkpoint is missing");
-                using var client = new FirstTradeClient(username, password, totpSecret, proxy: config["mail_proxy"]);
+                stage = "acquire database session";
+                using var sessionStore = database.OpenFirstTradeSession(username);
+                using var client = new FirstTradeClient(username, password, totpSecret, sessionStore, proxy: config["mail_proxy"]);
                 stage = "login";
                 await client.LoginAsync(timeout.Token).ConfigureAwait(false);
                 stage = "read account data";
@@ -48,23 +47,9 @@ namespace MyBook
                     return last.HasValue && last.Value.Date.AddDays(-7) > checkpoint.Date
                         ? last.Value.Date.AddDays(-7) : checkpoint.Date;
                 }).ConfigureAwait(false);
-                stage = "save encrypted capture";
-                Directory.CreateDirectory(directory);
-                var data = JsonSerializer.SerializeToUtf8Bytes(capture);
-                try
-                {
-                    var encrypted = ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser);
-                    // Preserve the source before writing financial data; database imports own the cursor.
-                    var archivePath = Path.Combine(directory, $"{capture.CompletedAtUtc:yyyyMMddTHHmmssfffffff}-{Guid.NewGuid():N}.firsttrade.dpapi");
-                    await WriteFirstTradeFileAsync(archivePath, encrypted, timeout.Token).ConfigureAwait(false);
-                    await WriteFirstTradeFileAsync(latestPath, encrypted, timeout.Token).ConfigureAwait(false);
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(data);
-                }
                 stage = "validate and import account data";
                 timeout.Token.ThrowIfCancellationRequested();
+                sessionStore.EnsureLock();
                 var recordCount = ImportFirstTradeCapture(capture);
                 Console.WriteLine($"FirstTrade imported {capture.Accounts.Count} account(s), {recordCount} record(s); cash, positions and account values validated.");
             }
@@ -75,35 +60,14 @@ namespace MyBook
             }
             catch (Exception)
             {
-                // Never propagate HTTP, JSON or filesystem exception details containing private data.
+                // Never propagate HTTP, JSON or database exception details containing private data.
                 throw new FirstTradeException($"{stage}: failed; private details suppressed");
             }
             finally { firstTradeLock.Release(); }
         }
 
-        private static async Task WriteFirstTradeFileAsync(string path, byte[] bytes, CancellationToken token)
-        {
-            var temporary = path + ".tmp";
-            try
-            {
-                await using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None,
-                    4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
-                {
-                    await stream.WriteAsync(bytes, token).ConfigureAwait(false);
-                    await stream.FlushAsync(token).ConfigureAwait(false);
-                }
-                token.ThrowIfCancellationRequested();
-                File.Move(temporary, path, true);
-            }
-            finally { if (File.Exists(temporary)) File.Delete(temporary); }
-        }
-
         private static string FirstTradeAccountKey(string account) =>
             "FirstTrade:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(account))) + ":";
-
-        private static string FirstTradeDirectory(string username) => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MyBook", "FirstTrade",
-            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username))));
 
         private int ImportFirstTradeCapture(FirstTradeCapture capture)
         {
@@ -271,7 +235,12 @@ namespace MyBook
             FirstTradeEqual(beginningTotal + records.Sum(r => r.v), endingTotal, "beginning value plus records");
             return new StatementRecordHoldingImport(StatementImportProvider.FirstTradeApi, time, key, account, records, holdings,
                 [new AccountBalance(account, new Currency(endingTotal, CurrencyType.USD))],
-                [new AccountBalance(account, new Currency(beginningTotal, CurrencyType.USD))], beginning);
+                [new AccountBalance(account, new Currency(beginningTotal, CurrencyType.USD))], beginning,
+                sourceDataJson: JsonSerializer.Serialize(new FirstTradeCapture
+                {
+                    Version = capture.Version, StartedAtUtc = capture.StartedAtUtc,
+                    CompletedAtUtc = capture.CompletedAtUtc, Accounts = [item]
+                }));
 
             void AddRecord(decimal amount, string reason, string source, DateTime date, bool isInternal, Holding? holding, decimal quantity)
             {
@@ -346,17 +315,17 @@ namespace MyBook
             private int loginAttempts;
             private long responseBytes;
             private readonly Func<DateTimeOffset> utcNow;
-            private readonly string sessionPath;
-            private readonly FileStream sessionLock;
+            private readonly DatabaseUtil.FirstTradeSessionLease sessionStore;
             private readonly CookieContainer? cookies;
             private FirstTradeSessionState session = new();
 
-            internal FirstTradeClient(string username, string password, string totpSecret,
+            internal FirstTradeClient(string username, string password, string totpSecret, DatabaseUtil.FirstTradeSessionLease sessionStore,
                 HttpMessageHandler? handler = null, string? proxy = null,
-                string? stateDirectory = null, Func<DateTimeOffset>? utcNow = null)
+                Func<DateTimeOffset>? utcNow = null)
             {
                 this.username = username;
                 this.password = password;
+                this.sessionStore = sessionStore;
                 this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
                 var transport = handler ?? CreateHandler(proxy);
                 cookies = (transport as HttpClientHandler)?.CookieContainer;
@@ -367,21 +336,15 @@ namespace MyBook
                 catch { client.Dispose(); throw; }
                 try
                 {
-                    var directory = stateDirectory ?? FirstTradeDirectory(username);
-                    Directory.CreateDirectory(directory);
-                    sessionPath = Path.Combine(directory, "session.firsttrade.dpapi");
-                    // Hold a non-waiting cross-process lock through the entire client lifetime.
-                    sessionLock = new FileStream(sessionPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-                    if (File.Exists(sessionPath))
+                    var stored = sessionStore.Read();
+                    if (stored is not null)
                     {
-                        if (new FileInfo(sessionPath).Length > 1024 * 1024)
-                            throw new FirstTradeException("invalid local session state");
-                        var clear = ProtectedData.Unprotect(File.ReadAllBytes(sessionPath), null, DataProtectionScope.CurrentUser);
-                        try { session = JsonSerializer.Deserialize<FirstTradeSessionState>(clear)
-                            ?? throw new FirstTradeException("invalid local session state"); }
-                        finally { CryptographicOperations.ZeroMemory(clear); }
+                        if (stored.Length > 1024 * 1024)
+                            throw new FirstTradeException("invalid database session state");
+                        session = JsonSerializer.Deserialize<FirstTradeSessionState>(stored)
+                            ?? throw new FirstTradeException("invalid database session state");
                         if (session.Version != 1 || session.Failures is < 0 or > 24 || session.Cookies is null)
-                            throw new FirstTradeException("invalid local session state");
+                            throw new FirstTradeException("invalid database session state");
                     }
                     ftat = session.Ftat;
                     sid = session.Sid;
@@ -392,10 +355,9 @@ namespace MyBook
                 }
                 catch
                 {
-                    sessionLock?.Dispose();
                     client.Dispose();
                     CryptographicOperations.ZeroMemory(totpKey);
-                    throw new FirstTradeException("local session state unavailable or in use; login was not attempted");
+                    throw new FirstTradeException("database session state unavailable or invalid; login was not attempted");
                 }
             }
 
@@ -473,25 +435,25 @@ namespace MyBook
 
             private void EnsureRequestsAllowed()
             {
+                try { sessionStore.EnsureLock(); }
+                catch { throw new FirstTradeException("database session lock lost; requests stopped"); }
                 if (utcNow() < session.BlockedUntilUtc)
                     throw new FirstTradeException($"requests paused until {session.BlockedUntilUtc:O} after access denial or rate limiting");
             }
 
-            private async Task SaveSessionAsync()
+            private Task SaveSessionAsync()
             {
                 session.Ftat = ftat;
                 session.Sid = sid;
                 if (cookies is not null)
                     session.Cookies = cookies.GetAllCookies().Cast<Cookie>().Where(c => !c.Expired)
                         .Select(c => new FirstTradeCookie(c.Name, c.Value, c.Path, c.Domain, c.Secure, c.HttpOnly, c.Expires)).ToList();
-                var clear = JsonSerializer.SerializeToUtf8Bytes(session);
                 try
                 {
-                    var encrypted = ProtectedData.Protect(clear, null, DataProtectionScope.CurrentUser);
-                    await WriteFirstTradeFileAsync(sessionPath, encrypted, CancellationToken.None).ConfigureAwait(false);
+                    sessionStore.Save(JsonSerializer.Serialize(session));
                 }
-                catch { throw new FirstTradeException("cannot persist session/login cooldown; requests stopped"); }
-                finally { CryptographicOperations.ZeroMemory(clear); }
+                catch { throw new FirstTradeException("cannot persist database session/login cooldown; requests stopped"); }
+                return Task.CompletedTask;
             }
 
             internal async Task<FirstTradeCapture> FetchAsync(FirstTradeCapture? previous, CancellationToken token,
@@ -715,7 +677,6 @@ namespace MyBook
                 ftat = sid = null;
                 session.Ftat = session.Sid = null;
                 session.Cookies.Clear();
-                sessionLock.Dispose();
             }
             private sealed class FirstTradeSessionState
             {

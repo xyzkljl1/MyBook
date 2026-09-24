@@ -30,8 +30,8 @@ namespace MyBook
         private static readonly Regex BootstrapBackupFileRegex = new(
             @"^(?<prefix>bootstrap-\d{8}-\d{6}-\d{6}-(?<hash>[0-9a-f]{12}))\.(?<kind>schema|fixed-data)\.sql$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
-        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(PlaidItem), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(AllocatedExpenseItem), typeof(Snapshot), typeof(SnapshotItem)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTableTypes = [typeof(Account), typeof(AccountInternalId), typeof(OAuthToken), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Finance), typeof(StatementImport), typeof(Holding), typeof(Record), typeof(AllocatedExpenseItem), typeof(Snapshot), typeof(SnapshotItem)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -196,6 +196,85 @@ namespace MyBook
                 throw new ArgumentException("Debug SQL is empty.", nameof(sql));
 
             return ExecuteLockedTransaction(() => db.Ado.ExecuteCommand(sql));
+        }
+
+        public FirstTradeSessionLease OpenFirstTradeSession(string username) =>
+            new(db.CurrentConnectionConfig.ConnectionString, username);
+
+        internal sealed class FirstTradeSessionLease : IDisposable
+        {
+            private readonly SqlSugarClient connection;
+            private readonly string loginHash;
+            private readonly string lockName;
+            private readonly int connectionId;
+            private bool disposed;
+
+            internal FirstTradeSessionLease(string connectionString, string username)
+            {
+                loginHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username)));
+                lockName = "MyBook.FirstTrade:" + loginHash[..40];
+                connection = CreateDatabaseClient(connectionString);
+                connection.CurrentConnectionConfig.IsAutoCloseConnection = false;
+                connection.Ado.CommandTimeOut = 30;
+                try
+                {
+                    connection.Ado.Open();
+                    connectionId = connection.Ado.GetInt("select connection_id()");
+                    if (connection.Ado.GetInt("select get_lock(@name, 0)", new SugarParameter("@name", lockName)) != 1)
+                        throw new InvalidOperationException();
+                }
+                catch
+                {
+                    connection.Dispose();
+                    throw new InvalidOperationException("FirstTrade session database unavailable or in use; login was not attempted.");
+                }
+            }
+
+            public void EnsureLock()
+            {
+                try
+                {
+                    if (disposed || connection.Ado.Connection.State != System.Data.ConnectionState.Open
+                        || connection.Ado.GetInt("select connection_id() = @id and is_used_lock(@name) = @id",
+                            new SugarParameter("@id", connectionId), new SugarParameter("@name", lockName)) != 1)
+                        throw new InvalidOperationException();
+                }
+                catch { throw new InvalidOperationException("FirstTrade session lock lost; requests stopped."); }
+            }
+
+            public string? Read()
+            {
+                EnsureLock();
+                try { return connection.Queryable<FirstTradeSession>().Where(row => row.loginHash == loginHash).First()?.stateJson; }
+                catch { throw new InvalidOperationException("FirstTrade session database read failed."); }
+            }
+
+            public void Save(string stateJson)
+            {
+                EnsureLock();
+                try
+                {
+                    // Session/cooldown writes commit independently of financial import validation.
+                    var affected = connection.Ado.ExecuteCommand("""
+                        insert into FirstTradeSessions (loginHash, stateJson, updateTimeUtc)
+                        select @hash, @state, utc_timestamp(6)
+                        where connection_id() = @id and is_used_lock(@name) = @id
+                        on duplicate key update stateJson = @state, updateTimeUtc = utc_timestamp(6)
+                        """, new SugarParameter("@hash", loginHash), new SugarParameter("@state", stateJson),
+                        new SugarParameter("@id", connectionId), new SugarParameter("@name", lockName));
+                    if (affected == 0) throw new InvalidOperationException();
+                }
+                catch { throw new InvalidOperationException("FirstTrade session database write failed; requests stopped."); }
+            }
+
+            public void Dispose()
+            {
+                if (disposed) return;
+                disposed = true;
+                try { connection.Ado.GetInt("select release_lock(@name)", new SugarParameter("@name", lockName)); }
+                catch { /* A broken connection cannot retain a usable session lock. */ }
+                finally { connection.Dispose(); }
+            }
         }
 
         public OAuthToken? GetOAuthToken(OAuthTokenProvider provider)
@@ -5935,6 +6014,8 @@ namespace MyBook
                 return "AccountBalances";
             if (type == typeof(OAuthToken))
                 return "OAuthTokens";
+            if (type == typeof(FirstTradeSession))
+                return "FirstTradeSessions";
             if (type == typeof(PlaidItem))
                 return "PlaidItems";
             if (type == typeof(Record))
