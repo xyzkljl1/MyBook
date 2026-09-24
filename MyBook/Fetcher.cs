@@ -344,7 +344,7 @@ namespace MyBook
 
         private static string GetImportFailureMarkerPath()
         {
-            return Path.Combine(Path.GetTempPath(), ImportFailureMarkerFileName);
+            return Path.Combine(AppContext.BaseDirectory, ImportFailureMarkerFileName);
         }
 
         public void ClearImportFailureMarker()

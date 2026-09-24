@@ -122,7 +122,7 @@ Release builds run an import cycle on startup and daily afterward; Debug builds 
 
 SMS polling has its own configured interval. It verifies the SIM IMSI, combines complete long messages, and imports supported bank notifications. Unsupported bank formats fail visibly. Mail imports share IMAP sessions and download matching attachments.
 
-Each cycle refreshes exchange rates and creates a snapshot. The UI shows the active task, last run and next run. Failures create `%TEMP%\MyBook.import-failed.tmp`; the clear-marker button removes the warning without retrying. Successful imports do not clear it automatically.
+Each cycle refreshes exchange rates and creates a snapshot. The UI shows the active task, last run and next run. Failures create `MyBook.import-failed.tmp` in the application directory; the clear-marker button removes the warning without retrying. Successful imports do not clear it automatically.
 
 ## Nexus OAuth
 

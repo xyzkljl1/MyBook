@@ -27,7 +27,6 @@
     <PackageReference Include="PdfPig" Version="0.1.14" />
     <PackageReference Include="SqlSugarCore" Version="5.1.4.214" />
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
