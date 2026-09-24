@@ -18,6 +18,7 @@ namespace MyBook
         CryptoUtil? crypto;
         WebUtil? web;
         PlaidUtil? plaid;
+        WiseUtil? wise;
         DatabaseUtil? database;
         SIMUtil? sim;
         Timer? dailyTimer;
@@ -51,6 +52,7 @@ namespace MyBook
             pubWeb = new(config, database);
             graphQL = new(config, database);
             web = new(config, database);
+            wise = new(config, database);
             if (!String.IsNullOrWhiteSpace(config["plaid_client_id"])
                 && !String.IsNullOrWhiteSpace(config[PlaidUtil.SelectedSecretConfigKey]))
                 plaid = new(config, database);
@@ -158,6 +160,8 @@ namespace MyBook
                 {
                     await RunImportTaskAsync("Plaid Schwab", () => true, () => plaid.FetchSchwabAsync()).ConfigureAwait(false);
                 }
+                if (wise is not null && wise.IsConfigured)
+                    await RunImportTaskAsync("Wise API", () => true, () => wise.FetchAsync()).ConfigureAwait(false);
                 if (graphQL is not null)
                     await RunImportTaskAsync(
                         "Nexus DP",

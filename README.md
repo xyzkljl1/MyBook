@@ -20,7 +20,6 @@ The project has been developed with extensive vibe coding using OpenAI GPT-5 Cod
 - `Database/bootstrap.sql` - tracked database schema used to rebuild an empty database
 - `Database/bootstrap.fixed-data.sql` - ignored local fixed-data export used with the schema for a full rebuild
 - `MyBook/config.json.example` - tracked configuration template with blank or zero values
-- `*.TODO.cs` modules - placeholders or not-yet-verified integrations
 
 Local statements, downloaded reports, `config.json`, database backups, and other private/runtime files are intentionally ignored.
 
@@ -39,6 +38,7 @@ Expected files:
 - **iFAST:** one account with separate GBP, USD, EUR, HKD, SGD and RMB cash holdings, imported from transaction emails and local monthly statements. Missing monthly interest uses the latest published rate and a provisional daily-balance calculation; later statements must agree exactly.
 - **ZA:** transaction emails on demand, not scheduled. Email notices do not provide a complete ledger or verified ending balance.
 - **FirstTrade:** read-only account balances, positions and transaction history through its web API.
+- **Wise:** daily read-only personal-token API imports, including multi-currency balances, activities, transfer details and payment receipts. Existing account identifiers are used to resolve counterparties; unavailable fee splits remain explicitly pending rather than estimated.
 - **Schwab:** direct Plaid investment imports.
 - **Kraken / Ethereum:** completed-day transactions and asset valuations. Crypto quantities use `decimal(30,18)`; unsupported precision fails. Matching internal transfers requires the same chain event and opposite asset quantities.
 - **Nexus:** monthly donation-point income through GraphQL.
@@ -48,57 +48,40 @@ Imports require existing accounts and fixed starting checkpoints. They do not cr
 
 ## Configuration
 
-### Plaid Imports
-
-Configure `plaid_client_id` and `plaid_production_secret`, then authorize from the build-output directory:
-
-```powershell
-dotnet MyBook.dll --plaid-link --country US --product investments
-```
-
-Production is the default; Sandbox requires changing the compile-time environment switch. Each import must include every configured Schwab account or the entire batch fails. Imported history starts at the fixed checkpoint, then advances with a seven-day overlap. Transactions, holdings and values must reconcile exactly.
-
-Plaid Items and their unencrypted access tokens are private fixed data. Changing them requires explicit approval; imports never repair authorization automatically. Quote dates are separate from the query date and do not indicate when the entire account last changed.
-
-Plaid API requests reject HTTP redirects instead of forwarding credentials to another address.
-
-Only if saving a newly authorized Item to the database fails, its token is written in plaintext to `plaid-token-recovery-*.local.json` beside the application, and the error reports the path. Use it for manual recovery, then delete it; never share or commit it. Successful saves create no recovery file.
-
-### FirstTrade Read-Only API Import
-
-Configure `firsttrade_username`, `firsttrade_password` and `firsttrade_totp_secret` (the original Base32 authenticator key, not a six-digit code). The implementation references `MaxxRK/firstrade-api`, supports only login and read-only queries, and uses `mail_proxy` when configured.
-
-Sessions and account captures are stored using Windows CurrentUser DPAPI under `%LOCALAPPDATA%/MyBook/FirstTrade/`. Keep these private and do not routinely delete session files: they also preserve login cooldowns. Credentials in local configuration are not encrypted. Unsupported authentication challenges fail rather than repeatedly logging in.
-
-Imported values use cash plus individual positions. Only FirstTrade's equity-subtotal and account-total checks allow a difference strictly below USD 1; no adjustment Record is generated. Other checks remain exact.
-
-Create a local configuration file from the example:
+Create a local configuration file from the example and fill the values for the integrations you use:
 
 ```powershell
 Copy-Item MyBook\config.json.example MyBook\config.json
 ```
 
-Fill only the values needed for the integrations you use. Do not commit `MyBook/config.json`.
-
-Notable configuration keys:
+`config.json` contains private credentials and is excluded from Git. Main settings:
 
 - `database_connection` - MySQL connection string. If empty, the app falls back to the built-in local default.
-- `yahoo_user` / `yahoo_pass` - mailbox credentials for statement mail imports.
-- `gmail_user` / `gmail_app_pwd` - Gmail credentials used by supported mail fetches.
-- `mail_proxy` - optional IMAP proxy for all mailbox fetches, for example `http://127.0.0.1:1196` or `socks5://127.0.0.1:1195`. Leave empty for direct connections.
-- `pubweb_proxy` - optional HTTP proxy for public web market-data fetches, for example `http://127.0.0.1:8000`. Leave empty for direct connections; system proxy settings are not used by these fetches.
-- `alphavantage_key` - exchange-rate or finance data key.
-- `ib_gateway_port` - Interactive Brokers gateway port.
-- `nexus_api_key` - legacy/personal Nexus API key fallback.
-- `kraken_api_key` / `kraken_api_secret` - Kraken read-only API credentials for authenticated account queries.
-- `nexus_oauth_client_id` - Nexus OAuth PKCE token refresh client id. `nexus_oauth_client_secret` is retained for local compatibility but is not sent by the PKCE refresh flow.
-- `plaid_client_id` / `plaid_sandbox_secret` / `plaid_production_secret` - Plaid credentials used for account authorization and financial imports. The compile-time environment switch uses the Production secret by default; secrets must match the selected environment.
-- `etherscan_api_key` - Etherscan API key for read-only Ethereum mainnet address balance and transaction queries.
-- `sim_imsi` - expected IMSI for the local USB SIM modem. Leave empty to disable scheduled SMS polling.
-- `sim_poll_interval_minutes` - optional SMS polling interval. Values less than 1 use the built-in default of 5 minutes.
-- `GoogleCloudServeAccountKey` - Google service-account JSON key for read-only Drive reports. Share only the `Reports` folder with its `client_email` as Viewer; no Google Cloud/IAM roles are needed.
+- `yahoo_user` / `yahoo_pass`, `gmail_user` / `gmail_app_pwd` - statement-mail credentials.
+- `mail_proxy` - optional mailbox and FirstTrade proxy; `pubweb_proxy` - optional public market-data proxy. Leave empty for direct connections.
+- `alphavantage_key` - market-data key; `ib_gateway_port` - Interactive Brokers gateway port.
+- `nexus_api_key` - Nexus personal API key used by current imports.
+- `kraken_api_key` / `kraken_api_secret`, `etherscan_api_key` - read-only Kraken and Ethereum queries.
+- `sim_imsi` - expected SIM IMSI; leave empty to disable polling. `sim_poll_interval_minutes` defaults to 5 when unset or less than 1.
+- `GoogleCloudServeAccountKey` - Google service-account JSON key. Share the `Reports` folder with its `client_email` as Viewer; no Google Cloud/IAM roles are needed.
 
-When adding, removing, or renaming configuration keys, update `MyBook/config.json.example` at the same time and keep all example values blank or zero.
+### Plaid / Schwab
+
+Set `plaid_client_id` and `plaid_production_secret`, then authorize from the build-output directory:
+
+```powershell
+dotnet MyBook.dll --plaid-link --country US --product investments
+```
+
+Production is the default. Sandbox requires changing the compile-time environment switch and using `plaid_sandbox_secret`. Authorizations are stored in the local database. If saving a new authorization fails, a plaintext `plaid-token-recovery-*.local.json` file is created beside the application for manual recovery; delete it after use.
+
+### Wise
+
+Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wise; the old importer is no longer compiled. Switching existing Wise data requires cleanup before the first API import. Some details, including conversion fees, are unavailable through the API and remain marked as pending.
+
+### FirstTrade
+
+Set `firsttrade_username`, `firsttrade_password` and `firsttrade_totp_secret` (the original Base32 authenticator key, not a six-digit code). The read-only integration references `MaxxRK/firstrade-api` and uses `mail_proxy` when configured. Encrypted sessions are stored under `%LOCALAPPDATA%/MyBook/FirstTrade/`; retaining them avoids unnecessary logins and preserves login cooldowns.
 
 ## Database
 
@@ -116,7 +99,7 @@ Export the current schema to `Database/bootstrap.sql` and fixed data to the igno
 dotnet run --project MyBook\MyBook.csproj -- --export-bootstrap-sql
 ```
 
-`Database/bootstrap.fixed-data.sql` contains private account metadata and unencrypted Plaid access tokens, so it is intentionally not tracked. Treat it and its backup copies as credential files: keep them private, never print their contents or commit them, and use protected storage for external backups.
+`Database/bootstrap.fixed-data.sql` contains private account metadata and unencrypted Plaid access tokens. It and its backups are excluded from Git and require secure storage.
 Backup versions are kept as ignored `Database/bootstrap-*.schema.sql` and `Database/bootstrap-*.fixed-data.sql` file pairs.
 
 Create a start snapshot:
@@ -157,22 +140,3 @@ dotnet run --project MyBook\MyBook.csproj -- --debug-authorize-nexus-oauth
 ```
 
 This opens the Nexus authorization page in the browser and listens for the callback on `http://127.0.0.1:4700/callback`. The command does not print the authorization URL or OAuth tokens.
-
-## TODO Modules
-
-The following modules are intentionally present as placeholders or not-yet-complete integrations:
-
-- `FileUtil.WeChat.TODO.cs`
-- `MailUtil.Steam.TODO.cs`
-- `WebUtil.Bilibili.TODO.cs`
-- `WebUtil.Meituan.TODO.cs`
-
-These modules should fail loudly or remain unconnected until implemented and validated.
-
-## Accuracy Notes
-
-- Records must be linked to a `StatementImport`.
-- External imports should update records and holdings/balances as one atomic operation.
-- Account balances are derived from holdings through the `AccountBalances` view.
-- Snapshots represent database state at an import progress point, not natural-date account state.
-- `Records.expenseAllocationDays` controls allocated-expense periods. When `expenseAllocationSkipDays` is empty, the original day-count behavior is used. When both values are present, `expenseAllocationSkipDays` may be 0 or must have the same sign as `expenseAllocationDays`, and `abs(expenseAllocationSkipDays) < abs(expenseAllocationDays)`; the two values then define the relative allocation boundaries around the record date.

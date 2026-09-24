@@ -12,6 +12,7 @@
         "client_x509_cert_url": "",
         "universe_domain": ""
     },
+    "wise_api_token": "",
     "firsttrade_username": "",
     "firsttrade_password": "",
     "firsttrade_totp_secret": "",

@@ -2714,6 +2714,9 @@ namespace MyBook
         }
 
         public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, params string?[] texts)
+            => FindAccountByInternalCardNoText(preferredAccountType, matchContext, true, texts);
+
+        public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, bool logDetails, params string?[] texts)
         {
             var usefulTexts = texts
                 .Where(text => !String.IsNullOrWhiteSpace(text))
@@ -2769,11 +2772,12 @@ namespace MyBook
                 .ToList();
             if (matchedAccounts.Count > 1)
             {
+                if (!logDetails) throw new InvalidOperationException("Ambiguous internal account id match.");
                 throw new InvalidOperationException(
                     $"Ambiguous internal account id match: {String.Join(", ", matchedAccounts.Select(account => account.name))}; text={String.Join(" / ", usefulTexts)}");
             }
 
-            if (matchedAccounts.Count == 1)
+            if (matchedAccounts.Count == 1 && logDetails)
                 LogInternalCardNoMatch(matchContext, prioritizedMatches.First(), usefulTexts);
 
             return matchedAccounts.FirstOrDefault();
@@ -5362,9 +5366,11 @@ namespace MyBook
                 var wiseAccount = GetAccountByName("WISE");
                 ClearRecordMatchesForStatementProvider(StatementImportProvider.WiseMail);
                 ClearRecordMatchesForStatementProvider(StatementImportProvider.PlaidWise);
+                ClearRecordMatchesForStatementProvider(StatementImportProvider.WiseApi);
                 var wiseImportIds = db.Queryable<StatementImport>()
                     .Where(import => (import.provider == StatementImportProvider.WiseMail
-                        || import.provider == StatementImportProvider.PlaidWise) && import.statementKey != "")
+                        || import.provider == StatementImportProvider.PlaidWise
+                        || import.provider == StatementImportProvider.WiseApi) && import.statementKey != "")
                     .Select(import => import.Id)
                     .ToList();
                 var wiseRecords = wiseImportIds.Count == 0
@@ -5535,9 +5541,12 @@ namespace MyBook
 
         public StatementImport? GetLatestStatementImport(StatementImportProvider provider)
         {
-            return db.Queryable<StatementImport>()
+            // Sorting rows containing large source JSON can exhaust MySQL's sort buffer.
+            var id = db.Queryable<StatementImport>()
                 .Where(statementImport => statementImport.provider == provider && statementImport.statementKey != "")
-                .OrderByDescending(statementImport => statementImport.Id)
+                .Max(statementImport => statementImport.Id);
+            return id == 0 ? null : db.Queryable<StatementImport>()
+                .Where(statementImport => statementImport.Id == id)
                 .First();
         }
 

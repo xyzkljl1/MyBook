@@ -1,4 +1,4 @@
-// 无法自动化
+// Deprecated: replaced by WiseUtil; retained for reference and excluded from compilation.
 using System.Globalization;
 using System.Text.Json;
 using Newtonsoft.Json.Linq;
