@@ -63,7 +63,7 @@ namespace MyBook
 
         public static bool IsCryptoAsset(string asset)
         {
-            return GetBaseAsset(asset) is "BTC" or "ETH" or "USDT";
+            return GetBaseAsset(asset) is "BTC" or "ETH" or "USDT" or "BABY";
         }
 
         public static string GetBaseAsset(string asset)

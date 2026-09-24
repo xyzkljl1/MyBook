@@ -52,26 +52,6 @@ namespace MyBook
                 return;
             }
 
-            if (e.Args.Any(arg => arg.Equals("--export-bootstrap-sql", StringComparison.OrdinalIgnoreCase)))
-            {
-                var exitCode = 0;
-                try
-                {
-                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
-                    var result = new DatabaseUtil(config).EnsureBootstrapSqlBackupIfChanged("manual export");
-                    WriteBootstrapSqlBackupResult(result);
-                }
-                catch (Exception exception)
-                {
-                    exitCode = 1;
-                    Console.WriteLine($"Export bootstrap SQL failed: {exception.Message}");
-                }
-
-                Shutdown(exitCode);
-                Environment.Exit(exitCode);
-                return;
-            }
-
             if (e.Args.Any(arg => arg.Equals("--rebuild-database-from-bootstrap-sql", StringComparison.OrdinalIgnoreCase)))
             {
                 var exitCode = 0;
@@ -123,22 +103,8 @@ namespace MyBook
                 return;
             }
 
-            var startupConfig = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
-            new DatabaseUtil(startupConfig).EnsureBootstrapSqlBackupIfChanged("startup");
-
             MainWindow = new MainWindow();
             MainWindow.Show();
-        }
-
-        private static void WriteBootstrapSqlBackupResult(BootstrapSqlBackupResult result)
-        {
-            Console.WriteLine($"Bootstrap schema SQL: {result.BootstrapPath}");
-            Console.WriteLine($"Bootstrap fixed-data SQL: {result.FixedDataPath}");
-            Console.WriteLine($"Backup directory: {result.BackupDirectory}");
-            Console.WriteLine($"Hash: {result.Hash}");
-            Console.WriteLine($"Bootstrap schema changed: {result.BootstrapChanged}");
-            Console.WriteLine($"Bootstrap fixed-data changed: {result.FixedDataChanged}");
-            Console.WriteLine($"Backup written: {result.BackupWritten}");
         }
 
         protected override void OnExit(ExitEventArgs e)

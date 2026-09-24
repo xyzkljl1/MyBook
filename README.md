@@ -40,7 +40,7 @@ Expected files:
 - **FirstTrade:** read-only account balances, positions and transaction history through its web API.
 - **Wise:** daily read-only personal-token API imports, including multi-currency balances, activities, transfer details and payment receipts. Existing account identifiers are used to resolve counterparties; unavailable fee splits remain explicitly pending rather than estimated.
 - **Schwab:** direct Plaid investment imports.
-- **Kraken / Ethereum:** completed-day transactions and asset valuations. Crypto quantities use `decimal(30,18)`; unsupported precision fails. Matching internal transfers requires the same chain event and opposite asset quantities.
+- **Kraken / Ethereum:** completed-day transactions and asset valuations. Kraken supports BTC, ETH, USDT and BABY, including BABY staking rewards valued using the daily BABY/USD close. Crypto quantities use `decimal(30,18)`; unsupported precision fails. Matching internal transfers requires the same chain event and opposite asset quantities.
 - **Nexus:** monthly donation-point income through GraphQL.
 - **Google Drive:** read-only report transport restricted to the shared `Reports` folder.
 
@@ -95,14 +95,8 @@ Rebuild an empty database from the tracked schema plus the local fixed-data file
 dotnet run --project MyBook\MyBook.csproj -- --rebuild-database-from-bootstrap-sql
 ```
 
-Export the current schema to `Database/bootstrap.sql` and fixed data to the ignored `Database/bootstrap.fixed-data.sql`:
-
-```powershell
-dotnet run --project MyBook\MyBook.csproj -- --export-bootstrap-sql
-```
-
 `Database/bootstrap.fixed-data.sql` contains private account metadata and unencrypted Plaid access tokens. It and its backups are excluded from Git and require secure storage.
-Backup versions are kept as ignored `Database/bootstrap-*.schema.sql` and `Database/bootstrap-*.fixed-data.sql` file pairs.
+Automatic backup and manual export are local-debug extensions, not included in the repository. When present, they save schema/fixed-data files and versioned backup pairs in `Database` under the application directory; normal startup still runs automatic backup.
 
 Create a start snapshot:
 
