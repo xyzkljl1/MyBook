@@ -85,6 +85,8 @@ Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wi
 
 Set `firsttrade_username`, `firsttrade_password` and `firsttrade_totp_secret` (the original Base32 authenticator key, not a six-digit code). The read-only integration references `MaxxRK/firstrade-api` and uses `mail_proxy` when configured. Sessions and login cooldowns are stored in the database; raw financial responses are saved only with successful imports. These sensitive database contents are not DPAPI-encrypted. No session or response files are written, and old file-based sessions are not loaded.
 
+Firstrade uses different quote providers for balances and positions, so their valuations may differ. The equity subtotal and account total checks allow an absolute difference below USD 100; differences of USD 100 or more fail. Holdings and records use detail values without residual adjustments; all other exact validations remain unchanged.
+
 ## Database
 
 The application validates its MySQL schema on startup. Accounts, registered account identifiers, Plaid Items, import checkpoints and Start snapshots are fixed data preserved by cleanup. Imported records, holdings, other snapshots and OAuth tokens are runtime data.
