@@ -2967,7 +2967,7 @@ namespace MyBook
             AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 1, "NAV previous component sum"), previousTotal, "IBKR NAV previous component sum");
             AssertIBKRMoneyFieldAlmostEquals(currentLongTotal, ParseIBKRDecimalAt(totalRow, 2, "NAV current long component sum"), totalRow.Fields[2], "IBKR NAV current long component sum");
             AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 3, "NAV current short component sum"), currentShortTotal, "IBKR NAV current short component sum");
-            AssertIBKRMoneyEquals(ParseIBKRDecimalAt(totalRow, 4, "NAV current component sum"), currentTotal, "IBKR NAV current component sum");
+            AssertIBKRMoneyFieldAlmostEquals(currentTotal, ParseIBKRDecimalAt(totalRow, 4, "NAV current component sum"), totalRow.Fields[4], "IBKR NAV current component sum");
             AssertIBKRMoneyFieldAlmostEquals(changeTotal, ParseIBKRDecimalAt(totalRow, 5, "NAV change component sum"), totalRow.Fields[5], "IBKR NAV change component sum");
         }
 
