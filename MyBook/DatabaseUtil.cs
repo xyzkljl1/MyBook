@@ -22,6 +22,7 @@ namespace MyBook
         private const string InitialHoldingReason = "Initial holding";
         private const string InitialCashBalanceReason = "Initial cash balance";
         private const string BeginningHoldingRestatementReason = "期初估值重述";
+        private static readonly string[] UniqueTransferInstitutionTypes = ["WISE", "SCHWAB", "FIRSTTRADE", "KRAKEN", "NEXUS", "ZA", "CICC"];
         private const int BootstrapBackupRetention = 3;
         private const string BootstrapSqlRelativePath = "Database/bootstrap.sql";
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
@@ -2795,6 +2796,35 @@ namespace MyBook
         public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, params string?[] texts)
             => FindAccountByInternalCardNoText(preferredAccountType, matchContext, true, texts);
 
+        public Account? FindTransferAccountByInstitution(Account? matchedAccount, params string?[] counterpartyNames)
+        {
+            return ResolveTransferAccountByInstitution(matchedAccount, db.Queryable<Account>().ToList(), counterpartyNames);
+        }
+
+        private static Account? ResolveTransferAccountByInstitution(Account? matchedAccount, List<Account> accounts, string?[] counterpartyNames)
+        {
+            var types = GetTransferInstitutionTypes(counterpartyNames);
+            if (types.Count == 0) return matchedAccount;
+            if (types.Count != 1)
+                throw new InvalidOperationException("Ambiguous transfer counterparty institution.");
+            if (matchedAccount is not null)
+            {
+                if (!String.Equals(GetAccountType(matchedAccount.name), types[0], StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Transfer account identifier conflicts with counterparty institution.");
+                return matchedAccount;
+            }
+            var candidates = accounts.Where(account => !IsUndeterminedAccount(account)
+                && String.Equals(GetAccountType(account.name), types[0], StringComparison.OrdinalIgnoreCase)).ToList();
+            if (candidates.Count != 1)
+                throw new InvalidOperationException($"Transfer institution {types[0]} requires exactly one configured account when no account identifier matches.");
+            return candidates[0];
+        }
+
+        private static List<string> GetTransferInstitutionTypes(params string?[] counterpartyNames) =>
+            UniqueTransferInstitutionTypes.Where(type => counterpartyNames.Any(text => !String.IsNullOrWhiteSpace(text)
+                && Regex.IsMatch(text, $@"(?<![A-Za-z0-9]){type}(?![A-Za-z0-9])",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))).ToList();
+
         public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, bool logDetails, params string?[] texts)
         {
             var usefulTexts = texts
@@ -2983,6 +3013,23 @@ namespace MyBook
                 var account = GetPostingAccount(record.Account);
                 record.Account = account;
                 record._account_Id = account.Id;
+                // Only newly inserted transfer principal is eligible, never fees or unsplit gross amounts.
+                var counterparty = Regex.Split(record.DestAccount.Split(';', 2)[0], @"\bRef\s*:",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)[0];
+                if (record.Reason is "转入" or "转出" or "转账"
+                    && GetTransferInstitutionTypes(counterparty).Count > 0)
+                {
+                    var exact = FindAccountByName(record.DestAccount) ?? FindAccountByInternalCardNoText(
+                        null, "transfer counterparty", false, counterparty);
+                    var target = FindTransferAccountByInstitution(exact, counterparty);
+                    if (target is not null && GetPostingAccount(target).Id != account.Id)
+                    {
+                        if (record.DestAccount != target.name)
+                            record.Source += $"; counterparty={record.DestAccount}";
+                        record.DestAccount = GetPostingAccount(target).name;
+                        record.isInternal = true;
+                    }
+                }
                 ResolveRecordHolding(record, account);
                 if (record._holding_Id <= 0)
                     throw new InvalidOperationException("Record holding is required.");

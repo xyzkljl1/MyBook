@@ -21,10 +21,26 @@ internal sealed partial class WiseUtil
         return new(200, text, Convert.ToHexString(SHA256.HashData(bytes)));
     }
 
-    private AccountMatch FindCounterparty(EventData data) => ResolveCounterparty(data,
-        value => database.FindAccountByInternalCardNo(value),
-        texts => database.FindAccountByInternalCardNoText(null, "Wise API counterparty", false, texts),
-        account => database.GetPostingAccount(account));
+    private AccountMatch FindCounterparty(EventData data)
+    {
+        var match = ResolveCounterparty(data,
+            value => database.FindAccountByInternalCardNo(value),
+            texts => database.FindAccountByInternalCardNoText(null, "Wise API counterparty", false, texts),
+            account => database.GetPostingAccount(account));
+        if (Text(data.Activity, "type") is not ("TRANSFER" or "BALANCE_DEPOSIT")) return match;
+        // Historical beneficiary names are authoritative; do not scan references or intermediary banks.
+        var names = new List<string> { Plain(Text(data.Activity, "title")) };
+        if (ParseAmount(Text(data.Activity, "primaryAmount")).Sign != "+" && data.Receipt?.Text is string receipt)
+        {
+            var lines = receipt.Split('\n').Select(line => line.Trim()).ToArray();
+            var start = System.Array.FindIndex(lines, line => line == "Sent to");
+            var end = start < 0 ? -1 : System.Array.FindIndex(lines, start + 1, line => line == "Account details");
+            if (start >= 0 && end > start) names.Add(String.Join(" ", lines[(start + 1)..end]));
+        }
+        var exact = match.AccountName is null ? null : database.GetAccountByName(match.AccountName);
+        var account = database.FindTransferAccountByInstitution(exact, names.ToArray());
+        return account is null ? match : match with { Status = "Matched", AccountName = database.GetPostingAccount(account).name };
+    }
 
     internal static AccountMatch ResolveCounterparty(EventData data, Func<string, Account?> exact,
         Func<string[], Account?> textMatch, Func<Account, Account> postingAccount)
