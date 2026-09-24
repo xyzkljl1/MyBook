@@ -653,7 +653,8 @@ namespace MyBook
             StatementImportProvider provider,
             DateTime time,
             string statementKey,
-            IEnumerable<AccountInternalId>? internalCardNos = null)
+            IEnumerable<AccountInternalId>? internalCardNos = null,
+            string? sourceDataJson = null)
         {
             var internalCardNoList = internalCardNos?.ToList() ?? [];
             try
@@ -663,7 +664,7 @@ namespace MyBook
                     if (IsStatementImported(provider, time, statementKey))
                         return false;
 
-                    InsertStatementImport(provider, time, statementKey);
+                    InsertStatementImport(provider, time, statementKey, sourceDataJson);
                     if (internalCardNoList.Count > 0)
                         EnsureAccountInternalCardNos(internalCardNoList);
 

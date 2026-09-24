@@ -38,6 +38,7 @@ partial class MailUtil
                 message => IsFrom(message, IFastSender), GetMailDateTime).ConfigureAwait(false);
             foreach (var message in messages)
                 ImportIFastMessage(message);
+            await UpdateIFastInterestRates().ConfigureAwait(false);
         }).ConfigureAwait(false);
         await GenerateIFastInterest().ConfigureAwait(false);
         ValidateIFastStatements();
