@@ -63,6 +63,8 @@ Production is the default; Sandbox requires changing the compile-time environmen
 
 Plaid Items and their unencrypted access tokens are private fixed data. Changing them requires explicit approval; imports never repair authorization automatically. Quote dates are separate from the query date and do not indicate when the entire account last changed.
 
+Plaid API requests reject HTTP redirects instead of forwarding credentials to another address.
+
 Only if saving a newly authorized Item to the database fails, its token is written in plaintext to `plaid-token-recovery-*.local.json` beside the application, and the error reports the path. Use it for manual recovery, then delete it; never share or commit it. Successful saves create no recovery file.
 
 ### Deprecated Schwab Relay

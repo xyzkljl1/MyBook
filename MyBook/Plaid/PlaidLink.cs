@@ -40,7 +40,7 @@ namespace MyBook
             environmentName = environment.ToString().ToLowerInvariant();
             this.database = database;
 
-            client = new HttpClient { Timeout = RequestTimeout };
+            client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = RequestTimeout };
             client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 PlaidLink");
         }
 

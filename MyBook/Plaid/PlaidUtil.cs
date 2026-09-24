@@ -216,7 +216,7 @@ namespace MyBook
 
         private static HttpClient CreateHttpClient()
         {
-            var client = new HttpClient
+            var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
             {
                 Timeout = RequestTimeout
             };
