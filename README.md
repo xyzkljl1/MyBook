@@ -38,8 +38,8 @@ Expected files:
 - **iFAST:** one account with separate GBP, USD, EUR, HKD, SGD and RMB cash holdings, imported from transaction emails and local monthly statements. Transfers with verified own-account counterparties are treated as internal. Interest-rate update emails provide effective dates; official Gross/AER observations and notices are retained in `StatementImports.sourceDataJson`. New interest calculations use the Gross rate applicable to each day, starting with the first saved observation; existing interest is not recalculated. Missing or conflicting rates fail rather than using AER or backfilling today's rate. Months with nonzero balances before the baseline require actual statements. Monthly rounding and exact statement validation remain unchanged.
 - **ZA:** transaction emails on demand, not scheduled. Email notices do not provide a complete ledger or verified ending balance.
 - **FirstTrade:** reconciled account balances, holdings and detailed transactions from account history and CSV/OFX reports.
-- **Wise:** daily read-only personal-token API imports, including multi-currency balances, activities, transfer details and payment receipts. Existing account identifiers are used to resolve counterparties; unavailable fee splits remain explicitly pending rather than estimated.
-- **Schwab:** direct Plaid investment imports.
+- **Wise:** daily read-only personal-token API imports, including multi-currency balances, activities, transfer details and payment receipts. Existing account identifiers are used to resolve counterparties; unavailable fees are not estimated. Direct debits are classified as transfers and treated as internal when the counterparty is a verified own account. Currency conversions are internal transfers, with both sides linked to the same conversion.
+- **Schwab:** direct Plaid investment imports. All cash deposits are treated as transfers between the user's own accounts.
 - **Kraken / Ethereum:** completed-day transactions and asset valuations. Kraken supports BTC, ETH, USDT and BABY, including BABY staking rewards valued using the daily BABY/USD close. Crypto quantities use `decimal(30,18)`; unsupported precision fails. Matching internal transfers requires the same chain event and opposite asset quantities.
 - **Nexus:** monthly donation-point income through GraphQL.
 - **Google Drive:** read-only report transport restricted to the shared `Reports` folder.
@@ -81,7 +81,7 @@ Before importing Schwab data, bind the Plaid connection to the corresponding loc
 
 ### Wise
 
-Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wise; the old importer is no longer compiled. The retained Plaid importer does not use Plaid's inferred personal finance categories; descriptions remain generic payments or receipts pending further detail. Switching existing Wise data requires cleanup before the first API import. Some details, including conversion fees, are unavailable through the API and remain marked as pending.
+Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wise; the old importer is no longer compiled. The retained Plaid importer does not use Plaid's inferred personal finance categories; descriptions remain generic payments or receipts pending further detail. Switching existing Wise data requires cleanup before the first API import. Some details, including conversion fees, are unavailable through the API; recorded amounts are preserved without estimating missing fees.
 
 ### PayPal
 

@@ -2444,7 +2444,7 @@ namespace MyBook
 
         private static List<string> GetTransferInstitutionTypes(params string?[] counterpartyNames) =>
             UniqueTransferInstitutionTypes.Where(type => counterpartyNames.Any(text => !String.IsNullOrWhiteSpace(text)
-                && Regex.IsMatch(text, $@"(?<![A-Za-z0-9]){type}(?![A-Za-z0-9])",
+                && Regex.IsMatch(text, $@"(?<![A-Za-z0-9]){(type == "FIRSTTRADE" ? "(?:FIRSTTRADE|FIRSTRADE)" : type)}(?![A-Za-z0-9])",
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))).ToList();
 
         public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, bool logDetails, params string?[] texts)
@@ -2639,6 +2639,7 @@ namespace MyBook
                 var counterparty = Regex.Split(record.DestAccount.Split(';', 2)[0], @"\bRef\s*:",
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)[0];
                 if (record.Reason is "转入" or "转出" or "转账"
+                    && !(record.Source.StartsWith("WiseApi/", StringComparison.Ordinal) && record.Source.EndsWith("/gross", StringComparison.Ordinal))
                     && GetTransferInstitutionTypes(counterparty).Count > 0)
                 {
                     var exact = FindAccountByName(record.DestAccount) ?? FindAccountByInternalCardNoText(

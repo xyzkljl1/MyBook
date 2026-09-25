@@ -278,8 +278,13 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
         {
             if (secondary is null || primary.Money.t == secondary.Money.t || primary.Sign != "" || secondary.Sign != "")
                 throw Error("unsupported conversion amounts");
-            Add(new(-secondary.Money.v, secondary.Money.t), "换汇（待拆分）", "debit");
-            Add(primary.Money, "换汇（待拆分）", "credit");
+            Add(new(-secondary.Money.v, secondary.Money.t), "换汇", "debit");
+            Add(primary.Money, "换汇", "credit");
+            foreach (var record in result)
+            {
+                record.isInternal = true;
+                record.Source += "; code=BALANCE-WISE-" + Hash(EventKey(a));
+            }
         }
         else if (type is "TRANSFER" or "BALANCE_DEPOSIT")
         {
@@ -293,7 +298,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             if (primary.Sign == "+")
             {
                 if (secondary is not null) throw Error("unsupported incoming transfer secondary amount");
-                Add(primary.Money, "收款（待拆分）", "credit");
+                Add(primary.Money, "转账", "credit");
             }
             else
             {
@@ -321,13 +326,13 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
                     Add(new(-(gross.v - fee.Value), gross.t), "转账", "principal", new(-targetValue, targetCurrency));
                     Add(new(-fee.Value, gross.t), "手续费", "fee");
                 }
-                else Add(new(-gross.v, gross.t), "转账（待拆分）", "gross", new(-targetValue, targetCurrency));
+                else Add(new(-gross.v, gross.t), "转账", "gross", new(-targetValue, targetCurrency));
             }
         }
         else
         {
             if (primary.Sign != "" || secondary is not null) throw Error("unsupported card/direct debit amounts");
-            Add(new(-primary.Money.v, primary.Money.t), type == "CARD_PAYMENT" ? "消费（待拆分）" : "直接扣款（待拆分）", "debit");
+            Add(new(-primary.Money.v, primary.Money.t), type == "CARD_PAYMENT" ? "消费" : "转账", "debit");
         }
         return result;
     }

@@ -46,7 +46,7 @@ internal sealed partial class WiseUtil
         Func<string[], Account?> textMatch, Func<Account, Account> postingAccount)
     {
         var type = Text(data.Activity, "type");
-        if (type == "INTERBALANCE") return new("ConversionPendingFees", [], [], null);
+        if (type == "INTERBALANCE") return new("Conversion", [], [], null);
         if (type is not ("TRANSFER" or "BALANCE_DEPOSIT" or "DIRECT_DEBIT_TRANSACTION"))
             return new("NotApplicable", [], [], null);
         var references = new[] { Optional(data.Transfer?["details"], "reference"), Optional(data.Activity, "title"), Optional(data.Activity, "description") }
@@ -149,7 +149,7 @@ internal sealed partial class WiseUtil
         {
             record.DestAccount = match.AccountName;
             // Gross amounts with unknown fees stay visible even when the counterparty is known.
-            record.isInternal = record.Reason == "转账";
+            record.isInternal = record.Reason == "转账" && !record.Source.EndsWith("/gross", StringComparison.Ordinal);
         }
     }
 }
