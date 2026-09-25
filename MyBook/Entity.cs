@@ -360,8 +360,9 @@ namespace MyBook
         [SugarColumn(IsIgnore = true)]
         public string sourceText { get; set; } = "";
 
-        [SugarColumn(DefaultValue = "0")]
-        public int _account_Id { get; set; } = 0;
+        // 未绑定账户的别名只确认本人归属，不代表具体收款账户。
+        [SugarColumn(IsNullable = true)]
+        public int? _account_Id { get; set; } = null;
     }
 
     // 账户。一个账户可以同时拥有多个币种余额，具体余额由 AccountBalances 视图按 Holdings 汇总。

@@ -23,7 +23,7 @@ CREATE TABLE `accountinternalids` (
   `cardNo` varchar(128) NOT NULL DEFAULT '',
   `desc` varchar(255) NOT NULL DEFAULT '',
   `currencyType` enum('RMB','USD','JPY','SGD','HKD','GBP','EUR') DEFAULT NULL,
-  `_account_Id` int NOT NULL DEFAULT '0',
+  `_account_Id` int DEFAULT NULL,
   PRIMARY KEY (`Id`),
   UNIQUE KEY `unique_AccountInternalIds_account_card_no` (`_account_Id`,`cardNo`),
   CONSTRAINT `fk_AccountInternalIds_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`)

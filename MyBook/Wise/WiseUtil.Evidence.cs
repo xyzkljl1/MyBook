@@ -26,7 +26,8 @@ internal sealed partial class WiseUtil
         var match = ResolveCounterparty(data,
             value => database.FindAccountByInternalCardNo(value),
             texts => database.FindAccountByInternalCardNoText(null, "Wise API counterparty", false, texts),
-            account => database.GetPostingAccount(account));
+            account => database.GetPostingAccount(account),
+            value => database.FindOwnTransferAlias(value));
         if (Text(data.Activity, "type") is not ("TRANSFER" or "BALANCE_DEPOSIT")) return match;
         // Historical beneficiary names are authoritative; do not scan references or intermediary banks.
         var names = new List<string> { Plain(Text(data.Activity, "title")) };
@@ -44,7 +45,8 @@ internal sealed partial class WiseUtil
     }
 
     internal static AccountMatch ResolveCounterparty(EventData data, Func<string, Account?> exact,
-        Func<string[], Account?> textMatch, Func<Account, Account> postingAccount)
+        Func<string[], Account?> textMatch, Func<Account, Account> postingAccount,
+        Func<string, (bool IsInternal, Account? Account)>? ownAlias = null)
     {
         var type = Text(data.Activity, "type");
         if (type == "INTERBALANCE") return new("Conversion", [], [], null);
@@ -80,9 +82,27 @@ internal sealed partial class WiseUtil
         }
         var ids = identifiers.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var candidates = new List<Account>();
+        var isInternal = false;
+        void MatchOwnAlias(string value, bool confirmedCounterparty = true)
+        {
+            if (ownAlias is null) return;
+            var match = ownAlias(value);
+            if (match.Account is not null) candidates.Add(postingAccount(match.Account));
+            // 无具体账户的别名只能认领转出的对方，不能认领我方 Wise 收款余额。
+            else if (confirmedCounterparty && !incoming && data.Recipient is not null && Text(data.Recipient, "type") != "balance")
+                isInternal |= match.IsInternal;
+        }
         if (!currentOnly)
             foreach (var id in ids)
-                if (exact(id) is Account account) candidates.Add(postingAccount(account));
+            {
+                MatchOwnAlias(id);
+                if ((!id.Contains('@') || ownAlias is null) && exact(id) is Account account)
+                    candidates.Add(postingAccount(account));
+            }
+        // 只使用历史回执明确列出的收款人，不从当前收款人资料、付款人或备注认领姓名。
+        if (!incoming && data.Receipt?.Text is string historicalReceipt
+            && ReceiptRecipientName(historicalReceipt) is string name)
+            MatchOwnAlias(name, ReceiptRecipientName(historicalReceipt, requireRecipientBoundary: true) == name);
         foreach (var reference in references)
             foreach (var (value, allowSuffix) in ReferenceAccountIdentifiers(reference))
             {
@@ -91,8 +111,24 @@ internal sealed partial class WiseUtil
             }
         var matches = candidates.DistinctBy(a => a.Id).ToList();
         if (matches.Count > 1) throw Error("counterparty: conflicting account matches");
-        return new(matches.Count == 1 ? "Matched" : currentOnly ? "CurrentRecipientOnly" : "Unmatched",
+        return new(matches.Count == 1 ? "Matched" : isInternal ? "InternalAlias" : currentOnly ? "CurrentRecipientOnly" : "Unmatched",
             ids, references, matches.SingleOrDefault()?.name);
+    }
+
+    internal static string? ReceiptRecipientName(string text, bool requireRecipientBoundary = false)
+    {
+        var lines = text.Split('\n').Select(line => line.Trim()).ToArray();
+        var start = System.Array.FindIndex(lines, line => line == "Sent to");
+        if (start < 0) return null;
+        var recipientEnd = requireRecipientBoundary
+            ? System.Array.FindIndex(lines, start + 1, line => line == "Paid out from") : lines.Length;
+        if (recipientEnd < 0) return null;
+        var end = System.Array.FindIndex(lines, start + 1, recipientEnd - start - 1, line => line == "Account details");
+        if (end < 0) return null;
+        var heading = System.Array.FindIndex(lines, start + 1, end - start - 1, line => line == "Name");
+        if (heading < 0) return null;
+        var name = String.Join(" ", lines[(heading + 1)..end].TakeWhile(line => line != "Reference")).Trim();
+        return name.Length == 0 ? null : name;
     }
 
     internal static IEnumerable<(string Value, bool AllowSuffix)> ReferenceAccountIdentifiers(string text)
@@ -145,7 +181,7 @@ internal sealed partial class WiseUtil
 
     internal static void ApplyCounterparty(List<Record> records, Account current, AccountMatch match)
     {
-        if (match.AccountName == current.name || match.AccountName is null && match.Status != "InternalBrokerage") return;
+        if (match.AccountName == current.name || match.AccountName is null && match.Status is not ("InternalBrokerage" or "InternalAlias")) return;
         foreach (var record in records.Where(r => r.Reason != "手续费"))
         {
             if (match.AccountName is not null) record.DestAccount = match.AccountName;

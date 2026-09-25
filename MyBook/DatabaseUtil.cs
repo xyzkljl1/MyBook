@@ -2398,6 +2398,25 @@ namespace MyBook
                 db.Queryable<Account>().ToList(), db.Queryable<AccountInternalId>().ToList(), accountType);
         }
 
+        internal (bool IsInternal, Account? Account) FindOwnTransferAlias(string value) =>
+            ResolveOwnTransferAlias(value, db.Queryable<Account>().ToList(), db.Queryable<AccountInternalId>().ToList());
+
+        internal static (bool IsInternal, Account? Account) ResolveOwnTransferAlias(
+            string value, List<Account> accounts, List<AccountInternalId> aliases)
+        {
+            // 邮箱及姓名必须完整匹配；不能沿用账号的去标点、尾号或包含匹配。
+            string Normalize(string text) => Regex.Replace(text.Trim(), @"\s+", " ");
+            var token = Normalize(value);
+            if (token.Length == 0) return (false, null);
+            var matches = aliases.Where(alias => String.Equals(Normalize(alias.cardNo), token,
+                StringComparison.OrdinalIgnoreCase)).ToList();
+            var accountIds = matches.Where(alias => alias._account_Id.HasValue)
+                .Select(alias => alias._account_Id!.Value).ToHashSet();
+            var targets = accounts.Where(account => accountIds.Contains(account.Id) && !IsUndeterminedAccount(account)).ToList();
+            if (targets.Count > 1) throw new InvalidOperationException("Conflicting internal transfer alias accounts.");
+            return (targets.Count == 1 || matches.Any(alias => alias._account_Id is null), targets.SingleOrDefault());
+        }
+
         private static Account? FindAccountByExactInternalId(string cardNo, List<Account> accounts, List<AccountInternalId> internalIds, string? accountType = null)
         {
             var token = NormalizeInternalCardToken(cardNo);
@@ -2478,12 +2497,12 @@ namespace MyBook
             var explicitTypes = ExtractAccountTypesFromTexts(usefulTexts, accountTypes);
             var matches = db.Queryable<AccountInternalId>()
                 .ToList()
-                .Where(internalId => accounts.ContainsKey(internalId._account_Id))
+                .Where(internalId => internalId._account_Id.HasValue && accounts.ContainsKey(internalId._account_Id.Value))
                 .Select(internalId => new
                 {
                     InternalId = internalId,
-                    Account = accounts[internalId._account_Id],
-                    AccountType = GetAccountType(accounts[internalId._account_Id].name),
+                    Account = accounts[internalId._account_Id!.Value],
+                    AccountType = GetAccountType(accounts[internalId._account_Id.Value].name),
                     Match = FindInternalCardNoMatch(internalId.cardNo, usefulTexts)
                 })
                 .Where(item => item.Match is not null)
@@ -4827,7 +4846,7 @@ namespace MyBook
                     .ToList());
         }
 
-        private List<(int, string, string, CurrencyType?, int)> ReadAccountIdentifierPreservationItems() =>
+        private List<(int, string, string, CurrencyType?, int?)> ReadAccountIdentifierPreservationItems() =>
             db.Queryable<AccountInternalId>().OrderBy(item => item.Id).ToList()
                 .Select(item => (item.Id, item.cardNo, item.desc, item.currencyType, item._account_Id)).ToList();
 
