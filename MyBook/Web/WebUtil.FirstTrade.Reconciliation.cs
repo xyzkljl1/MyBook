@@ -112,8 +112,10 @@ partial class WebUtil
     }
 
     private static bool IsFirstTradeSubaccountTransfer(FirstTradeTransaction tx) => tx.Type == "OTHER" && tx.Quantity != 0
-        && ((tx.Subaccount == "Cash" && tx.Description.EndsWith("TFR to Type 2", StringComparison.Ordinal))
-            || (tx.Subaccount == "Margin" && tx.Description.EndsWith("TFR from Type 1", StringComparison.Ordinal)));
+        && ((tx.Subaccount == "Cash" && (tx.Description.EndsWith("TFR to Type 2", StringComparison.Ordinal)
+                || tx.Description.EndsWith("TFR from Type 2", StringComparison.Ordinal)))
+            || (tx.Subaccount == "Margin" && (tx.Description.EndsWith("TFR from Type 1", StringComparison.Ordinal)
+                || tx.Description.EndsWith("TFR to Type 1", StringComparison.Ordinal))));
 
     private static HashSet<string> MatchFirstTradePrevious(List<FirstTradeTransaction> transactions, List<Record> previous,
         DateTime from, DateTime through)

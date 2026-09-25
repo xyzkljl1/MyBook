@@ -97,6 +97,8 @@ Firstrade uses different quote providers for balances and positions, so their va
 
 Scheduled imports run when more than one week has elapsed since the last successful import, covering that date through the present. Account history and CSV/OFX reports are reconciled together, using the same login session and keeping downloads in memory. Principal, commissions and fees are recorded separately. When recent sales are not yet included in the reports, SEC fees use the published rate and an assumed nearest-cent rounding rule; the resulting net amount must exactly match the reported transaction or the import fails. Incoming ACATS securities transfers require exactly one matching outgoing record from a source account, without restricting the source broker. Missing or ambiguous matches fail the import. The incoming transfer uses the outgoing value; the difference from current holdings valuation is recorded separately as a price change. Changes to transaction descriptions alone do not cause duplicate imports.
 
+All FirstTrade cash deposits are treated as transfers between the user's own accounts. Cash and securities movements between Cash and Margin are validated as complete offsetting pairs within the same import and do not create records; missing or inconsistent pairs fail the import. External securities transfers, lending income and fees remain separately recorded.
+
 ## Database
 
 The application validates its MySQL schema on startup. Accounts, registered account identifiers, Plaid Items, import checkpoints and Start snapshots are fixed data preserved by cleanup. Imported records, holdings, other snapshots and OAuth tokens are runtime data.

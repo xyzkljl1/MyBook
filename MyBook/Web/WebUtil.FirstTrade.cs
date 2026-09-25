@@ -141,7 +141,7 @@ namespace MyBook
             var transfers = transactions.Where(t => t.Type == "OTHER" && t.Quantity == 0).ToList();
             foreach (var group in transfers.GroupBy(t => (t.Date, Amount: Math.Abs(t.Amount))))
             {
-                if (group.Key.Amount == 0 || group.Any(t => t.Description is not ("XFER CASH TO MARGIN" or "XFER MARGIN TO CASH"))
+                if (group.Key.Amount == 0 || group.Any(t => t.Price != 0 || t.Description is not ("XFER CASH TO MARGIN" or "XFER MARGIN TO CASH"))
                     || group.Sum(t => t.Amount) != 0 || group.Count(t => t.Subaccount == "Cash") != group.Count(t => t.Subaccount == "Margin")
                     || group.Where(t => t.Subaccount == "Cash").Sum(t => t.Amount) != -group.Where(t => t.Subaccount == "Margin").Sum(t => t.Amount))
                     throw new FirstTradeException("unrecognized or unpaired cash/margin transfer");
@@ -149,7 +149,9 @@ namespace MyBook
             foreach (var group in transactions.Where(IsFirstTradeSubaccountTransfer).GroupBy(t => (t.Date, t.Symbol, Quantity: Math.Abs(t.Quantity))))
                 if (group.Count(t => t.Subaccount == "Cash" && t.Description.EndsWith("TFR to Type 2", StringComparison.Ordinal))
                     != group.Count(t => t.Subaccount == "Margin" && t.Description.EndsWith("TFR from Type 1", StringComparison.Ordinal))
-                    || group.Any(t => t.Amount != 0 || t.Price != 0))
+                    || group.Count(t => t.Subaccount == "Margin" && t.Description.EndsWith("TFR to Type 1", StringComparison.Ordinal))
+                    != group.Count(t => t.Subaccount == "Cash" && t.Description.EndsWith("TFR from Type 2", StringComparison.Ordinal))
+                    || group.Key.Symbol.Length == 0 || group.Any(t => t.Amount != 0 || t.Price != 0))
                     throw new FirstTradeException("unpaired security subaccount transfer");
             var records = new List<Record>();
             var cash = beginning.Where(h => h.holdingType == HoldingType.Cash).Sum(h => h.totalPrice.v);
@@ -157,41 +159,32 @@ namespace MyBook
             var values = beginning.Where(h => h.holdingType != HoldingType.Cash).ToDictionary(h => h.code, h => h.totalPrice.v, StringComparer.Ordinal);
             foreach (var tx in transactions.OrderBy(t => t.Date).ThenBy(t => t.Key, StringComparer.Ordinal))
             {
+                // Both legs must be present and validated above in this capture, even on repeat imports.
+                if (tx.Type == "OTHER" && tx.Quantity == 0 || IsFirstTradeSubaccountTransfer(tx)) continue;
                 if (known.Contains(tx.Key)) continue;
                 // Keep identity before the description so source truncation cannot remove it.
                 var source = transactionPrefix + tx.Key + "|identity=" + tx.Identity;
                 var postingDate = tx.SettlementDate ?? tx.Date;
                 string reason;
                 var trade = tx.Type is "BOUGHT" or "SOLD";
-                var isInternal = trade || tx.Type == "OTHER";
+                var isInternal = trade || tx.Type is "OTHER" or "DEPOSIT";
                 if (tx.Type == "OTHER" && tx.Quantity != 0)
                 {
                     var security = equities.GetValueOrDefault(tx.Symbol)
                         ?? new Holding(tx.Symbol, resolveEquity(tx.Symbol)) { Account = account, currentPrice = new Currency(0, CurrencyType.USD) };
-                    decimal quantity, transferValue;
-                    string counterparty = "";
-                    if (IsFirstTradeSubaccountTransfer(tx))
-                    {
-                        quantity = tx.Subaccount == "Cash" ? -Math.Abs(tx.Quantity) : Math.Abs(tx.Quantity);
-                        transferValue = 0;
-                        reason = "证券子账户划转";
-                    }
-                    else if (tx.Amount == 0 && tx.Price == 0
-                        && System.Text.RegularExpressions.Regex.IsMatch(tx.Description, @"\bTRANSFER FROM .+ ACAT", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                    {
-                        quantity = Math.Abs(tx.Quantity);
-                        var evidence = item.TransferEvidence.SingleOrDefault(e => e.Date == tx.Date && e.Symbol == tx.Symbol && e.Quantity == quantity)
-                            ?? resolveTransfer?.Invoke(tx.Date, tx.Symbol, quantity)
-                            ?? throw new FirstTradeException("security transfer requires matching source-account evidence");
-                        if (!item.TransferEvidence.Contains(evidence)) item.TransferEvidence.Add(evidence);
-                        transferValue = evidence.Value;
-                        counterparty = evidence.Counterparty;
-                        reason = "内部转账";
-                    }
-                    else throw new FirstTradeException("unsupported security transfer");
+                    if (tx.Amount != 0 || tx.Price != 0
+                        || !System.Text.RegularExpressions.Regex.IsMatch(tx.Description, @"\bTRANSFER FROM .+ ACAT", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        throw new FirstTradeException("unsupported security transfer");
+                    var quantity = Math.Abs(tx.Quantity);
+                    var evidence = item.TransferEvidence.SingleOrDefault(e => e.Date == tx.Date && e.Symbol == tx.Symbol && e.Quantity == quantity)
+                        ?? resolveTransfer?.Invoke(tx.Date, tx.Symbol, quantity)
+                        ?? throw new FirstTradeException("security transfer requires matching source-account evidence");
+                    if (!item.TransferEvidence.Contains(evidence)) item.TransferEvidence.Add(evidence);
+                    var transferValue = evidence.Value;
+                    var counterparty = evidence.Counterparty;
                     quantities[tx.Symbol] = quantities.GetValueOrDefault(tx.Symbol) + quantity;
                     values[tx.Symbol] = values.GetValueOrDefault(tx.Symbol) + transferValue;
-                    AddRecord(transferValue, reason, source + "|asset|" + (counterparty.Length > 0 ? "/ACATSTransfer/" : "") + tx.Description,
+                    AddRecord(transferValue, "内部转账", source + "|asset|/ACATSTransfer/" + tx.Description,
                         tx.Date, true, security, quantity, postingDate, counterparty);
                     continue;
                 }
@@ -233,7 +226,6 @@ namespace MyBook
                         "DIVIDEND" => "股息",
                         "FEE" when tx.Amount < 0 => "手续费",
                         "TAX" when tx.Amount < 0 => "税费",
-                        "OTHER" => "现金保证金划转",
                         _ => throw new FirstTradeException("unsupported account history transaction type")
                     };
                 }
