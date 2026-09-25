@@ -2334,6 +2334,17 @@ namespace MyBook
             return types[0];
         }
 
+        public AccountInternalId GetAccountInternalIdByDescription(Account account, string description)
+        {
+            var existingAccount = GetExistingAccountByName(account);
+            var matches = db.Queryable<AccountInternalId>()
+                .Where(item => item._account_Id == existingAccount.Id && item.desc == description).ToList();
+            if (matches.Count != 1 || String.IsNullOrWhiteSpace(matches[0].cardNo))
+                throw new InvalidOperationException(
+                    $"Account internal id missing or ambiguous: accountId={existingAccount.Id}; description={description}; matches={matches.Count}");
+            return matches[0];
+        }
+
         public void EnsureAccountInternalCardNos(IEnumerable<AccountInternalId> internalIds)
         {
             var uniqueInternalIds = new Dictionary<string, AccountInternalId>(StringComparer.OrdinalIgnoreCase);

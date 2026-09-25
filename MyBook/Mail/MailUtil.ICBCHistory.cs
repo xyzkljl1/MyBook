@@ -38,6 +38,7 @@ namespace MyBook
 
         public async Task<int> FetchICBCHistoryDetails(DateTime since)
         {
+            since = GetICBCHistoryDetailSearchStart(since);
             return await RunWithMailSessionScope(async () =>
             {
                 var label = $"ICBC history detail since {since:yyyy-MM-dd}";
@@ -77,6 +78,14 @@ namespace MyBook
                 Console.WriteLine($"Imported remote ICBC history detail statements: {importedCount}, skippedUnreadable={skippedUnreadableCount}");
                 return importedCount;
             }).ConfigureAwait(false);
+        }
+
+        private DateTime GetICBCHistoryDetailSearchStart(DateTime since)
+        {
+            var checkpoint = database.GetStatementImportCheckpointTime(ICBCHistoryDetailProvider)
+                ?? throw new InvalidOperationException("Missing ICBC history detail fixed import checkpoint.");
+            // 固定起点只限制邮件发送日期，不截断附件中的历史交易。
+            return MaxDate(since.Date, checkpoint.Date.AddDays(1));
         }
 
         private static List<ICBCHistoryDetailParsedStatement> OrderICBCHistoryDetailStatementsForImport(
@@ -149,9 +158,17 @@ namespace MyBook
                     return null;
 
                 var bytes = attachment.Content;
-                if (!TryReadICBCHistoryDetailPdfText(bytes, out var text, out var error))
+                var fileHash = ComputeSha256(bytes);
+                var unreadableKey = $"ICBCHistoryUnreadable-{fileHash}";
+                if (database.IsStatementKeyImported(ICBCHistoryDetailProvider, unreadableKey))
                 {
-                    Console.WriteLine($"Skip encrypted/unreadable ICBC history PDF: {fileName}; {error}");
+                    skippedUnreadableCount++;
+                    return null;
+                }
+                if (!TryReadICBCHistoryDetailPdfText(bytes, out var text, out _))
+                {
+                    database.MarkStatementProcessedOnce(ICBCHistoryDetailProvider, message.MailDateTime, unreadableKey);
+                    Console.WriteLine("Skip encrypted/unreadable ICBC history PDF, markedProcessed=true");
                     skippedUnreadableCount++;
                     return null;
                 }
@@ -161,7 +178,7 @@ namespace MyBook
                     && TryParseICBCHistoryDetailApplicationNo(message.Subject ?? "", out var applicationNo))
                     decodedFileName = $"ICBCHistoryDetail-{applicationNo}.pdf";
 
-                return new ICBCHistoryDetailParsedAttachment(decodedFileName, text, ComputeSha256(bytes));
+                return new ICBCHistoryDetailParsedAttachment(decodedFileName, text, fileHash);
             }))
             {
                 statements.Add(attachment);
@@ -238,6 +255,8 @@ namespace MyBook
                 .ToList();
             if (rows.Count == 0)
                 throw new MailParseException($"Parse ICBC history detail PDF fail, no transaction rows: {fileName}");
+            if (!isCredit)
+                ValidateICBCHistoryDemandDepositRows(rows, database.GetAccountInternalIdByDescription(account, "活期").cardNo);
 
             var records = new Records();
             var candidates = new List<ICBCHistoryDetailCandidate>();
@@ -290,6 +309,19 @@ namespace MyBook
                         sourceText = $"ICBC history detail file={fileName}; header cardNo={cardNo}"
                     }
                 ]);
+        }
+
+        // 同一卡号下各账号的余额相互独立，存单销户可能转入活期账号。
+        // 当前只支持已登记的活期账号，不支持同一卡号下的存单或投资账号。
+        private static void ValidateICBCHistoryDemandDepositRows(List<ICBCHistoryDetailRow> rows, string demandDepositAccountNo)
+        {
+            for (var index = 0; index < rows.Count; index++)
+            {
+                if (String.Equals(rows[index].AccountNo, demandDepositAccountNo, StringComparison.Ordinal))
+                    continue;
+                throw new MailParseException(
+                    $"ICBC history detail: account does not match demand-deposit alias; time-deposit/investment accounts not supported; row={index + 1}; postingDate={rows[index].PostingDate:yyyy-MM-dd HH:mm:ss}");
+            }
         }
 
         private Record BuildICBCHistoryDetailRecord(
@@ -365,9 +397,13 @@ namespace MyBook
                 return false;
             }
 
-            return parsed.IsCredit
+            var imported = parsed.IsCredit
                 ? ImportICBCCreditHistoryDetail(parsed)
                 : ImportICBCDebitHistoryDetail(parsed);
+            if (!imported)
+                database.MarkStatementProcessedOnce(ICBCHistoryDetailProvider, parsed.ImportTime,
+                    parsed.StatementKey, parsed.InternalCardNos);
+            return imported;
         }
 
         private bool ImportICBCDebitHistoryDetail(ICBCHistoryDetailParsedStatement parsed)
@@ -375,38 +411,42 @@ namespace MyBook
             var stats = new ICBCHistoryDetailImportStats();
             var account = database.GetAccountByName(parsed.AccountName);
             var candidates = parsed.DebitCandidates;
+            var simRecords = database.GetStatementRecords(StatementImportProvider.ICBCSIMSMS, account);
+            if (IsICBCHistoryBeforeInitialization(parsed, simRecords))
+            {
+                Console.WriteLine($"Skip ICBC history detail before initialization: coverage={parsed.StartDate:yyyy-MM-dd}..{parsed.EndDate:yyyy-MM-dd}; imported=0");
+                return false;
+            }
             ValidateICBCHistoryDetailCandidateOrder(parsed.StatementKey, candidates);
             if (!TryValidateICBCHistoryDetailBalanceChain(
                     parsed.StatementKey,
                     candidates,
                     out var balanceChainMismatch))
             {
-                var marked = database.MarkStatementProcessedOnce(
-                    ICBCHistoryDetailProvider,
-                    parsed.ImportTime,
-                    parsed.StatementKey,
-                    parsed.InternalCardNos);
                 stats.Ignore("incomplete balance chain", candidates.Count);
-                Console.WriteLine(
-                    marked
-                        ? $"Skip incomplete ICBC history detail {parsed.StatementKey}, markedProcessed=true, imported=0, ignored={stats.FormatIgnored()}, {balanceChainMismatch}"
-                        : $"Skip imported incomplete ICBC history detail {parsed.StatementKey}, imported=0, ignored={stats.FormatIgnored()}");
+                Console.WriteLine($"Skip incomplete ICBC history detail {parsed.StatementKey}, imported=0, ignored={stats.FormatIgnored()}, {balanceChainMismatch}");
                 return false;
             }
 
             var existingRecords = GetExistingICBCDebitHistoryDetailRecords(parsed, account);
-            var newCandidates = SelectSequentialICBCHistoryDetailCandidates(
-                parsed,
+            var newCandidates = SelectUnimportedICBCHistoryDetailCandidates(
                 candidates,
                 existingRecords,
                 stats);
-            if (newCandidates.Count == 0)
+            var incompleteCompensation = FindPartiallyCoveredICBCSIMCompensation(
+                parsed.StartDate, parsed.EndDate, candidates.Select(candidate => candidate.Row.Amount.t).ToHashSet(),
+                simRecords);
+            if (incompleteCompensation is { } gap)
             {
-                Console.WriteLine($"Skip ICBC history detail {parsed.StatementKey}, imported=0, ignored={stats.FormatIgnored()}");
+                // A compensation cannot be split without the complete bank transactions it represents.
+                Console.WriteLine(
+                    $"Skip ICBC history detail: coverage={parsed.StartDate:yyyy-MM-dd}..{parsed.EndDate:yyyy-MM-dd}; "
+                    + $"recordId={gap.Compensation.Id}; compensationInterval={gap.Start:yyyy-MM-dd HH:mm:ss}..{gap.End:yyyy-MM-dd HH:mm:ss}; imported=0");
                 return false;
             }
-
-            var simResolution = ResolveICBCSIMRecordsForHistoryDetail(parsed, account, newCandidates, stats);
+            var alreadyImported = candidates.Select(candidate => candidate.Index)
+                .Except(newCandidates.Select(candidate => candidate.Index)).ToHashSet();
+            var simResolution = ResolveICBCSIMRecordsForHistoryDetail(parsed, account, candidates, stats, alreadyImported);
             var records = simResolution.RecordsToSave;
             var preserveCurrentBalances = database.HasAccountRecordsOnOrAfter(
                 account,
@@ -430,41 +470,113 @@ namespace MyBook
             return saved;
         }
 
+        private static bool IsICBCHistoryBeforeInitialization(ICBCHistoryDetailParsedStatement parsed, List<Record> simRecords)
+        {
+            var initializations = simRecords.Where(DatabaseUtil.IsInitializationRecord).ToList();
+            return parsed.DebitCandidates.Count > 0 && parsed.DebitCandidates.GroupBy(candidate => candidate.Row.Amount.t).All(group =>
+            {
+                var first = initializations.Where(record => record.t == group.Key)
+                    .OrderBy(record => record.postingDate ?? record.date).FirstOrDefault();
+                return first is not null && parsed.EndDate.Date.AddDays(1) <= (first.postingDate ?? first.date)
+                    && group.All(candidate => candidate.Row.PostingDate < (first.postingDate ?? first.date));
+            });
+        }
+
+        private static (Record Compensation, DateTime Start, DateTime End)? FindPartiallyCoveredICBCSIMCompensation(
+            DateTime statementStart,
+            DateTime statementEnd,
+            HashSet<CurrencyType> currencies,
+            List<Record> simRecords)
+        {
+            var start = statementStart.Date;
+            var end = statementEnd.Date.AddDays(1);
+            foreach (var compensation in simRecords.Where(record => IsICBCSIMCompensationRecord(record)
+                && !IsICBCSIMRecordResolvedByHistory(record) && currencies.Contains(record.t)).OrderBy(record => record.Id))
+            {
+                // IDs preserve insertion order; a late SMS must not become an earlier compensation's anchor.
+                var previous = simRecords.Where(record => record.Id < compensation.Id
+                        && record._account_Id == compensation._account_Id && record.t == compensation.t
+                        && !IsICBCSIMCompensationRecord(record))
+                    .OrderByDescending(record => record.Id).FirstOrDefault();
+                if (previous is null
+                    || !TryParseICBCSIMSourceBalance(previous.Source, out var previousBalance)
+                    || !TryParseICBCSIMSourceBalance(compensation.Source, out var requiredBalance)
+                    || previousBalance.t != compensation.t || requiredBalance.t != compensation.t
+                    || previousBalance.v + compensation.v != requiredBalance.v)
+                    continue; // Without a verified anchor, keep the existing strict validation.
+
+                var gapStart = previous.postingDate ?? previous.date;
+                var gapEnd = (compensation.postingDate ?? compensation.date).AddSeconds(1);
+                if (gapStart >= gapEnd || end <= gapStart || start >= gapEnd)
+                    continue;
+                if (start > gapStart || end <= gapEnd)
+                    return (compensation, gapStart, gapEnd);
+            }
+            return null;
+        }
+
         private List<Record> GetExistingICBCDebitHistoryDetailRecords(
             ICBCHistoryDetailParsedStatement parsed,
             Account account)
         {
-            var historyRecords = database.GetStatementRecords(ICBCHistoryDetailProvider, account)
-                .Where(record => !DatabaseUtil.IsInitializationRecord(record));
-            var confirmedSIMRecords = database.GetStatementRecords(
-                    StatementImportProvider.ICBCSIMSMS,
-                    account,
-                    parsed.StartDate.Date,
-                    parsed.EndDate.Date.AddDays(1))
+            var historyRecords = database.GetStatementRecords(ICBCHistoryDetailProvider, account);
+            var simRecords = database.GetStatementRecords(StatementImportProvider.ICBCSIMSMS, account);
+            var confirmedSIMRecords = simRecords
                 .Where(record => !DatabaseUtil.IsInitializationRecord(record))
                 .Where(IsICBCSIMRecordConfirmedByHistory);
 
-            return historyRecords
+            return GetICBCHistoryBankRecords(historyRecords, simRecords)
+                .Where(record => !DatabaseUtil.IsInitializationRecord(record))
                 .Concat(confirmedSIMRecords)
+                .Where(record => GetICBCHistoryDetailRecordPostingDate(record) >= parsed.StartDate.Date
+                    && GetICBCHistoryDetailRecordPostingDate(record) < parsed.EndDate.Date.AddDays(1))
                 .OrderBy(GetICBCHistoryDetailRecordPostingDate)
                 .ThenBy(record => record.Id)
                 .ToList();
+        }
+
+        private static List<Record> GetICBCHistoryBankRecords(List<Record> historyRecords, List<Record> simRecords)
+        {
+            var result = new List<Record>();
+            var reversedIds = new HashSet<int>();
+            foreach (var record in historyRecords)
+            {
+                if (!record.Source.Contains("reversesRecordId=", StringComparison.Ordinal))
+                {
+                    result.Add(record);
+                    continue;
+                }
+                var reference = Regex.Match(record.Source, @"(?:^|;\s*)reversesRecordId=(\d+)(?=;|$)");
+                var code = Regex.Match(record.Source, @"(?:^|;\s*)code=(ICBCHistoryReplacement-[A-Fa-f0-9]+)(?=;|$)");
+                var original = reference.Success && Int32.TryParse(reference.Groups[1].Value, out var id)
+                    ? simRecords.SingleOrDefault(r => r.Id == id) : null;
+                if (original is null || !code.Success || !reversedIds.Add(original.Id)
+                    || !IsICBCSIMCompensationRecord(original)
+                    || !original.Source.Contains("supersededBy=ICBCHistoryDetail", StringComparison.Ordinal)
+                    || !Regex.IsMatch(original.Source, @"(?:^|;\s*)code=" + Regex.Escape(code.Groups[1].Value) + @"(?=;|$)")
+                    || original._account_Id != record._account_Id || original.t != record.t || original.v != -record.v
+                    || (original.postingDate ?? original.date) != (record.postingDate ?? record.date)
+                    || (original.DescCurrency is null) != (record.DescCurrency is null)
+                    || original.DescCurrency is not null && (original.DescCurrency.t != record.DescCurrency!.t
+                        || original.DescCurrency.v != -record.DescCurrency.v))
+                    throw new InvalidOperationException($"ICBC history reversal relationship is invalid: recordId={record.Id}");
+                // Validated accounting reversals remain in the ledger, but are not bank transactions.
+            }
+            return result;
         }
 
         private ICBCHistoryDetailSIMResolution ResolveICBCSIMRecordsForHistoryDetail(
             ICBCHistoryDetailParsedStatement parsed,
             Account account,
             List<ICBCHistoryDetailDebitCandidate> candidates,
-            ICBCHistoryDetailImportStats stats)
+            ICBCHistoryDetailImportStats stats,
+            HashSet<int> alreadyImported)
         {
             var start = candidates.Min(candidate => candidate.Row.PostingDate).Date;
             var end = candidates.Max(candidate => candidate.Row.PostingDate).Date.AddDays(1);
-            var allSIMRecords = database.GetStatementRecords(
-                    StatementImportProvider.ICBCSIMSMS,
-                    account,
-                    start,
-                    end)
-                .Where(record => !IsICBCSIMRecordResolvedByHistory(record))
+            var allSIMRecords = database.GetStatementRecords(StatementImportProvider.ICBCSIMSMS, account)
+                .Where(record => (record.postingDate ?? record.date) >= start && (record.postingDate ?? record.date) < end)
+                .Where(record => DatabaseUtil.IsInitializationRecord(record) || !IsICBCSIMRecordResolvedByHistory(record))
                 .OrderBy(record => record.postingDate ?? record.date)
                 .ThenBy(record => record.Id)
                 .ToList();
@@ -475,7 +587,7 @@ namespace MyBook
                 .Where(record => !DatabaseUtil.IsInitializationRecord(record))
                 .ToList();
 
-            var confirmedCandidateIndexes = new HashSet<int>();
+            var confirmedCandidateIndexes = new HashSet<int>(alreadyImported);
             var recordsToSave = new List<Record>();
             var supplements = new List<RecordSourceSupplement>();
             foreach (var simInitializationRecord in simInitializationRecords)
@@ -488,7 +600,8 @@ namespace MyBook
                 foreach (var candidateIndex in confirmation.PreInitializationCandidateIndexes)
                     confirmedCandidateIndexes.Add(candidateIndex);
 
-                supplements.Add(confirmation.Supplement);
+                if (!IsICBCSIMRecordConfirmedByHistory(simInitializationRecord))
+                    supplements.Add(confirmation.Supplement);
                 stats.ConfirmedSIMInitializations++;
             }
 
@@ -1000,72 +1113,26 @@ namespace MyBook
                 $"replacementRows={String.Join(",", candidates.Select(candidate => candidate.RowCode))}"));
         }
 
-        private List<ICBCHistoryDetailDebitCandidate> SelectSequentialICBCHistoryDetailCandidates(
-            ICBCHistoryDetailParsedStatement parsed,
+        private static List<ICBCHistoryDetailDebitCandidate> SelectUnimportedICBCHistoryDetailCandidates(
             List<ICBCHistoryDetailDebitCandidate> candidates,
             List<Record> existingRecords,
             ICBCHistoryDetailImportStats stats)
         {
-            if (existingRecords.Count == 0)
-                return candidates;
-
-            var firstCandidate = candidates[0];
-            var existingStart = GetICBCHistoryDetailRecordPostingDate(existingRecords[0]);
-            var existingEnd = GetICBCHistoryDetailRecordPostingDate(existingRecords[^1]);
-            var candidatesStart = firstCandidate.Row.PostingDate;
-            var candidatesEnd = candidates[^1].Row.PostingDate;
-            var overlapCandidates = new List<int>();
-            for (var existingIndex = 0; existingIndex < existingRecords.Count; existingIndex++)
+            var matchedIndexes = new HashSet<int>();
+            var previousIndex = -1;
+            foreach (var record in existingRecords)
             {
-                if (!IsICBCHistoryDetailRecordMatch(firstCandidate, existingRecords[existingIndex]))
-                    continue;
-
-                var overlapLength = Math.Min(candidates.Count, existingRecords.Count - existingIndex);
-                var matches = true;
-                for (var candidateIndex = 0; candidateIndex < overlapLength; candidateIndex++)
-                {
-                    if (IsICBCHistoryDetailRecordMatch(
-                            candidates[candidateIndex],
-                            existingRecords[existingIndex + candidateIndex]))
-                        continue;
-
-                    matches = false;
-                    break;
-                }
-
-                if (!matches)
-                    continue;
-
-                overlapCandidates.Add(overlapLength);
+                var matches = candidates.Where(candidate => IsICBCHistoryDetailRecordMatch(candidate, record)).ToList();
+                if (matches.Count != 1)
+                    throw new InvalidOperationException(
+                        $"ICBC history detail requires one matching bank transaction: recordId={record.Id}; matches={matches.Count}");
+                var index = matches[0].Index;
+                if (!matchedIndexes.Add(index) || index <= previousIndex)
+                    throw new InvalidOperationException($"ICBC history detail overlap order is inconsistent: recordId={record.Id}");
+                previousIndex = index;
             }
-
-            if (overlapCandidates.Count == 0)
-            {
-                if (candidatesEnd < existingStart || candidatesStart > existingEnd)
-                {
-                    stats.Ignore("out-of-order or non-overlapping", candidates.Count);
-                    return [];
-                }
-
-                throw new InvalidOperationException(
-                    $"ICBC history detail overlaps existing records but the starting transaction does not match: {parsed.StatementKey}");
-            }
-
-            if (overlapCandidates.Count > 1)
-            {
-                throw new InvalidOperationException(
-                    $"ICBC history detail overlaps existing records ambiguously: {parsed.StatementKey}");
-            }
-
-            var bestOverlapLength = overlapCandidates[0];
-            stats.Overlap = bestOverlapLength;
-            if (bestOverlapLength == candidates.Count)
-            {
-                stats.Ignore("old or duplicate", candidates.Count);
-                return [];
-            }
-
-            return candidates.Skip(bestOverlapLength).ToList();
+            stats.Overlap = matchedIndexes.Count;
+            return candidates.Where(candidate => !matchedIndexes.Contains(candidate.Index)).ToList();
         }
 
         private static void ValidateICBCHistoryDetailCandidateOrder(

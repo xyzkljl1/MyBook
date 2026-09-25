@@ -321,7 +321,9 @@ namespace MyBook
                     currentBalance,
                     requiredBeginningBalance,
                     compensation),
-                Reason = "Missing small transactions",
+                Reason = Math.Abs(compensationAmount) < 10m
+                    ? "Missing small transactions"
+                    : "Missing SMS period compensation",
                 DescCurrency = compensation
             };
             record.CopyFrom(compensation);

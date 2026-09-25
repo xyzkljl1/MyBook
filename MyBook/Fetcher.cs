@@ -30,8 +30,6 @@ namespace MyBook
         const int MonthlyFetchIntervalDays = 27;
         const int ICBCHistoryDetailFetchIntervalDays = 90;
         const int ICBCHistoryDetailSearchWindowMonths = 5;
-        // Temporarily disabled pending history overlap reconciliation fixes.
-        private static readonly bool ICBCHistoryDetailScheduleEnabled = false;
         const int DefaultSIMPollIntervalMinutes = 5;
         const string ImportFailureMarkerFileName = "MyBook.import-failed.tmp";
         static readonly UTF8Encoding ImportFailureMarkerEncoding = new(false);
@@ -145,11 +143,10 @@ namespace MyBook
                         "BOC",
                         () => ShouldFetchMonthlyProvider("BOC", StatementImportProvider.BOCBillMail),
                         mail.FetchBOCBills).ConfigureAwait(false);
-                    if (ICBCHistoryDetailScheduleEnabled)
-                        await RunImportTaskAsync(
-                            "ICBC history detail",
-                            () => ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays),
-                            FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
+                    await RunImportTaskAsync(
+                        "ICBC history detail",
+                        () => ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays),
+                        FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
                 }).ConfigureAwait(false);

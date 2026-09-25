@@ -33,7 +33,7 @@ Expected files:
 
 ## Implemented Account Sources
 
-- **ICBC / BOC:** credit-card email statements and supported debit-card SMS. ICBC historical-detail imports remain available on demand; their scheduled task is temporarily disabled.
+- **ICBC / BOC:** credit-card email statements and supported debit-card SMS. ICBC historical-detail imports are available on demand and scheduled when due. Historical-detail email searches begin after the fixed starting checkpoint, or at the requested search date if later; earlier transactions inside those emails retain their existing treatment. Debit-card history supports only the registered demand-deposit account; deposit certificates and investment accounts under the same card are not supported. These accounts have separate balances, and closing a deposit can transfer funds into the demand-deposit account. Every transaction must belong to the registered demand-deposit account, otherwise the statement is rejected. Overlapping debit-card statements are checked against existing bank transactions throughout the covered period, with separate validation of SMS adjustments and opening balances to prevent duplicate entries. Ignored statements and unreadable attachments are marked as processed and skipped on later imports. This includes statements entirely before the opening balance or only partly covering an unresolved SMS balance adjustment; other statements continue processing.
 - **IBKR:** daily CSV email reports and local initial reports, including transactions, holdings, dividends, interest, fees and valuation changes.
 - **iFAST:** one account with separate GBP, USD, EUR, HKD, SGD and RMB cash holdings, imported from transaction emails and local monthly statements. Transfers with verified own-account counterparties are treated as internal. Interest-rate update emails provide effective dates; official Gross/AER observations and notices are retained in `StatementImports.sourceDataJson`. New interest calculations use the Gross rate applicable to each day, starting with the first saved observation; existing interest is not recalculated. Missing or conflicting rates fail rather than using AER or backfilling today's rate. Months with nonzero balances before the baseline require actual statements. Monthly rounding and exact statement validation remain unchanged.
 - **ZA:** transaction emails on demand, not scheduled. Email notices do not provide a complete ledger or verified ending balance.
@@ -122,7 +122,7 @@ dotnet build MyBook\MyBook.csproj -v minimal /p:UseSharedCompilation=false
 
 ## Fetch Behavior
 
-Release builds run an import cycle on startup and daily afterward; Debug builds do not schedule fetches. Configured API modules and daily reports run each cycle, while ICBC/BOC bills and Nexus monthly reports are checked when due. ICBC historical-detail scheduling is temporarily disabled.
+Release builds run an import cycle on startup and daily afterward; Debug builds do not schedule fetches. Configured API modules and daily reports run each cycle, while ICBC/BOC bills and Nexus monthly reports are checked when due. ICBC historical details are fetched once more than 90 days have elapsed since the latest import, searching emails from the past five months subject to the fixed starting checkpoint.
 
 SMS polling has its own configured interval. It verifies the SIM IMSI, combines complete long messages, and imports supported bank notifications. Unsupported bank formats fail visibly. Mail imports share IMAP sessions and download matching attachments.
 
