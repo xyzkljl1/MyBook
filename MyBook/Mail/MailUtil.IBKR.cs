@@ -683,9 +683,8 @@ namespace MyBook
                 baseCurrency,
                 beginningPositionHoldings,
                 sourceName,
-                preciseNav.StartingCash,
                 useBeginningValues: true);
-            var holdings = ParseIBKRHoldings(report, account, baseCurrency, positionHoldings, sourceName, preciseNav.EndingCash);
+            var holdings = ParseIBKRHoldings(report, account, baseCurrency, positionHoldings, sourceName);
             var records = ParseIBKRRecords(
                 report,
                 account,
@@ -694,8 +693,6 @@ namespace MyBook
                 reportDate.Date,
                 sourceName,
                 preciseNav.End - preciseNav.Start,
-                preciseNav.StartingCash,
-                preciseNav.EndingCash,
                 isInitialReport);
             var internalCardNos = new List<AccountInternalId>
             {
@@ -720,8 +717,8 @@ namespace MyBook
                 records,
                 beginningHoldings,
                 holdings,
-                [new AccountBalance(account, new Currency(preciseNav.End, baseCurrency))],
-                [new AccountBalance(account, new Currency(preciseNav.Start, baseCurrency))],
+                IBKRBalancesFromHoldings(account, holdings),
+                IBKRBalancesFromHoldings(account, beginningHoldings),
                 internalCardNos,
                 period,
                 isInitialReport);
@@ -1025,6 +1022,148 @@ namespace MyBook
             throw new MailParseException($"Parse IBKR Report Fail, Unknown Contract Group: {group}/{rawCode}");
         }
 
+        private sealed record IBKRNativeCash(CurrencyType Currency, decimal Beginning, decimal Ending);
+
+        private static List<IBKRNativeCash> ReadIBKRNativeCash(IBKRCsvReport report, CurrencyType baseCurrency)
+        {
+            var rows = report.RequireDataRows("现金报告");
+            var currencies = rows.Where(r => r.Fields[1] != "基础货币总结")
+                .Select(r => ParseIBKRCurrencyType(r.Fields[1])).Distinct().ToList();
+            var positions = report.OptionalDataRows("持仓与以市值计的盈亏")
+                .Where(r => IsIBKRPositionSummaryRow(r) && r.Fields[1] == "外汇")
+                .Select(r => ParseIBKRFxPositionValues(r, baseCurrency, "native cash")).ToList();
+            // A single-currency report may contain only the base-currency cash section.
+            if (currencies.Count == 0 && positions.All(p => p.CashCurrency == baseCurrency)) currencies.Add(baseCurrency);
+            var result = new List<IBKRNativeCash>();
+            foreach (var currency in currencies)
+            {
+                decimal Read(string label)
+                {
+                    var matches = rows.Where(r => r.Fields[0] == label && r.Fields[1] != "基础货币总结"
+                        && ParseIBKRCurrencyType(r.Fields[1]) == currency).ToList();
+                    if (matches.Count == 0 && currencies.Count == 1 && currency == baseCurrency)
+                        matches = rows.Where(r => r.Fields[0] == label && r.Fields[1] == "基础货币总结").ToList();
+                    if (matches.Count != 1) throw new MailParseException($"IBKR cash: expected one {currency} {label} row.");
+                    var reported = ParseIBKRDecimalAt(matches[0], 2, label);
+                    var position = positions.SingleOrDefault(p => p.CashCurrency == currency);
+                    if (position is null) return reported;
+                    var precise = label == "期初现金" ? position.PreviousQuantity : position.CurrentQuantity;
+                    AssertIBKRMoneyFieldEquals(precise, reported, matches[0].Fields[2], $"native {currency} {label}");
+                    return precise;
+                }
+                result.Add(new(currency, Read("期初现金"), Read("期末现金")));
+            }
+            // Tiny balances can be absent from the cash section but explicitly present in currency positions.
+            foreach (var position in positions.Where(p => !currencies.Contains(p.CashCurrency)))
+                result.Add(new(position.CashCurrency, position.PreviousQuantity, position.CurrentQuantity));
+            return result;
+        }
+
+        private static List<AccountBalance> IBKRBalancesFromHoldings(Account account, List<Holding> holdings) => holdings
+            .GroupBy(h => h.currentPrice.t).Select(g => new AccountBalance(account, new Currency(g.Sum(h => h.totalPrice.v), g.Key))).ToList();
+
+        // Reports can repeat a section with/without internal transfers and with an optional Code column.
+        // Compare whole blocks as multisets: three identical real transfers must remain three records.
+        private static List<IBKRCsvRow> ReadIBKRMoneyDetails(IBKRCsvReport report, string sectionName)
+        {
+            if (!report.Sections.TryGetValue(sectionName, out var section)) return [];
+            var headers = section.HeaderRows.OrderBy(r => r.LineNumber).ToList();
+            var blocks = section.DataRows.Where(r => !r.Fields[0].StartsWith("总数", StringComparison.Ordinal))
+                .GroupBy(r => headers.LastOrDefault(h => h.LineNumber < r.LineNumber)?.LineNumber ?? 0)
+                .Select(g => g.ToList()).ToList();
+            if (blocks.Count == 0) return [];
+            string Key(IBKRCsvRow row)
+            {
+                if (row.Fields.Count is not (4 or 5)) throw new MailParseException($"IBKR cash: unsupported {sectionName} detail columns.");
+                return String.Join("\t", row.Fields.Take(4));
+            }
+            var separateDividends = sectionName == IBKRDividendSection && headers.Any(h => h.Fields.Count == 5);
+            // The four-column dividend section includes payments in lieu; the five-column sections separate them.
+            var chosen = blocks.Where(b => !separateDividends || b[0].Fields.Count == 5)
+                .OrderByDescending(b => b.Count).ThenByDescending(b => b.Sum(r => r.Fields.Count)).FirstOrDefault() ?? [];
+            var paymentsInLieu = sectionName == IBKRDividendSection ? ReadIBKRMoneyDetails(report, IBKRDividendPaymentInLieuSection) : [];
+            if (!separateDividends && paymentsInLieu.Count > 0)
+            {
+                chosen = chosen.ToList();
+                foreach (var payment in paymentsInLieu)
+                {
+                    var index = chosen.FindIndex(r => Key(r) == Key(payment));
+                    if (index >= 0) chosen.RemoveAt(index);
+                }
+            }
+            var covered = chosen.Concat(paymentsInLieu);
+            var counts = covered.GroupBy(Key).ToDictionary(g => g.Key, g => g.Count());
+            foreach (var block in blocks)
+                foreach (var group in block.GroupBy(Key))
+                    if (counts.GetValueOrDefault(group.Key) < group.Count())
+                        throw new MailParseException($"IBKR cash: conflicting repeated {sectionName} sections.");
+            return chosen;
+        }
+
+        private void AddIBKRNativeCashDetails(IBKRCsvReport report, IBKRRecordBuilder builder, Account account, DateTime reportDate)
+        {
+            var detailTotals = new Dictionary<(string Label, CurrencyType Currency), decimal>();
+            void Add(IBKRCsvRow row, string label, string reason, bool internalTransfer = false)
+            {
+                var currency = ParseIBKRCurrencyType(row.Fields[0]);
+                var date = ParseIBKRDate(row.Fields[1]);
+                var description = row.Fields[2];
+                var amount = ParseIBKRDecimalAt(row, 3, "cash detail");
+                detailTotals[(label, currency)] = detailTotals.GetValueOrDefault((label, currency)) + amount;
+                var target = description;
+                var ownTransfer = Regex.Match(description, @"^内部转(?<direction>入|出)\s+(?<account>\S+)$");
+                if (ownTransfer.Success)
+                    target = BuildIBKRTransferDestAccount(account, ownTransfer.Groups["account"].Value,
+                        ownTransfer.Groups["direction"].Value == "入" ? "进" : "出", false);
+                // Daily cash details can have a transaction date earlier than the reported balance change.
+                builder.Add(new Currency(amount, currency), reason, $"CashDetail/{FormatIBKRCsvRow(row)}",
+                    isInternal: internalTransfer, date: date, destAccount: target,
+                    postingDate: builder.AllowLargeStatementResidual ? null : reportDate);
+            }
+            foreach (var row in ReadIBKRMoneyDetails(report, IBKRDepositWithdrawSection))
+            {
+                var amount = ParseIBKRDecimalAt(row, 3, "deposit/withdrawal");
+                var label = row.Fields[2].StartsWith("内部转", StringComparison.Ordinal) ? "账户转账" : amount >= 0 ? "存款" : "取款";
+                Add(row, label, label, true);
+            }
+            foreach (var (section, label, reason) in new[]
+            {
+                (IBKRInterestSection, "支付和收到的经纪商利息", "现金利息"),
+                (IBKRBondInterestReceivedSection, "支付和收到的债券利息", "债券利息"),
+                (IBKRBondInterestPaidSection, "支付和收到的债券利息", "债券利息"),
+                (IBKRDividendSection, "股息", "股息"),
+                (IBKRDividendPaymentInLieuSection, "代替股息的支付", "代替股息的支付"),
+                (IBKRWithholdingTaxSection, "代扣税款", "代扣税款")
+            })
+                foreach (var row in ReadIBKRMoneyDetails(report, section)) Add(row, label, reason);
+
+            var labels = new HashSet<string>(["存款", "取款", "账户转账", "转入", "转出", "内部转账", "支付和收到的经纪商利息",
+                "支付和收到的债券利息", "股息", "代替股息的支付", "代扣税款"], StringComparer.Ordinal);
+            var checkedTotals = new HashSet<(string, CurrencyType)>();
+            foreach (var row in report.RequireDataRows("现金报告").Where(r => labels.Contains(r.Fields[0])))
+            {
+                var label = row.Fields[0];
+                decimal actual;
+                if (row.Fields[1] == "基础货币总结")
+                    actual = detailTotals.Where(p => p.Key.Label == label).Sum(p => builder.BaseValue(new Currency(p.Value, p.Key.Currency)));
+                else
+                {
+                    var currency = ParseIBKRCurrencyType(row.Fields[1]);
+                    actual = detailTotals.GetValueOrDefault((label, currency));
+                    checkedTotals.Add((label, currency));
+                }
+                var expected = ParseIBKRDecimalAt(row, 2, label);
+                if (row.Fields[1] != "基础货币总结" || expected == 0)
+                    AssertIBKRMoneyEquals(expected, actual, $"IBKR {label} native detail total {row.Fields[1]}");
+                else
+                    AssertIBKRMoneyFieldEquals(actual, expected, row.Fields[2], $"IBKR {label} base detail total");
+            }
+            foreach (var entry in detailTotals.Where(p => p.Value != 0))
+                if (!checkedTotals.Contains(entry.Key) && !report.RequireDataRows("现金报告")
+                    .Any(r => r.Fields[0] == entry.Key.Label && r.Fields[1] == "基础货币总结"))
+                    throw new MailParseException($"IBKR cash: missing summary for {entry.Key.Label}/{entry.Key.Currency}.");
+        }
+
         private Records ParseIBKRRecords(
             IBKRCsvReport report,
             Account account,
@@ -1033,14 +1172,16 @@ namespace MyBook
             DateTime reportDate,
             string sourceName,
             decimal expectedNavChange,
-            decimal preciseStartingCash,
-            decimal preciseEndingCash,
             bool isInitialReport)
         {
-            var builder = new IBKRRecordBuilder(account, reportDate, sourceName, baseCurrency, isInitialReport);
+            var builder = new IBKRRecordBuilder(account, reportDate, sourceName, baseCurrency, isInitialReport, ParseIBKRBaseCurrencyRates(report));
             var tradeTotals = ParseIBKRTradeSummary(report, contractInfos);
+            if (tradeTotals.HasFxTrades)
+                throw new MailParseException("IBKR cash: individual FX executions are required; trade summaries cannot generate currency conversion records.");
             var quantityChangeTotals = ParseIBKRPositionQuantityChangeRecords(report, builder, baseCurrency, contractInfos, tradeTotals);
             var mtmTotals = ParseIBKRMtmRecords(report, builder, baseCurrency, contractInfos, quantityChangeTotals.CoveredTransactionImpacts);
+            if (mtmTotals.FxTransaction != 0)
+                throw new MailParseException("IBKR cash: individual FX executions are required; MTM totals cannot generate currency conversion records.");
             var commissionTotals = ParseIBKRCommissionRecords(report, builder, baseCurrency, contractInfos);
             var interestAccrualTotals = ParseIBKRInterestAccrualTotals(report);
             var interestAccrualChangeTotals = AddIBKRInterestAccrualChangeRecords(report, builder, baseCurrency);
@@ -1049,15 +1190,8 @@ namespace MyBook
             var dividendAccrualChangeTotal = ParseIBKRDividendAccrualChangeRecords(report, builder, baseCurrency, contractInfos);
             var transferTotal = ParseIBKRTransferRecords(report, builder, baseCurrency, account, contractInfos);
             var feeTotals = ParseIBKRFeeRecords(report, builder, baseCurrency);
-            var cashTotals = ParseIBKRCashRecords(report, builder, baseCurrency, tradeTotals, commissionTotals);
-            AddIBKRPreciseFxTransactionRecord(
-                builder,
-                baseCurrency,
-                preciseStartingCash,
-                preciseEndingCash,
-                tradeTotals,
-                mtmTotals,
-                cashTotals);
+            var cashTotals = ParseIBKRCashTotals(report, tradeTotals, commissionTotals);
+            AddIBKRNativeCashDetails(report, builder, account, reportDate);
 
             if (mtmTotals.HasData)
             {
@@ -1128,54 +1262,6 @@ namespace MyBook
             }
 
             return builder.Records;
-        }
-
-        private static void AddIBKRPreciseFxTransactionRecord(
-            IBKRRecordBuilder builder,
-            CurrencyType baseCurrency,
-            decimal preciseStartingCash,
-            decimal preciseEndingCash,
-            IBKRTransactionTotals tradeTotals,
-            IBKRMtmTotals mtmTotals,
-            IBKRCashTotals cashTotals)
-        {
-            if (!tradeTotals.HasFxTrades && mtmTotals.FxTransaction == 0)
-                return;
-            if (!mtmTotals.HasData)
-                throw new MailParseException("Parse IBKR Report Fail, FX trades without MTM data");
-
-            AssertIBKRMoneyWithin(
-                mtmTotals.CashFxTranslation,
-                cashTotals.CashFxTranslation,
-                0.0000001m,
-                "IBKR cash FX translation display");
-
-            var cashReportFxTransaction = cashTotals.TradeBuy + cashTotals.TradeSell - tradeTotals.StockBondProceeds;
-            var preciseFxTransaction =
-                preciseEndingCash
-                - preciseStartingCash
-                - cashTotals.NonTradeCashFlow
-                - tradeTotals.StockBondProceeds
-                - mtmTotals.CashFxTranslation;
-
-            AssertIBKRMoneyWithin(
-                preciseFxTransaction,
-                cashReportFxTransaction,
-                0.0000001m,
-                "IBKR cash report implied FX transaction");
-
-            var displayTolerance = Math.Max(0.00001m, mtmTotals.FxTransactionDisplayUnit * 10);
-            AssertIBKRMoneyWithin(
-                preciseFxTransaction,
-                mtmTotals.FxTransaction,
-                displayTolerance,
-                "IBKR MTM FX transaction display");
-
-            builder.Add(
-                new Currency(preciseFxTransaction, baseCurrency),
-                "交易价格影响",
-                $"FxTransaction/precise={preciseFxTransaction}/cashReport={cashReportFxTransaction}/mtm={mtmTotals.FxTransaction}",
-                destAccount: baseCurrency.ToString());
         }
 
         private IBKRPositionQuantityChangeTotals ParseIBKRPositionQuantityChangeRecords(
@@ -1420,11 +1506,8 @@ namespace MyBook
                     $"Parse IBKR Report Fail, Missing covered MTM transactions: {String.Join(", ", pendingCoveredTransactionImpacts.Keys.OrderBy(key => key, StringComparer.OrdinalIgnoreCase))}");
             }
 
-            builder.Add(
-                new Currency(cashFxTranslation, baseCurrency),
-                "现金外汇换算收益/损失",
-                $"CashFxTranslation/{cashFxTranslation}",
-                destAccount: baseCurrency.ToString());
+            // Native currency balances do not change when the base-currency exchange rate changes.
+            builder.AddBaseValuation(cashFxTranslation);
             return new IBKRMtmTotals(true, holdingTotal, transactionTotal, commissionTotal, otherTotal + brokerInterestOtherTotal, otherFeesTotal, cashFxTranslation, fxTransactionTotal, fxTransactionDisplayUnit);
         }
 
@@ -2277,7 +2360,7 @@ namespace MyBook
                 var convertedAmount = detail.Amount * rate;
                 convertedTotal += convertedAmount;
                 builder.Add(
-                    new Currency(convertedAmount, baseCurrency),
+                    new Currency(detail.Amount, ParseIBKRCurrencyType(detail.CurrencyCode)),
                     "手续费",
                     $"OtherFee/{FormatIBKRFeeDetail(detail)}/baseRate={rate}",
                     date: detail.Date,
@@ -2357,10 +2440,8 @@ namespace MyBook
                 throw new MailParseException($"Parse IBKR Report Fail, Invalid Other Fee Total: {FormatIBKRCsvRow(row)}");
         }
 
-        private IBKRCashTotals ParseIBKRCashRecords(
+        private static IBKRCashTotals ParseIBKRCashTotals(
             IBKRCsvReport report,
-            IBKRRecordBuilder builder,
-            CurrencyType baseCurrency,
             IBKRTransactionTotals transactionTotals,
             IBKRCommissionTotals commissionTotals)
         {
@@ -2408,21 +2489,18 @@ namespace MyBook
                         break;
                     case "支付和收到的经纪商利息":
                         nonTradeCashFlow += amount;
-                        builder.Add(new Currency(amount, baseCurrency), "现金利息", $"CashReport/{FormatIBKRCsvRow(row)}", destAccount: baseCurrency.ToString());
                         break;
                     case "支付和收到的债券利息":
                         nonTradeCashFlow += amount;
-                        builder.Add(new Currency(amount, baseCurrency), "债券利息", $"CashReport/{FormatIBKRCsvRow(row)}", destAccount: baseCurrency.ToString());
                         break;
                     case "股息":
                     case "代替股息的支付":
                     case "代扣税款":
                         nonTradeCashFlow += amount;
-                        builder.Add(new Currency(amount, baseCurrency), label, $"CashReport/{FormatIBKRCsvRow(row)}", destAccount: baseCurrency.ToString());
                         break;
                     case "现金外汇换算收益/损失":
                         cashFxTranslation += amount;
-                        // 已由 MTM 外汇行体现，避免同一基础货币折算影响重复生成 record。
+                        // 仅用于基础货币估值校验；汇率变化不会产生原币现金流水。
                         break;
                     case "其它费用":
                         otherFees += amount;
@@ -2435,12 +2513,6 @@ namespace MyBook
                     case "内部转账":
                     case "账户转账":
                         nonTradeCashFlow += amount;
-                        builder.Add(
-                            new Currency(amount, baseCurrency),
-                            label,
-                            $"CashReport/{FormatIBKRCsvRow(row)}",
-                            isInternal: true,
-                            destAccount: baseCurrency.ToString());
                         break;
                     default:
                         throw new MailParseException($"Parse IBKR Report Fail, Unknown Cash Row: {FormatIBKRCsvRow(row)}");
@@ -2462,7 +2534,6 @@ namespace MyBook
             CurrencyType baseCurrency,
             List<Holding> positionHoldings,
             string sourceName,
-            decimal cash,
             bool useBeginningValues = false)
         {
             var holdings = new List<Holding>();
@@ -2470,13 +2541,12 @@ namespace MyBook
             foreach (var holding in positionHoldings)
                 AddIBKRHolding(holdings, seen, holding);
 
-            AddIBKRHolding(holdings, seen, new Holding(baseCurrency.ToString(), HoldingType.Cash)
-            {
-                Account = account,
-                desc = $"All currency cash balances converted to {baseCurrency}",
-                displayText = baseCurrency == CurrencyType.USD ? "All currency($)" : $"All currency({baseCurrency})",
-                currentPrice = new Currency(cash, baseCurrency)
-            });
+            foreach (var balance in ReadIBKRNativeCash(report, baseCurrency))
+                AddIBKRHolding(holdings, seen, new Holding(balance.Currency.ToString(), HoldingType.Cash)
+                {
+                    Account = account,
+                    currentPrice = new Currency(useBeginningValues ? balance.Beginning : balance.Ending, balance.Currency)
+                });
 
             foreach (var holding in ParseIBKRNavAdjustmentHoldings(report, account, baseCurrency, useBeginningValues))
                 AddIBKRHolding(holdings, seen, holding);
@@ -4217,18 +4287,21 @@ namespace MyBook
             private readonly DateTime reportDate;
             private readonly string sourceName;
             private readonly CurrencyType baseCurrency;
+            private readonly IReadOnlyDictionary<string, decimal> rates;
 
             public IBKRRecordBuilder(
                 Account account,
                 DateTime reportDate,
                 string sourceName,
                 CurrencyType baseCurrency,
-                bool allowLargeStatementResidual)
+                bool allowLargeStatementResidual,
+                IReadOnlyDictionary<string, decimal> rates)
             {
                 this.account = account;
                 this.reportDate = reportDate;
                 this.sourceName = sourceName;
                 this.baseCurrency = baseCurrency;
+                this.rates = rates;
                 AllowLargeStatementResidual = allowLargeStatementResidual;
             }
 
@@ -4236,12 +4309,18 @@ namespace MyBook
             public decimal NetAssetChangeTotal { get; private set; }
             public bool AllowLargeStatementResidual { get; }
 
+            public decimal BaseValue(Currency amount) => amount.t == baseCurrency ? amount.v
+                : rates.TryGetValue(amount.t.ToString(), out var rate)
+                    ? amount.v * rate : throw new MailParseException($"IBKR cash: missing base rate for {amount.t}.");
+
+            public void AddBaseValuation(decimal amount) => NetAssetChangeTotal += amount;
+
             public string DescribeNetAssetChangeTotals()
             {
                 return String.Join(
                     "; ",
                     Records
-                        .GroupBy(record => $"{(record.isInternal ? "internal " : "")}{record.Reason}", StringComparer.Ordinal)
+                        .GroupBy(record => $"{(record.isInternal ? "internal " : "")}{record.Reason}/{record.t}", StringComparer.Ordinal)
                         .Select(group => $"{group.Key}={group.Sum(record => record.v)}")
                         .OrderBy(text => text, StringComparer.Ordinal));
             }
@@ -4255,17 +4334,17 @@ namespace MyBook
                 DateTime? date = null,
                 string destAccount = "",
                 int holdingQuantity = 0,
-                IBKRContractInfo? holding = null)
+                IBKRContractInfo? holding = null,
+                DateTime? postingDate = null)
             {
                 if (amount.v == 0)
                     return;
-                if (affectsNetAsset && amount.t != baseCurrency)
-                    throw new MailParseException($"Parse IBKR Report Fail, Non-base NAV record: {reason} {amount.v}/{amount.t}");
 
                 var record = new Record
                 {
                     Account = account,
                     date = date ?? reportDate,
+                    postingDate = postingDate,
                     updateTime = DateTime.Now,
                     DestAccount = destAccount,
                     isInternal = isInternal,
@@ -4285,7 +4364,7 @@ namespace MyBook
                 Records.Add(record);
 
                 if (affectsNetAsset)
-                    NetAssetChangeTotal += amount.v;
+                    NetAssetChangeTotal += BaseValue(amount);
             }
         }
     }
