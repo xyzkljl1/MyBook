@@ -39,7 +39,8 @@ internal sealed partial class WiseUtil
         }
         var exact = match.AccountName is null ? null : database.GetAccountByName(match.AccountName);
         var account = database.FindTransferAccountByInstitution(exact, names.ToArray());
-        return account is null ? match : match with { Status = "Matched", AccountName = database.GetPostingAccount(account).name };
+        return account is not null ? match with { Status = "Matched", AccountName = database.GetPostingAccount(account).name }
+            : DatabaseUtil.IsBrokerageInstitution(names.ToArray()) ? match with { Status = "InternalBrokerage" } : match;
     }
 
     internal static AccountMatch ResolveCounterparty(EventData data, Func<string, Account?> exact,
@@ -144,10 +145,10 @@ internal sealed partial class WiseUtil
 
     internal static void ApplyCounterparty(List<Record> records, Account current, AccountMatch match)
     {
-        if (match.AccountName is null || match.AccountName == current.name) return;
+        if (match.AccountName == current.name || match.AccountName is null && match.Status != "InternalBrokerage") return;
         foreach (var record in records.Where(r => r.Reason != "手续费"))
         {
-            record.DestAccount = match.AccountName;
+            if (match.AccountName is not null) record.DestAccount = match.AccountName;
             // Gross amounts with unknown fees stay visible even when the counterparty is known.
             record.isInternal = record.Reason == "转账" && !record.Source.EndsWith("/gross", StringComparison.Ordinal);
         }

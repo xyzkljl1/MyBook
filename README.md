@@ -46,7 +46,7 @@ Expected files:
 
 Imports require existing accounts and fixed starting checkpoints. They do not create accounts automatically.
 
-For new transfers involving Wise, Schwab, FirstTrade, Kraken, Nexus, ZA or CICC, an explicit counterparty institution can resolve to its sole configured account when no account identifier matches. Conflicting or ambiguous evidence fails; fees and unsplit amounts retain their existing treatment. Existing records are not reclassified automatically.
+For new transfers involving Wise, Schwab, FirstTrade, IBKR, Kraken, Nexus, ZA or CICC, an explicit counterparty institution can resolve to its sole configured account when no account identifier matches. Transfers explicitly involving IBKR, Schwab or FirstTrade are treated as internal even when multiple brokerage accounts prevent identifying the specific account. Conflicting institution or account evidence fails; fees and unsplit amounts retain their existing treatment. Existing records are not reclassified automatically.
 
 ## Configuration
 

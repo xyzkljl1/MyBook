@@ -22,7 +22,7 @@ namespace MyBook
         private const string InitialHoldingReason = "Initial holding";
         private const string InitialCashBalanceReason = "Initial cash balance";
         private const string BeginningHoldingRestatementReason = "期初估值重述";
-        private static readonly string[] UniqueTransferInstitutionTypes = ["WISE", "SCHWAB", "FIRSTTRADE", "KRAKEN", "NEXUS", "ZA", "CICC"];
+        private static readonly string[] TransferInstitutionTypes = ["WISE", "SCHWAB", "FIRSTTRADE", "IBKR", "KRAKEN", "NEXUS", "ZA", "CICC"];
         private const string BootstrapSqlRelativePath = "Database/bootstrap.sql";
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
@@ -2437,15 +2437,26 @@ namespace MyBook
             }
             var candidates = accounts.Where(account => !IsUndeterminedAccount(account)
                 && String.Equals(GetAccountType(account.name), types[0], StringComparison.OrdinalIgnoreCase)).ToList();
+            if (candidates.Count > 1 && IsBrokerageInstitution(counterpartyNames))
+                return null;
             if (candidates.Count != 1)
                 throw new InvalidOperationException($"Transfer institution {types[0]} requires exactly one configured account when no account identifier matches.");
             return candidates[0];
         }
 
         private static List<string> GetTransferInstitutionTypes(params string?[] counterpartyNames) =>
-            UniqueTransferInstitutionTypes.Where(type => counterpartyNames.Any(text => !String.IsNullOrWhiteSpace(text)
-                && Regex.IsMatch(text, $@"(?<![A-Za-z0-9]){(type == "FIRSTTRADE" ? "(?:FIRSTTRADE|FIRSTRADE)" : type)}(?![A-Za-z0-9])",
+            TransferInstitutionTypes.Where(type => counterpartyNames.Any(text => !String.IsNullOrWhiteSpace(text)
+                && Regex.IsMatch(text.Trim(), type == "IBKR"
+                    ? @"^(?:IBKR(?:_[A-Z0-9]+)?|INTERACTIVE\s+BROK(?:ERS)?(?:\s+(?:LLC|LTD\.?|LIMITED))?)$"
+                    : $@"(?<![A-Za-z0-9]){(type == "FIRSTTRADE" ? "(?:FIRSTTRADE|FIRSTRADE)" : type)}(?![A-Za-z0-9])",
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))).ToList();
+
+        internal static bool IsBrokerageInstitution(params string?[] counterpartyNames) =>
+            GetTransferInstitutionTypes(counterpartyNames) is [var type] && type is "IBKR" or "SCHWAB" or "FIRSTTRADE";
+
+        private static bool IsTransferPrincipal(Record record) =>
+            record.Reason is "转入" or "转出" or "转账"
+            && !(record.Source.StartsWith("WiseApi/", StringComparison.Ordinal) && record.Source.EndsWith("/gross", StringComparison.Ordinal));
 
         public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, bool logDetails, params string?[] texts)
         {
@@ -2638,13 +2649,14 @@ namespace MyBook
                 // Only newly inserted transfer principal is eligible, never fees or unsplit gross amounts.
                 var counterparty = Regex.Split(record.DestAccount.Split(';', 2)[0], @"\bRef\s*:",
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)[0];
-                if (record.Reason is "转入" or "转出" or "转账"
-                    && !(record.Source.StartsWith("WiseApi/", StringComparison.Ordinal) && record.Source.EndsWith("/gross", StringComparison.Ordinal))
-                    && GetTransferInstitutionTypes(counterparty).Count > 0)
+                if (IsTransferPrincipal(record) && GetTransferInstitutionTypes(counterparty).Count > 0)
                 {
                     var exact = FindAccountByName(record.DestAccount) ?? FindAccountByInternalCardNoText(
                         null, "transfer counterparty", false, counterparty);
                     var target = FindTransferAccountByInstitution(exact, counterparty);
+                    // 不会向别人的券商账户转账：三家券商相关本金均为内部交易。
+                    // 机构有多个账户时保留原描述，由后续匹配确定具体账户。
+                    if (IsBrokerageInstitution(counterparty)) record.isInternal = true;
                     if (target is not null && GetPostingAccount(target).Id != account.Id)
                     {
                         if (record.DestAccount != target.name)
