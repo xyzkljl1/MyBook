@@ -44,8 +44,8 @@ namespace MyBook
                     database.GetAccountByTypeAndId("FIRSTTRADE", account);
                     var last = imports.Where(i => i.statementKey.StartsWith(FirstTradeAccountKey(account), StringComparison.Ordinal))
                         .Select(i => (DateTime?)i.time).Max();
-                    return last.HasValue && last.Value.Date.AddDays(-7) > checkpoint.Date
-                        ? last.Value.Date.AddDays(-7) : checkpoint.Date;
+                    return last.HasValue && last.Value.Date > checkpoint.Date
+                        ? last.Value.Date : checkpoint.Date;
                 }).ConfigureAwait(false);
                 stage = "validate and import account data";
                 timeout.Token.ThrowIfCancellationRequested();
@@ -78,7 +78,8 @@ namespace MyBook
                 imports.Add(BuildFirstTradeImport(capture, item, account,
                     database.GetCurrentAccountHoldings(account),
                     database.GetStatementRecords(StatementImportProvider.FirstTradeApi, account),
-                    database.GetKnownEquityHoldingType));
+                    database.GetKnownEquityHoldingType,
+                    (date, symbol, quantity) => database.GetFirstTradeTransferEvidence(account, date, symbol, quantity)));
             }
             var saved = database.SaveStatementRecordsAndHoldingsOnce(imports);
             return imports.Where((_, index) => saved[index]).Sum(import => import.Records.Count);
@@ -86,7 +87,8 @@ namespace MyBook
 
         internal static StatementRecordHoldingImport BuildFirstTradeImport(FirstTradeCapture capture,
             FirstTradeAccountCapture item, Account account, List<Holding> beginning,
-            List<Record> previousRecords, Func<string, HoldingType> resolveEquity)
+            List<Record> previousRecords, Func<string, HoldingType> resolveEquity,
+            Func<DateTime, string, decimal, FirstTradeTransferEvidence>? resolveTransfer = null)
         {
             const string transactionPrefix = "FirstTrade transaction|";
             var time = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(capture.CompletedAtUtc, "Eastern Standard Time").DateTime;
@@ -134,37 +136,9 @@ namespace MyBook
             if (Math.Abs(endingTotal - FirstTradeNumber(balance, "total_account_value")) >= 100m)
                 throw new FirstTradeException("account total: difference must be less than USD 100");
 
-            var transactions = new List<FirstTradeTransaction>();
-            var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var row in item.HistoryPages.SelectMany(page => page.GetProperty("items").EnumerateArray()))
-            {
-                if (!DateTime.TryParseExact(FirstTradeText(row, "report_date"), "yyyy-MM-dd", CultureInfo.InvariantCulture,
-                    DateTimeStyles.None, out var date) || date < item.HistoryFrom.Date || date > item.HistoryThrough.Date)
-                    throw new FirstTradeException("invalid or out-of-range transaction date");
-                var type = FirstTradeText(row, "trans_str");
-                var description = FirstTradeText(row, "description");
-                var subaccount = FirstTradeText(row, "account_type");
-                var symbol = FirstTradeText(row, "symbol", allowEmpty: true);
-                var quantity = FirstTradeNumber(row, "quantity");
-                var price = FirstTradeNumber(row, "trade_price");
-                var amount = FirstTradeNumber(row, "amount");
-                if (subaccount is not ("Cash" or "Margin"))
-                    throw new FirstTradeException("unsupported transaction subaccount");
-                var canonical = JsonSerializer.Serialize(new { date, type, description, subaccount, symbol, quantity, price, amount });
-                var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
-                occurrences.TryGetValue(hash, out var occurrence);
-                occurrences[hash] = ++occurrence;
-                transactions.Add(new(hash + ":" + occurrence, date, type, description, subaccount, symbol, quantity, price, amount));
-            }
-            // The API has no transaction ID. Preserve multiplicity and reject removals/revisions in the overlap window.
-            var incoming = transactions.Select(t => t.Key).ToHashSet(StringComparer.Ordinal);
-            var previous = previousRecords.Where(r => r.Source.StartsWith(transactionPrefix, StringComparison.Ordinal)
-                && r.Source.Contains("|cash|", StringComparison.Ordinal)).ToList();
-            foreach (var record in previous.Where(r => r.date.Date >= item.HistoryFrom.Date && r.date.Date <= item.HistoryThrough.Date))
-                if (!incoming.Contains(record.Source.Split('|')[1]))
-                    throw new FirstTradeException("previously imported transaction was removed or revised in the overlap window");
-            var known = previous.Select(r => r.Source.Split('|')[1]).ToHashSet(StringComparer.Ordinal);
-            var transfers = transactions.Where(t => t.Type == "OTHER").ToList();
+            var transactions = ReconcileFirstTradeSources(item);
+            var known = MatchFirstTradePrevious(transactions, previousRecords, item.HistoryFrom, item.HistoryThrough);
+            var transfers = transactions.Where(t => t.Type == "OTHER" && t.Quantity == 0).ToList();
             foreach (var group in transfers.GroupBy(t => (t.Date, Amount: Math.Abs(t.Amount))))
             {
                 if (group.Key.Amount == 0 || group.Any(t => t.Description is not ("XFER CASH TO MARGIN" or "XFER MARGIN TO CASH"))
@@ -172,6 +146,11 @@ namespace MyBook
                     || group.Where(t => t.Subaccount == "Cash").Sum(t => t.Amount) != -group.Where(t => t.Subaccount == "Margin").Sum(t => t.Amount))
                     throw new FirstTradeException("unrecognized or unpaired cash/margin transfer");
             }
+            foreach (var group in transactions.Where(IsFirstTradeSubaccountTransfer).GroupBy(t => (t.Date, t.Symbol, Quantity: Math.Abs(t.Quantity))))
+                if (group.Count(t => t.Subaccount == "Cash" && t.Description.EndsWith("TFR to Type 2", StringComparison.Ordinal))
+                    != group.Count(t => t.Subaccount == "Margin" && t.Description.EndsWith("TFR from Type 1", StringComparison.Ordinal))
+                    || group.Any(t => t.Amount != 0 || t.Price != 0))
+                    throw new FirstTradeException("unpaired security subaccount transfer");
             var records = new List<Record>();
             var cash = beginning.Where(h => h.holdingType == HoldingType.Cash).Sum(h => h.totalPrice.v);
             var quantities = beginning.Where(h => h.holdingType != HoldingType.Cash).ToDictionary(h => h.code, h => h.quantity, StringComparer.Ordinal);
@@ -179,25 +158,67 @@ namespace MyBook
             foreach (var tx in transactions.OrderBy(t => t.Date).ThenBy(t => t.Key, StringComparer.Ordinal))
             {
                 if (known.Contains(tx.Key)) continue;
+                // Keep identity before the description so source truncation cannot remove it.
+                var source = transactionPrefix + tx.Key + "|identity=" + tx.Identity;
+                var postingDate = tx.SettlementDate ?? tx.Date;
                 string reason;
                 var trade = tx.Type is "BOUGHT" or "SOLD";
                 var isInternal = trade || tx.Type == "OTHER";
+                if (tx.Type == "OTHER" && tx.Quantity != 0)
+                {
+                    var security = equities.GetValueOrDefault(tx.Symbol)
+                        ?? new Holding(tx.Symbol, resolveEquity(tx.Symbol)) { Account = account, currentPrice = new Currency(0, CurrencyType.USD) };
+                    decimal quantity, transferValue;
+                    string counterparty = "";
+                    if (IsFirstTradeSubaccountTransfer(tx))
+                    {
+                        quantity = tx.Subaccount == "Cash" ? -Math.Abs(tx.Quantity) : Math.Abs(tx.Quantity);
+                        transferValue = 0;
+                        reason = "证券子账户划转";
+                    }
+                    else if (tx.Amount == 0 && tx.Price == 0
+                        && System.Text.RegularExpressions.Regex.IsMatch(tx.Description, @"\bTRANSFER FROM .+ ACAT", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                    {
+                        quantity = Math.Abs(tx.Quantity);
+                        var evidence = item.TransferEvidence.SingleOrDefault(e => e.Date == tx.Date && e.Symbol == tx.Symbol && e.Quantity == quantity)
+                            ?? resolveTransfer?.Invoke(tx.Date, tx.Symbol, quantity)
+                            ?? throw new FirstTradeException("security transfer requires matching source-account evidence");
+                        if (!item.TransferEvidence.Contains(evidence)) item.TransferEvidence.Add(evidence);
+                        transferValue = evidence.Value;
+                        counterparty = evidence.Counterparty;
+                        reason = "内部转账";
+                    }
+                    else throw new FirstTradeException("unsupported security transfer");
+                    quantities[tx.Symbol] = quantities.GetValueOrDefault(tx.Symbol) + quantity;
+                    values[tx.Symbol] = values.GetValueOrDefault(tx.Symbol) + transferValue;
+                    AddRecord(transferValue, reason, source + "|asset|" + (counterparty.Length > 0 ? "/ACATSTransfer/" : "") + tx.Description,
+                        tx.Date, true, security, quantity, postingDate, counterparty);
+                    continue;
+                }
                 if (trade)
                 {
-                    if (tx.Quantity <= 0 || tx.Price <= 0 || tx.Symbol.Length == 0
+                    if (tx.Quantity == 0 || tx.Price <= 0 || tx.Symbol.Length == 0
                         || (tx.Type == "BOUGHT" ? tx.Amount >= 0 : tx.Amount <= 0))
                         throw new FirstTradeException("invalid equity trade");
-                    // Settlement cents are explicit; unexplained commissions must not become valuation records.
-                    FirstTradeEqual(Math.Abs(tx.Amount), Decimal.Round(tx.Quantity * tx.Price, 2, MidpointRounding.AwayFromZero),
-                        "trade settlement amount (separate fee detail required on mismatch)");
+                    var gross = Decimal.Round(Math.Abs(tx.Quantity) * tx.Price, 2, MidpointRounding.AwayFromZero);
+                    var principal = tx.Type == "BOUGHT" ? -gross : gross;
+                    FirstTradeEqual(principal - tx.Commission - tx.Fees, tx.Amount, "trade principal minus charges equals actual cash");
                     reason = tx.Type == "BOUGHT" ? "买入" : "卖出";
-                    var quantity = tx.Type == "BOUGHT" ? tx.Quantity : -tx.Quantity;
+                    var quantity = tx.Type == "BOUGHT" ? Math.Abs(tx.Quantity) : -Math.Abs(tx.Quantity);
                     var security = equities.GetValueOrDefault(tx.Symbol)
                         ?? new Holding(tx.Symbol, resolveEquity(tx.Symbol)) { Account = account, currentPrice = new Currency(0, CurrencyType.USD) };
                     quantities[tx.Symbol] = quantities.GetValueOrDefault(tx.Symbol) + quantity;
-                    values[tx.Symbol] = values.GetValueOrDefault(tx.Symbol) - tx.Amount;
-                    AddRecord(-tx.Amount, reason, transactionPrefix + tx.Key + "|asset|" + tx.Description,
-                        tx.Date, true, security, quantity);
+                    values[tx.Symbol] = values.GetValueOrDefault(tx.Symbol) - principal;
+                    AddRecord(-principal, reason, source + "|asset|" + tx.Description,
+                        tx.Date, true, security, quantity, postingDate);
+                    AddRecord(principal, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
+                        tx.Date, true, null, 0, postingDate);
+                    if (tx.Commission != 0) AddRecord(-tx.Commission, "交易佣金", source + "|commission|" + tx.Description,
+                        tx.Date, false, null, 0, postingDate);
+                    if (tx.Fees != 0) AddRecord(-tx.Fees, tx.AssumedFee ? "SEC交易监管费" : "交易费用", source + "|fee|" + tx.Description,
+                        tx.Date, false, null, 0, postingDate);
+                    cash += tx.Amount;
+                    continue;
                 }
                 else
                 {
@@ -217,8 +238,8 @@ namespace MyBook
                     };
                 }
                 cash += tx.Amount;
-                AddRecord(tx.Amount, reason, transactionPrefix + tx.Key + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
-                    tx.Date, isInternal, null, 0);
+                AddRecord(tx.Amount, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
+                    tx.Date, isInternal, null, 0, postingDate);
             }
             FirstTradeEqual(cash, endingCash, "cash balance from transaction details");
             foreach (var symbol in quantities.Keys.Union(equities.Keys).Union(values.Keys))
@@ -242,11 +263,12 @@ namespace MyBook
                     CompletedAtUtc = capture.CompletedAtUtc, Accounts = [item]
                 }));
 
-            void AddRecord(decimal amount, string reason, string source, DateTime date, bool isInternal, Holding? holding, decimal quantity)
+            void AddRecord(decimal amount, string reason, string source, DateTime date, bool isInternal, Holding? holding, decimal quantity,
+                DateTime? postingDate = null, string counterparty = "")
             {
                 records.Add(new Record
                 {
-                    Account = account, v = amount, t = CurrencyType.USD, date = date, postingDate = date,
+                    Account = account, v = amount, t = CurrencyType.USD, date = date, postingDate = postingDate ?? date, DestAccount = counterparty,
                     updateTime = DateTime.Now, Reason = reason, Source = source[..Math.Min(1024, source.Length)],
                     isInternal = isInternal, Holding = holding, HoldingQuantity = quantity
                 });
@@ -254,7 +276,17 @@ namespace MyBook
         }
 
         private sealed record FirstTradeTransaction(string Key, DateTime Date, string Type, string Description,
-            string Subaccount, string Symbol, decimal Quantity, decimal Price, decimal Amount);
+            string Subaccount, string Symbol, decimal Quantity, decimal Price, decimal Amount)
+        {
+            public string Identity { get; init; } = "";
+            public DateTime? SettlementDate { get; init; }
+            public decimal Commission { get; init; }
+            public decimal Fees { get; init; }
+            public bool AssumedFee { get; init; }
+        }
+
+        internal sealed record FirstTradeTransferEvidence(DateTime Date, string Symbol, decimal Quantity,
+            decimal Value, string Counterparty, int SourceRecordId);
 
         private static decimal FirstTradeNumber(JsonElement row, string field)
         {
@@ -283,7 +315,7 @@ namespace MyBook
 
         internal sealed class FirstTradeCapture
         {
-            public int Version { get; set; } = 1;
+            public int Version { get; set; } = 2;
             public DateTimeOffset StartedAtUtc { get; set; }
             public DateTimeOffset CompletedAtUtc { get; set; }
             public List<FirstTradeAccountCapture> Accounts { get; set; } = new();
@@ -298,6 +330,9 @@ namespace MyBook
             public JsonElement Balances { get; set; }
             public List<JsonElement> PositionPages { get; set; } = new();
             public List<JsonElement> HistoryPages { get; set; } = new();
+            public string Csv { get; set; } = "";
+            public string Ofx { get; set; } = "";
+            public List<FirstTradeTransferEvidence> TransferEvidence { get; set; } = [];
         }
 
         internal sealed class FirstTradeException(string message) : Exception("FirstTrade: " + message);
@@ -453,7 +488,7 @@ namespace MyBook
                     if (!seen.Add(account))
                         throw new FirstTradeException("duplicate account in response");
                     var last = previous?.Accounts.SingleOrDefault(a => a.Account == account);
-                    var from = historyFrom?.Invoke(account) ?? (last is null ? today.AddYears(-3) : last.HistoryThrough.Date.AddDays(-7));
+                    var from = historyFrom?.Invoke(account) ?? (last is null ? today.AddYears(-3) : last.HistoryThrough.Date);
                     if (from > today)
                         throw new FirstTradeException("history checkpoint is in the future");
                     var query = "account=" + Uri.EscapeDataString(account);
@@ -467,7 +502,9 @@ namespace MyBook
                     result.Accounts.Add(new FirstTradeAccountCapture
                     {
                         Account = account, HistoryFrom = from, HistoryThrough = today, Summary = item.Clone(),
-                        Balances = balances, PositionPages = positions, HistoryPages = history
+                        Balances = balances, PositionPages = positions, HistoryPages = history,
+                        Csv = await DownloadExportAsync(account, from, today, csv: true, token).ConfigureAwait(false),
+                        Ofx = await DownloadExportAsync(account, from, today, csv: false, token).ConfigureAwait(false)
                     });
                 }
                 result.CompletedAtUtc = DateTimeOffset.UtcNow;
@@ -519,20 +556,66 @@ namespace MyBook
                 throw new FirstTradeException("invalid pagination metadata");
             }
 
-            private async Task<JsonElement> ReadAsync(Endpoint endpoint, string? query, CancellationToken token)
+            private Task<JsonElement> ReadAsync(Endpoint endpoint, string? query, CancellationToken token) =>
+                ReadWithSessionAsync(endpoint.ToString(), () => RequestAsync(endpoint, query, null, token), token);
+
+            private async Task<T> ReadWithSessionAsync<T>(string label, Func<Task<T>> request, CancellationToken token)
             {
                 // Only an expired session permits a retry, at most once for this import client.
                 while (true)
                 {
-                    try { return await RequestAsync(endpoint, query, null, token).ConfigureAwait(false); }
+                    try { return await request().ConfigureAwait(false); }
                     catch (FirstTradeSessionExpiredException)
                     {
                         if (sessionRefreshAttempted)
-                            throw new FirstTradeException($"{endpoint}: HTTP 401 after session refresh; no further login");
+                            throw new FirstTradeException($"{label}: HTTP 401 after session refresh; no further login");
                         sessionRefreshAttempted = true;
                         await LoginAsync(token).ConfigureAwait(false);
                     }
                 }
+            }
+
+            private Task<string> DownloadExportAsync(string account, DateTime from, DateTime through, bool csv, CancellationToken token)
+            {
+                var path = csv ? "/scripts/ofx/downloadcsv.php" : "/scripts/ofx/download.php";
+                var label = "GET invest.firstrade.com" + path;
+                return ReadWithSessionAsync(label, async () =>
+                {
+                    EnsureSessionLock();
+                    var uri = new Uri("https://invest.firstrade.com" + path + "?acctnum=" + Uri.EscapeDataString(account)
+                        + (csv ? "" : "&type=") + "&startdate=" + from.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture)
+                        + "&enddate=" + through.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture));
+                    using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+                    // The API sid also authenticates the report endpoint as the SID cookie.
+                    // A separate web login would invalidate this API session.
+                    if (String.IsNullOrEmpty(session.Sid)) throw new FirstTradeException(label + ": session missing");
+                    if (cookies is not null) cookies.Add(new Cookie("SID", session.Sid, "/", uri.Host) { Secure = true, HttpOnly = true });
+                    else request.Headers.Add("Cookie", "SID=" + session.Sid);
+                    try
+                    {
+                        using var response = await client.SendAsync(request, token).ConfigureAwait(false);
+                        if (response.StatusCode == HttpStatusCode.Unauthorized)
+                        {
+                            session.Ftat = session.Sid = null;
+                            SaveSession();
+                            throw new FirstTradeSessionExpiredException();
+                        }
+                        if (!response.IsSuccessStatusCode) throw new FirstTradeException($"{label}: HTTP {(int)response.StatusCode}");
+                        var bytes = await response.Content.ReadAsByteArrayAsync(token).ConfigureAwait(false);
+                        responseBytes += bytes.Length;
+                        if (responseBytes > 64L * 1024 * 1024) throw new FirstTradeException("capture response size safety limit reached");
+                        var text = Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF');
+                        if (csv ? !text.StartsWith("Symbol,Quantity,Price,Action,", StringComparison.Ordinal)
+                            : !text.Contains("<INVSTMTRS>", StringComparison.Ordinal))
+                            throw new FirstTradeException($"{label}: HTTP {(int)response.StatusCode}, invalid {(csv ? "CSV" : "OFX")} export; session may have expired");
+                        return text;
+                    }
+                    catch (FirstTradeException) { throw; }
+                    catch (FirstTradeSessionExpiredException) { throw; }
+                    catch (OperationCanceledException) { throw new FirstTradeException(label + ": cancelled or timed out"); }
+                    catch (HttpRequestException e) { throw new FirstTradeException($"{label}: network failure ({e.HttpRequestError})"); }
+                    catch { throw new FirstTradeException(label + ": transport failure; private details suppressed"); }
+                }, token);
             }
 
             private async Task<JsonElement> RequestAsync(Endpoint endpoint, string? query, Dictionary<string, string>? form, CancellationToken token)

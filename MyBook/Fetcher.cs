@@ -151,7 +151,7 @@ namespace MyBook
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
                 }).ConfigureAwait(false);
                 if (web is not null && web.IsFirstTradeConfigured)
-                    await RunImportTaskAsync("FirstTrade", () => true,
+                    await RunImportTaskAsync("FirstTrade", ShouldFetchFirstTrade,
                         () => web.FetchFirstTradeAsync()).ConfigureAwait(false);
                 if (plaid is not null)
                 {
@@ -281,6 +281,18 @@ namespace MyBook
         private bool ShouldFetchMonthlyProvider(string name, StatementImportProvider provider)
         {
             return ShouldFetchProviderAfterDays(name, provider, MonthlyFetchIntervalDays);
+        }
+
+        private bool ShouldFetchFirstTrade()
+        {
+            var last = database?.GetLatestStatementImportTime(StatementImportProvider.FirstTradeApi);
+            if (last is null) return true;
+            // FirstTrade import times are stored in US Eastern local time.
+            var lastUtc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(last.Value, DateTimeKind.Unspecified),
+                TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"));
+            if (DateTime.UtcNow - lastUtc > TimeSpan.FromDays(7)) return true;
+            Console.WriteLine($"skip scheduled FirstTrade fetch: last import {last.Value:yyyy-MM-dd HH:mm:ss} ET, not over one week ago");
+            return false;
         }
 
         private bool ShouldFetchProviderAfterDays(string name, StatementImportProvider provider, int intervalDays)
