@@ -506,16 +506,20 @@ namespace MyBook
             SearchQuery query,
             Func<IMessageSummary, bool>? summaryFilter,
             Func<MimeMessage, bool>? messageFilter,
-            Func<MimeMessage, DateTime>? orderDateSelector = null)
+            Func<MimeMessage, DateTime>? orderDateSelector = null,
+            bool allFolders = false,
+            CancellationToken cancellationToken = default)
         {
+            if (allFolders)
+                return await UseMailSessionScope(scope => scope.UseAllFoldersAsync(mailbox, label,
+                    folder => SearchMessagesCore(mailbox, label, query, summaryFilter, messageFilter, orderDateSelector, folder, cancellationToken), cancellationToken)).ConfigureAwait(false);
             try
             {
-                return await SearchMessagesCore(mailbox, label, query, summaryFilter, messageFilter, orderDateSelector);
+                return await SearchMessagesCore(mailbox, label, query, summaryFilter, messageFilter, orderDateSelector, cancellationToken: cancellationToken);
             }
             catch (Exception e)
             {
-                Console.WriteLine($"fetch mail fail {label}: {e.Message}");
-                throw new InvalidOperationException($"Fetch mail failed: {label}: {e.Message}", e);
+                throw new InvalidOperationException($"Fetch mail failed: {label}: {e.GetType().Name}", e);
             }
         }
 
@@ -525,18 +529,20 @@ namespace MyBook
             SearchQuery query,
             Func<IMessageSummary, bool>? summaryFilter,
             Func<MimeMessage, bool>? messageFilter,
-            Func<MimeMessage, DateTime>? orderDateSelector)
+            Func<MimeMessage, DateTime>? orderDateSelector,
+            IMailFolder? selectedFolder = null,
+            CancellationToken cancellationToken = default)
         {
-            var uids = await UseMailFolderAsync(
-                mailbox,
+            Task<T> UseFolder<T>(string operation, Func<IMailFolder, Task<T>> action) => selectedFolder is null
+                ? UseMailFolderAsync(mailbox, operation, action, cancellationToken) : action(selectedFolder);
+            var uids = await UseFolder(
                 label,
-                folder => RunMailOperation(token => folder.SearchAsync(query, token))).ConfigureAwait(false);
+                folder => RunMailOperation(token => folder.SearchAsync(query, token), cancellationToken)).ConfigureAwait(false);
             Console.WriteLine($"mail search {label} found {uids.Count}");
             var candidateUids = uids.AsEnumerable();
             if (summaryFilter is not null && uids.Count > 0)
             {
-                var summaries = await UseMailFolderAsync(
-                    mailbox,
+                var summaries = await UseFolder(
                     $"{label} summaries",
                     folder => RunMailOperation(token => folder.FetchAsync(
                         uids,
@@ -544,7 +550,7 @@ namespace MyBook
                             | MessageSummaryItems.BodyStructure
                             | MessageSummaryItems.UniqueId
                             | MessageSummaryItems.InternalDate,
-                        token))).ConfigureAwait(false);
+                        token), cancellationToken)).ConfigureAwait(false);
                 var filteredSummaries = summaries
                     .Where(summaryFilter)
                     .ToList();
@@ -555,10 +561,9 @@ namespace MyBook
             var messages = new List<MimeMessage>();
             foreach (var uid in candidateUids)
             {
-                var message = await UseMailFolderAsync(
-                    mailbox,
+                var message = await UseFolder(
                     $"{label} uid={uid.Id}",
-                    folder => RunMailOperation(token => folder.GetMessageAsync(uid, token))).ConfigureAwait(false);
+                    folder => RunMailOperation(token => folder.GetMessageAsync(uid, token), cancellationToken)).ConfigureAwait(false);
                 if (messageFilter is not null && !messageFilter(message))
                     continue;
 
@@ -704,10 +709,11 @@ namespace MyBook
         private async Task<T> UseMailFolderAsync<T>(
             ImapMailbox mailbox,
             string label,
-            Func<IMailFolder, Task<T>> action)
+            Func<IMailFolder, Task<T>> action,
+            CancellationToken cancellationToken = default)
         {
             return await UseMailSessionScope(scope =>
-                scope.UseFolderAsync(mailbox, label, action)).ConfigureAwait(false);
+                scope.UseFolderAsync(mailbox, label, action, cancellationToken)).ConfigureAwait(false);
         }
 
         private ImapMailbox CreateYahooMailbox()
@@ -750,7 +756,7 @@ namespace MyBook
             return String.Equals($"{configuredUser}@{defaultDomain}", email, StringComparison.OrdinalIgnoreCase);
         }
 
-        private static async Task<IMailFolder> GetMailSearchFolder(ImapClient client, ImapMailbox mailbox)
+        private static async Task<IMailFolder> GetMailSearchFolder(ImapClient client, ImapMailbox mailbox, CancellationToken cancellationToken = default)
         {
             if (!mailbox.UseAllMail)
                 return client.Inbox;
@@ -761,7 +767,7 @@ namespace MyBook
             }
             catch
             {
-                foreach (var folder in await ListMailFolders(client))
+                foreach (var folder in await ListMailFolders(client, cancellationToken))
                 {
                     if (folder.Attributes.HasFlag(FolderAttributes.All)
                         || String.Equals(folder.Name, "All Mail", StringComparison.OrdinalIgnoreCase)
@@ -773,23 +779,23 @@ namespace MyBook
             }
         }
 
-        private static async Task<List<IMailFolder>> ListMailFolders(ImapClient client)
+        private static async Task<List<IMailFolder>> ListMailFolders(ImapClient client, CancellationToken cancellationToken = default)
         {
             var result = new List<IMailFolder>();
             foreach (var ns in client.PersonalNamespaces)
             {
                 var root = client.GetFolder(ns);
-                await AddMailFolders(root, result);
+                await AddMailFolders(root, result, cancellationToken);
             }
 
             return result;
         }
 
-        private static async Task AddMailFolders(IMailFolder folder, List<IMailFolder> result)
+        private static async Task AddMailFolders(IMailFolder folder, List<IMailFolder> result, CancellationToken cancellationToken)
         {
             result.Add(folder);
-            foreach (var child in await folder.GetSubfoldersAsync(false))
-                await AddMailFolders(child, result);
+            foreach (var child in await folder.GetSubfoldersAsync(false, cancellationToken))
+                await AddMailFolders(child, result, cancellationToken);
         }
 
         private static string MaskEmail(string? email)
@@ -844,38 +850,60 @@ namespace MyBook
             };
         }
 
-        private static async Task RunMailOperation(Func<CancellationToken, Task> operation)
+        private static async Task RunMailOperation(Func<CancellationToken, Task> operation, CancellationToken cancellationToken = default)
         {
-            using var cancellation = new CancellationTokenSource(MailClientTimeoutMilliseconds);
-            await operation(cancellation.Token).WaitAsync(MailClientTimeout);
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cancellation.CancelAfter(MailClientTimeoutMilliseconds);
+            await operation(cancellation.Token).WaitAsync(MailClientTimeout, cancellationToken);
         }
 
-        private static async Task<T> RunMailOperation<T>(Func<CancellationToken, Task<T>> operation)
+        private static async Task<T> RunMailOperation<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
         {
-            using var cancellation = new CancellationTokenSource(MailClientTimeoutMilliseconds);
-            return await operation(cancellation.Token).WaitAsync(MailClientTimeout);
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cancellation.CancelAfter(MailClientTimeoutMilliseconds);
+            return await operation(cancellation.Token).WaitAsync(MailClientTimeout, cancellationToken);
         }
 
         private sealed class MailSessionScope : IAsyncDisposable
         {
             private readonly Dictionary<ImapMailbox, MailSessionConnection> connections = new();
 
+            public Task<List<T>> UseAllFoldersAsync<T>(ImapMailbox mailbox, string label, Func<IMailFolder, Task<List<T>>> action,
+                CancellationToken cancellationToken = default)
+            {
+                var connection = GetConnection(mailbox);
+                return UseFolderAsync(mailbox, label, async _ =>
+                {
+                    var result = new List<T>();
+                    foreach (var folder in (await ListMailFolders(connection.Client!, cancellationToken).ConfigureAwait(false))
+                        .Where(f => f.Exists && f.FullName.Length > 0 && !f.Attributes.HasFlag(FolderAttributes.NoSelect)))
+                    {
+                        await RunMailOperation(token => folder.OpenAsync(FolderAccess.ReadOnly, token), cancellationToken).ConfigureAwait(false);
+                        result.AddRange(await action(folder).ConfigureAwait(false));
+                        await RunMailOperation(token => folder.CloseAsync(false, token), cancellationToken).ConfigureAwait(false);
+                    }
+                    return result;
+                }, cancellationToken);
+            }
+
             public async Task<T> UseFolderAsync<T>(
                 ImapMailbox mailbox,
                 string label,
-                Func<IMailFolder, Task<T>> action)
+                Func<IMailFolder, Task<T>> action,
+                CancellationToken cancellationToken = default)
             {
                 var connection = GetConnection(mailbox);
                 for (var attempt = 0; ; attempt++)
                 {
                     try
                     {
-                        var folder = await EnsureOpenFolderAsync(connection, label).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var folder = await EnsureOpenFolderAsync(connection, label, cancellationToken).ConfigureAwait(false);
                         return await action(folder).ConfigureAwait(false);
                     }
-                    catch (Exception exception) when (attempt == 0 && IsMailConnectionException(exception))
+                    catch (Exception exception) when (attempt == 0 && !cancellationToken.IsCancellationRequested && IsMailConnectionException(exception))
                     {
-                        Console.WriteLine($"mail reconnect {mailbox.Label} {label}: {exception.Message}");
+                        Console.WriteLine($"mail reconnect {mailbox.Label} {label}: {exception.GetType().Name}");
                         await ResetConnectionAsync(connection).ConfigureAwait(false);
                     }
                 }
@@ -899,7 +927,7 @@ namespace MyBook
                 return connection;
             }
 
-            private static async Task<IMailFolder> EnsureOpenFolderAsync(MailSessionConnection connection, string label)
+            private static async Task<IMailFolder> EnsureOpenFolderAsync(MailSessionConnection connection, string label, CancellationToken cancellationToken)
             {
                 if (connection.Client is not null
                     && connection.Client.IsConnected
@@ -921,18 +949,15 @@ namespace MyBook
 
                 try
                 {
-                    var proxyText = mailbox.Proxy is null
-                        ? "direct"
-                        : mailbox.Proxy.DisplayText;
-                    Console.WriteLine($"mail connect {proxyText} {mailbox.Label} {label}");
-                    await RunMailOperation(token => client.ConnectAsync(mailbox.Host, mailbox.Port, mailbox.UseSsl, token))
+                    Console.WriteLine($"mail connect {mailbox.Label} {label}");
+                    await RunMailOperation(token => client.ConnectAsync(mailbox.Host, mailbox.Port, mailbox.UseSsl, token), cancellationToken)
                         .ConfigureAwait(false);
                     Console.WriteLine("mail connected");
-                    await RunMailOperation(token => client.AuthenticateAsync(mailbox.Username, mailbox.Password, token))
+                    await RunMailOperation(token => client.AuthenticateAsync(mailbox.Username, mailbox.Password, token), cancellationToken)
                         .ConfigureAwait(false);
                     Console.WriteLine("mail authenticated");
-                    var folder = await GetMailSearchFolder(client, mailbox).ConfigureAwait(false);
-                    await RunMailOperation(token => folder.OpenAsync(FolderAccess.ReadOnly, token))
+                    var folder = await GetMailSearchFolder(client, mailbox, cancellationToken).ConfigureAwait(false);
+                    await RunMailOperation(token => folder.OpenAsync(FolderAccess.ReadOnly, token), cancellationToken)
                         .ConfigureAwait(false);
                     Console.WriteLine($"mail folder opened {folder.FullName}");
                     connection.Client = client;

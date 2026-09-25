@@ -83,6 +83,12 @@ Before importing Schwab data, bind the Plaid connection to the corresponding loc
 
 Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wise; the old importer is no longer compiled. The retained Plaid importer does not use Plaid's inferred personal finance categories; descriptions remain generic payments or receipts pending further detail. Switching existing Wise data requires cleanup before the first API import. Some details, including conversion fees, are unavailable through the API and remain marked as pending.
 
+### PayPal
+
+PayPal combines each account's linked Plaid connection with its configured mailbox. Daily imports run after Wise and Nexus. Confirmed card-funded purchases are ignored; receipts, transfers, refunds and separately reported fees are reconciled without duplicating the same transaction from both sources. Identified withdrawals can be linked to existing bank records.
+
+Imports retain source evidence and stop without changing financial records when history is incomplete, a match is ambiguous, or the detailed ledger disagrees with the reported balance. They do not infer missing funds or change the configured import starting point.
+
 ### FirstTrade
 
 Set `firsttrade_username`, `firsttrade_password` and `firsttrade_totp_secret` (the original Base32 authenticator key, not a six-digit code). The read-only integration references `MaxxRK/firstrade-api` and uses `mail_proxy` when configured. Sessions are stored in the database; raw financial responses are saved only with successful imports. Login failures and HTTP 403/429 are reported immediately without retries, cooldowns or saved request pauses. Only a data-request HTTP 401 triggers one automatic session renewal and request retry per import. These sensitive database contents are not DPAPI-encrypted. No session or response files are written, and old file-based sessions are not loaded.

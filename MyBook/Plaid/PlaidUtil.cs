@@ -43,6 +43,7 @@ namespace MyBook
             ? "plaid_production_secret"
             : "plaid_sandbox_secret";
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(20);
+        private static readonly HttpClient httpClient = CreateHttpClient();
 
         private readonly string clientId;
         private readonly string secret;
@@ -102,7 +103,7 @@ namespace MyBook
             return matches.SingleOrDefault();
         }
 
-        private sealed class PlaidRequestException(string message) : Exception(message);
+        internal sealed class PlaidRequestException(string message) : Exception(message);
 
         internal static Account GetLinkedAccount(PlaidItem item, string accountType)
         {
@@ -122,11 +123,10 @@ namespace MyBook
             body["client_id"] = clientId;
             body["secret"] = secret;
             body["access_token"] = item.accessToken;
-            using var client = CreateHttpClient();
             using var content = new StringContent(body.ToString(Formatting.None), Encoding.UTF8, "application/json");
             try
             {
-                using var response = await client.PostAsync(apiBaseUrl + path, content, cancellationToken).ConfigureAwait(false);
+                using var response = await httpClient.PostAsync(apiBaseUrl + path, content, cancellationToken).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                     throw new PlaidRequestException($"Plaid POST {path}: " + FormatPlaidError(response,
                         await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false)));
@@ -143,9 +143,15 @@ namespace MyBook
                 return json;
             }
             catch (JsonException) { throw new PlaidRequestException($"Plaid POST {path}: invalid JSON."); }
-            catch (HttpRequestException) { throw new PlaidRequestException($"Plaid POST {path}: network failure, no usable response."); }
+            catch (HttpRequestException e)
+            {
+                var cause = e.GetBaseException();
+                var detail = cause is System.Net.Sockets.SocketException socket
+                    ? socket.SocketErrorCode.ToString() : $"{cause.GetType().Name}/0x{cause.HResult:X8}";
+                throw new PlaidRequestException($"Plaid POST {path}: HTTP {e.StatusCode?.ToString() ?? "unavailable"}; category={e.HttpRequestError}; cause={detail}");
+            }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            { throw new TimeoutException($"Plaid POST {path}: request timeout."); }
+            { throw new PlaidRequestException($"Plaid POST {path}: HTTP unavailable; request timeout ({RequestTimeout.TotalSeconds:0}s)."); }
         }
 
         internal static JObject ParseResponse(string text)
@@ -273,7 +279,12 @@ namespace MyBook
 
         private static HttpClient CreateHttpClient()
         {
-            var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+            var client = new HttpClient(new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                UseCookies = false,
+                PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+            })
             {
                 Timeout = RequestTimeout
             };

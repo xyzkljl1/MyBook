@@ -167,6 +167,9 @@ namespace MyBook
                         "Nexus DP",
                         () => ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport),
                         graphQL.FetchNexusDpMonthlyReports).ConfigureAwait(false);
+                if (plaid is not null && database is not null)
+                    await RunImportTaskAsync("PayPal", () => true,
+                        () => new CombinedUtil(database, plaid, mail).FetchPayPalAsync()).ConfigureAwait(false);
                 if (kraken is not null)
                     await RunImportTaskAsync(
                         "Kraken",
