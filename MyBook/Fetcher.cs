@@ -172,8 +172,8 @@ namespace MyBook
                     await RunScheduledImportTaskAsync("Nexus DP", StatementImportProvider.NexusDpMonthlyReport,
                         (_, _) => graphQL.FetchNexusDpMonthlyReports(), intervalDays: 27, missingAfterDays: 40).ConfigureAwait(false);
                 if (plaid is not null && database is not null)
-                    await RunScheduledImportTaskAsync("PayPal", StatementImportProvider.PayPalMail,
-                        (since, _) => new CombinedUtil(database, plaid, mail).FetchPayPalAsync(since),
+                    await RunScheduledImportTaskAsync("PayPal", CombinedUtil.PayPalProviders,
+                        since => new CombinedUtil(database, plaid, mail).FetchPayPalAsync(since),
                         intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
                 if (kraken is not null)
                     await RunScheduledImportTaskAsync("Kraken", StatementImportProvider.KrakenApi,
@@ -282,17 +282,29 @@ namespace MyBook
 
         private Task RunScheduledImportTaskAsync(string name, StatementImportProvider provider,
             Func<DateTime, int, Task> fetch, int intervalDays, int missingAfterDays = 0, bool advanceOnEmptyQuery = false)
+            => RunScheduledImportTaskAsync(name, [provider], since => fetch(since[provider], missingAfterDays),
+                intervalDays, missingAfterDays, advanceOnEmptyQuery);
+
+        private Task RunScheduledImportTaskAsync(string name, IReadOnlyList<StatementImportProvider> providers,
+            Func<IReadOnlyDictionary<StatementImportProvider, DateTime>, Task> fetch,
+            int intervalDays, int missingAfterDays = 0, bool advanceOnEmptyQuery = false)
         {
             return RunImportTaskAsync(name, () =>
             {
                 var db = database ?? throw new InvalidOperationException("Scheduled import requires a database.");
+                var progress = new Dictionary<StatementImportProvider, DateTime>();
                 return ImportSchedule.RunAsync(name, intervalDays, missingAfterDays,
-                    () => advanceOnEmptyQuery
-                        ? db.GetLatestStatementImportTimeByKeyPrefix(provider, ImportSchedule.SuccessfulQueryKey)
+                    () =>
+                    {
+                        progress = providers.ToDictionary(provider => provider, provider => (advanceOnEmptyQuery
+                            ? db.GetLatestStatementImportTimeByKeyPrefix(provider, ImportSchedule.SuccessfulQueryKey)
                             ?? db.GetStatementImportCheckpointTime(provider)
-                        : db.GetLatestStatementImportTime(provider),
-                    since => fetch(since, missingAfterDays),
-                    !advanceOnEmptyQuery ? null : date => db.SaveStatementQueryProgress(provider, date));
+                            : db.GetLatestStatementImportTime(provider))?.Date
+                            ?? throw new InvalidOperationException($"Missing {provider} import checkpoint."));
+                        return progress.Values.Min();
+                    },
+                    _ => fetch(progress),
+                    !advanceOnEmptyQuery ? null : date => db.SaveStatementQueryProgress(providers, date));
             });
         }
 

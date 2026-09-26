@@ -81,7 +81,7 @@ CREATE TABLE `finance` (
 
 CREATE TABLE `statementimports` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalMail','Manual','IFastMail','ZAMail','FirstTradeApi','SchwabReportMail','PlaidSchwab','PlaidWise','WiseApi','AntMail','EleMail') NOT NULL DEFAULT 'Manual',
+  `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','SchwabReportMail','PlaidSchwab','PlaidWise','WiseApi','AntMail','EleMail','PayPalCN') NOT NULL DEFAULT 'Manual',
   `time` datetime(6) NOT NULL,
   `statementKey` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`Id`),

@@ -2,15 +2,14 @@ namespace MyBook;
 
 partial class DatabaseUtil
 {
-    internal void SavePayPalCombined(string? expectedPreviousKey, string key, string sourceDataJson,
-        CombinedUtil.PayPalPlan plan)
+    internal void SavePayPalCombined(IReadOnlyList<CombinedUtil.PayPalImport> imports, CombinedUtil.PayPalPlan plan)
     {
         ExecuteLockedTransaction(() =>
         {
-            var previous = GetLatestStatementImport(StatementImportProvider.PayPalMail);
-            if (previous?.statementKey == key) return;
-            if (previous?.statementKey != expectedPreviousKey)
-                throw new InvalidOperationException("PayPal import state changed during retrieval; retry required.");
+            if (imports.All(i => GetLatestStatementImport(i.Provider)?.statementKey == i.Key)) return;
+            foreach (var import in imports)
+                if (GetLatestStatementImport(import.Provider)?.statementKey != import.PreviousKey)
+                    throw new InvalidOperationException("PayPal import state changed during retrieval; retry required.");
             foreach (var expected in plan.ExpectedItemAccounts)
                 if (!db.Queryable<PlaidItem>().Any(i => i.Id == expected.Key && i._account_Id == expected.Value
                     && i.institutionId == PlaidUtil.PayPalInstitutionId))
@@ -28,18 +27,25 @@ partial class DatabaseUtil
                     throw new InvalidOperationException("PayPal balance changed during retrieval; retry required.");
             }
             foreach (var record in plan.Records)
-                if (db.Queryable<Record>().Any(r => r.Source == record.Source))
+                if (db.Queryable<Record>().Any(r => r.Source == record.Source || r.Source.StartsWith(record.Source + ";")))
                     throw new InvalidOperationException("PayPal record already exists without matching source state.");
-            var statementId = SaveStatementImportCore(StatementImportProvider.PayPalMail, DateTime.Today, key,
-                plan.Records, [], [], false, sourceDataJson: sourceDataJson,
-                afterSaveInTransaction: _ => AppendRecordSourceSupplements(plan.Supplements));
-            if (!statementId.HasValue) return;
+            var statementIds = new List<int>();
+            foreach (var import in imports.Where(i => i.Key != i.PreviousKey))
+            {
+                // The originating receipt owns all its records, including a Nexus or refund counterpart.
+                var records = plan.Records.Where(r => r.Source.StartsWith($"{CombinedUtil.PayPalPrefix}{import.AccountId}/", StringComparison.Ordinal)).ToList();
+                var statementId = SaveStatementImportCore(import.Provider, DateTime.Today, import.Key,
+                    records, [], [], false);
+                if (!statementId.HasValue) throw new InvalidOperationException("PayPal statement already exists; transaction rolled back.");
+                statementIds.Add(statementId.Value);
+            }
+            AppendRecordSourceSupplements(plan.Supplements);
             foreach (var pair in plan.Pairs)
                 {
-                    var left = db.Queryable<Record>().Single(r => r.Source == pair.LeftSource);
+                    var left = db.Queryable<Record>().Single(r => r.Source == pair.LeftSource || r.Source.StartsWith(pair.LeftSource + ";"));
                     var right = pair.BankRecordId.HasValue
                         ? db.Queryable<Record>().Single(r => r.Id == pair.BankRecordId.Value)
-                        : db.Queryable<Record>().Single(r => r.Source == pair.RightSource);
+                        : db.Queryable<Record>().Single(r => r.Source == pair.RightSource || r.Source.StartsWith(pair.RightSource + ";"));
                     if (left is null || right is null || left._account_Id == right._account_Id || left.t != right.t || left.v != -right.v
                         || !left.isInternal || !right.isInternal || left.backup is not null || right.backup is not null
                         || left.matchedRecordId.HasValue != right.matchedRecordId.HasValue
@@ -48,7 +54,7 @@ partial class DatabaseUtil
                         throw new InvalidOperationException("PayPal transfer pairing changed; transaction rolled back.");
                     MatchInternalTransferPair(left, right, "PayPalCombinedSourceEvidence");
                 }
-            ApplyAutomaticExpenseAllocationForStatements([statementId.Value]);
+            ApplyAutomaticExpenseAllocationForStatements(statementIds);
             ProcessAllocatedExpenseDirtyRecordsCore();
         });
     }

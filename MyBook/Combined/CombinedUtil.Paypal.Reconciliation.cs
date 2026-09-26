@@ -8,21 +8,28 @@ namespace MyBook;
 partial class CombinedUtil
 {
     // Readers provide evidence only. This method builds the entire batch before any financial write.
-    internal static PayPalPlan BuildPayPalPlan(PayPalState state, DatabaseUtil database, DateTime checkpoint)
+    internal static PayPalPlan BuildPayPalPlan(PayPalState state, DatabaseUtil database, IReadOnlyDictionary<int, DateTime> checkpoints,
+        Func<Account, List<Record>> readRecords)
     {
         var accounts = database.GetAllAccounts();
-        return ReconcilePayPal(state, checkpoint, accounts,
+        return ReconcilePayPal(state, checkpoints, accounts,
             text => database.FindAccountByInternalCardNoText(null, "PayPal counterparty", false, text) is { } account
                 ? database.GetPostingAccount(account) : null,
-            database.GetAccountRecords,
+            readRecords,
             (account, currency) => database.GetAccountBalance(account, currency).v,
             (known, party) => database.ResolveTransferCounterparty(known, [party], party));
     }
 
     private sealed record PayPalTransaction(int AccountId, string Id, decimal Delta, CurrencyType Currency,
-        DateTime Date, DateTimeOffset? Time, string Description);
+        DateTime Date, DateTimeOffset? Time, string Description, string Fingerprint);
 
-    internal static PayPalPlan ReconcilePayPal(PayPalState state, DateTime checkpoint, IReadOnlyList<Account> accounts,
+    private static PayPalTransaction ReadPayPalTransaction(PayPalItemState item, JObject row) => new(item.AccountId,
+        Required(row, "transaction_id"), -Cash(row, "amount"), ParseCurrency(Required(row, "iso_currency_code")),
+        row["date"]!.Value<DateTime>().Date,
+        row["datetime"]?.Type is JTokenType.Null or null ? null : (DateTimeOffset)row["datetime"]!,
+        (string?)row["original_description"] ?? (string?)row["name"] ?? "", TransactionFingerprint(row));
+
+    internal static PayPalPlan ReconcilePayPal(PayPalState state, IReadOnlyDictionary<int, DateTime> checkpoints, IReadOnlyList<Account> accounts,
         Func<string, Account?> resolveAccount, Func<Account, List<Record>> readRecords,
         Func<Account, CurrencyType, decimal> readBalance,
         Func<Account?, string, (bool IsInternal, Account? Account)>? resolveCounterparty = null)
@@ -30,14 +37,18 @@ partial class CombinedUtil
         var plan = new PayPalPlan();
         foreach (var item in state.Items) plan.ExpectedItemAccounts.Add(item.ItemRowId, item.AccountId);
         var linked = state.Items.Select(i => i.AccountId).ToHashSet();
+        List<Record> ReceiptRecords(PayPalNotice notice) => readRecords(accounts.Single(a => a.Id == notice.Mail.AccountId))
+            .Where(r => r.Source.StartsWith(PayPalPrefix + notice.Key + "/", StringComparison.Ordinal)).ToList();
         var notices = new Dictionary<string, PayPalNotice>(StringComparer.Ordinal);
-        foreach (var mail in state.Mails.Where(m => m.Date.LocalDateTime.Date > checkpoint.Date))
+        foreach (var mail in state.Mails.Where(m => m.Date.LocalDateTime.Date > checkpoints[m.AccountId].Date))
         {
             try
             {
                 if (!linked.Contains(mail.AccountId)) throw PayPalError("mail has no bound Item");
                 var notice = ParsePayPalNotice(mail);
                 if (notice is null) continue;
+                var date = mail.Date.LocalDateTime.Date;
+                if (date > plan.ReportDates.GetValueOrDefault(mail.AccountId)) plan.ReportDates[mail.AccountId] = date;
                 if (notices.TryGetValue(notice.Key, out var old) && NoticeFingerprint(old) != NoticeFingerprint(notice))
                     throw PayPalError("conflicting copies of a receipt");
                 // Prefer the earliest delivery; duplicate copies do not change posting dates.
@@ -45,14 +56,17 @@ partial class CombinedUtil
             }
             catch (MailParseException e) { plan.Problems.Add(e.Message + "; message=" + PayPalHash(mail.MessageId)[..12]); }
         }
-        var transactions = state.Items.SelectMany(item => item.Transactions.Where(t => !t["pending"]!.Value<bool>())
-            .Select(t => new PayPalTransaction(item.AccountId, Required(t, "transaction_id"), -Cash(t, "amount"),
-                ParseCurrency(Required(t, "iso_currency_code")), t["date"]!.Value<DateTime>().Date,
-                t["datetime"]?.Type is JTokenType.Null or null ? null : (DateTimeOffset)t["datetime"]!,
-                (string?)t["original_description"] ?? (string?)t["name"] ?? "")))
-            .Where(t => t.Date > checkpoint.Date).ToList();
+        var transactions = state.Items.SelectMany(item => item.Transactions.Select(t => ReadPayPalTransaction(item, t)))
+            .Where(t => t.Date > checkpoints[t.AccountId].Date).ToList();
         if (transactions.Select(t => t.Id).Distinct(StringComparer.Ordinal).Count() != transactions.Count)
             throw PayPalError("duplicate transaction identifiers across Items");
+        // Overlapping mail queries may return receipts already represented by Records. Do not rebuild them.
+        foreach (var notice in notices.Values.ToList())
+        {
+            var saved = ReceiptRecords(notice);
+            if (saved.Count != 0 && (saved.Any(r => r.Source.Contains(";plaid=", StringComparison.Ordinal))
+                || !transactions.Any(t => Matches(notice, t)))) notices.Remove(notice.Key);
+        }
         var candidates = notices.Values.ToDictionary(n => n.Key,
             n => transactions.Where(t => Matches(n, t)).ToList(), StringComparer.Ordinal);
         foreach (var n in notices.Values)
@@ -64,10 +78,21 @@ partial class CombinedUtil
             if (timed.Count == 1) candidates[n.Key] = timed;
         }
         var used = new HashSet<string>(StringComparer.Ordinal);
-        var recordsByAccount = new Dictionary<int, List<Record>>();
-        List<Record> Existing(Account a) => recordsByAccount.TryGetValue(a.Id, out var rows) ? rows
-            : recordsByAccount[a.Id] = readRecords(a);
         var reservedBankRecords = new HashSet<int>();
+        void PairBank(Record transfer, Record bankRecord)
+        {
+            if (!reservedBankRecords.Add(bankRecord.Id)) throw PayPalError("bank record claimed by multiple transfers");
+            if (bankRecord.backup is not null || transfer.backup is not null) throw PayPalError("transfer counterpart was manually edited");
+            if (bankRecord.matchedRecordId.HasValue && bankRecord.matchedRecordId != transfer.Id)
+                throw PayPalError("bank record already paired to another transfer");
+            var source = transfer.Source.Split(';')[0];
+            var code = PayPalHash(source)[..24];
+            if (transfer.Id != 0) plan.ExpectedBankRecords[transfer.Id] = PayPalBankRecordFingerprint(transfer);
+            plan.ExpectedBankRecords[bankRecord.Id] = PayPalBankRecordFingerprint(bankRecord);
+            plan.Supplements.Add(new(bankRecord.Id, code, "PayPal combined transfer; code=" + code,
+                new(DestAccount: accounts.Single(a => a.Id == transfer._account_Id).name, Reason: "转账", IsInternal: true)));
+            plan.Pairs.Add(new(source, BankRecordId: bankRecord.Id));
+        }
 
         foreach (var notice in notices.Values.OrderBy(n => n.Mail.Date).ThenBy(n => n.Key, StringComparer.Ordinal))
         {
@@ -78,6 +103,22 @@ partial class CombinedUtil
                     throw PayPalError("ambiguous mail/Plaid match");
                 var tx = matches.SingleOrDefault();
                 var account = accounts.Single(a => a.Id == notice.Mail.AccountId);
+                var saved = ReceiptRecords(notice);
+                if (saved.Count != 0)
+                {
+                    // A receipt outside the first sync's history may acquire its Plaid ID later.
+                    if (tx is not null)
+                    {
+                        if (!used.Add(tx.Id)) throw PayPalError("transaction already claimed");
+                        foreach (var record in saved)
+                        {
+                            plan.ExpectedBankRecords[record.Id] = PayPalBankRecordFingerprint(record);
+                            plan.Supplements.Add(new(record.Id, "PayPalPlaid-" + PayPalHash(tx.Id),
+                                PayPalTransactionEvidence(tx) + "code=PayPalPlaid-" + PayPalHash(tx.Id)));
+                        }
+                    }
+                    continue;
+                }
                 var currency = notice.Gross.Currency;
                 var amount = notice.Gross.Value;
                 if (amount <= 0 || notice.Fee < 0 || notice.Net < 0) throw PayPalError("invalid receipt amounts");
@@ -87,17 +128,19 @@ partial class CombinedUtil
                     throw PayPalError("unsupported transfer fee layout");
                 var earliest = transactions.Where(t => t.AccountId == account.Id).Select(t => (DateTime?)t.Date).Min();
                 if (tx is null && notice.Kind != PayPalKind.CardPurchase
-                    && (notice.Kind != PayPalKind.Receive || !earliest.HasValue || notice.Mail.Date.LocalDateTime.Date >= earliest.Value.AddDays(-2)))
+                    && (notice.Kind != PayPalKind.Receive || !state.Items.Single(i => i.AccountId == account.Id).IsInitial
+                        || !earliest.HasValue || notice.Mail.Date.LocalDateTime.Date >= earliest.Value.AddDays(-2)))
                     throw PayPalError("receipt awaits a posted Plaid transaction");
 
                 var eventRecords = new List<Record>();
-                Record Add(Account owner, decimal value, string role, string reason, Account? other = null, string? party = null)
+                Record Add(Account owner, decimal value, string role, string reason, Account? other = null, string? party = null,
+                    PayPalTransaction? evidence = null)
                 {
                     if (!owner.relativeBalance) throw PayPalError("counterpart requires its own statement import");
                     var record = new Record { Account = owner, _account_Id = owner.Id, v = value, t = currency,
                         date = tx?.Time?.LocalDateTime ?? notice.Mail.Date.LocalDateTime,
                         postingDate = tx?.Date ?? notice.Mail.Date.LocalDateTime.Date,
-                        Source = PayPalPrefix + notice.Key + "/" + role, Reason = reason,
+                        Source = PayPalPrefix + notice.Key + "/" + role + ((evidence ?? tx) is { } proof ? PayPalTransactionEvidence(proof) : ""), Reason = reason,
                         DestAccount = other?.name ?? party ?? notice.Party, isInternal = other is not null };
                     eventRecords.Add(record);
                     return record;
@@ -110,23 +153,11 @@ partial class CombinedUtil
                     if (linked.Contains(card.Id)) throw PayPalError("funding card resolves to a PayPal account");
                     return card;
                 }
-                void PairBank(Record transfer, Record bankRecord)
-                {
-                    if (!reservedBankRecords.Add(bankRecord.Id)) throw PayPalError("bank record claimed by multiple transfers");
-                    if (bankRecord.backup is not null) throw PayPalError("bank counterpart was manually edited");
-                    if (bankRecord.matchedRecordId.HasValue && !Existing(account).Any(r => r.Id == bankRecord.matchedRecordId
-                        && r.Source == transfer.Source)) throw PayPalError("bank record already paired to another transfer");
-                    var code = PayPalHash(transfer.Source)[..24];
-                    plan.ExpectedBankRecords[bankRecord.Id] = PayPalBankRecordFingerprint(bankRecord);
-                    plan.Supplements.Add(new(bankRecord.Id, code, "PayPal combined transfer; code=" + code,
-                        new(DestAccount: account.name, Reason: "转账", IsInternal: true)));
-                    plan.Pairs.Add(new(transfer.Source, BankRecordId: bankRecord.Id));
-                }
                 void CardLeg(decimal value, string role)
                 {
                     var card = CardAccount();
                     var transfer = Add(account, value, role, "转账", card);
-                    var bankMatches = Existing(card).Where(r => r.v == -value && r.t == currency
+                    var bankMatches = readRecords(card).Where(r => r.v == -value && r.t == currency
                         && Math.Abs((r.date - notice.Mail.Date.LocalDateTime).TotalDays) <= 7
                         && (r.DestAccount.Contains("PAYPAL", StringComparison.OrdinalIgnoreCase)
                             || r.Source.Contains("PAYPAL", StringComparison.OrdinalIgnoreCase))).ToList();
@@ -161,12 +192,12 @@ partial class CombinedUtil
                             // Only the explicit Donation Points payout receipt supports a Nexus debit.
                             if (!notice.Nexus || !origin.name.StartsWith("NEXUS", StringComparison.OrdinalIgnoreCase))
                                 throw PayPalError("own-account receipt needs source-side evidence");
-                            if (Existing(origin).Any(r => r.v == -amount && r.t == currency
+                            if (readRecords(origin).Any(r => r.v == -amount && r.t == currency
                                 && Math.Abs((r.date - notice.Mail.Date.LocalDateTime).TotalDays) <= 2
                                 && r.DestAccount == account.name && r.Source != PayPalPrefix + notice.Key + "/payout"))
                                 throw PayPalError("payout already has another source record");
                             var payout = Add(origin, -amount, "payout", "转账", account);
-                            plan.Pairs.Add(new(PayPalPrefix + notice.Key + "/principal", payout.Source));
+                            plan.Pairs.Add(new(principal.Source.Split(';')[0], payout.Source.Split(';')[0]));
                         }
                         break;
                     }
@@ -175,11 +206,27 @@ partial class CombinedUtil
                         var receives = notices.Values.Where(n => n.Kind == PayPalKind.Receive && n.Mail.AccountId != account.Id
                             && n.Gross == notice.Gross && Math.Abs((n.Mail.Date - notice.Mail.Date).TotalDays) <= 2
                             && PartyMatches(notice.Party, Greeting(n.Mail.Text)) && PartyMatches(n.Party, Greeting(notice.Mail.Text))).ToList();
-                        if (receives.Count != 1) throw PayPalError("sent payment requires a unique recipient receipt");
-                        var target = accounts.Single(a => a.Id == receives[0].Mail.AccountId);
+                        var savedReceives = receives.Count == 0 ? accounts.Where(a => linked.Contains(a.Id) && a.Id != account.Id)
+                            .SelectMany(a => readRecords(a)).Where(r => r.v == amount && r.t == currency && r.matchedRecordId is null
+                                && Math.Abs((r.date - notice.Mail.Date.LocalDateTime).TotalDays) <= 2
+                                && r.Source.StartsWith($"{PayPalPrefix}{r._account_Id}/Receive/", StringComparison.Ordinal)
+                                && r.Source.Split(';')[0].EndsWith("/principal", StringComparison.Ordinal)
+                                && (r.DestAccount == account.name || PartyMatches(r.DestAccount, Greeting(notice.Mail.Text))))
+                            .ToList() : [];
+                        if (receives.Count + savedReceives.Count != 1) throw PayPalError("sent payment requires a unique recipient receipt or Record");
+                        var target = accounts.Single(a => a.Id == (receives.Count == 1 ? receives[0].Mail.AccountId : savedReceives[0]._account_Id));
                         if (notice.Card != "") CardLeg(amount, "card-funding");
                         var outgoing = Add(account, -amount, "principal", "转账", target);
-                        plan.Pairs.Add(new(outgoing.Source, PayPalPrefix + receives[0].Key + "/principal"));
+                        if (savedReceives.Count == 1)
+                        {
+                            var receipt = savedReceives[0];
+                            var code = PayPalHash(outgoing.Source)[..24];
+                            plan.ExpectedBankRecords[receipt.Id] = PayPalBankRecordFingerprint(receipt);
+                            plan.Supplements.Add(new(receipt.Id, code, "PayPal transfer; code=" + code,
+                                new(DestAccount: account.name, Reason: "转账", IsInternal: true)));
+                        }
+                        plan.Pairs.Add(new(outgoing.Source.Split(';')[0], receives.Count == 1
+                            ? PayPalPrefix + receives[0].Key + "/principal" : savedReceives[0].Source.Split(';')[0]));
                         break;
                     }
                     case PayPalKind.Refund:
@@ -190,14 +237,19 @@ partial class CombinedUtil
                             && (PartyMatches(Greeting(notice.Mail.Text), t.Description) || PartyMatches(t.Description[10..], Greeting(notice.Mail.Text))
                                 || notices.Values.Any(n => n.Kind == PayPalKind.Send && n.Mail.AccountId == account.Id
                                     && PartyMatches(Greeting(n.Mail.Text), t.Description[10..])))
-                            && notices.Values.Any(n => n.Mail.AccountId == t.AccountId && n.Kind == PayPalKind.Receive
-                                && PartyMatches(notice.Party, Greeting(n.Mail.Text)))).ToList();
+                            && (notices.Values.Any(n => n.Mail.AccountId == t.AccountId && n.Kind == PayPalKind.Receive
+                                && PartyMatches(notice.Party, Greeting(n.Mail.Text)))
+                                || resolveAccount(notice.Party)?.Id == t.AccountId
+                                    && readRecords(account).Any(r => r.isInternal && r.v == -amount && r.t == currency
+                                        && r.date <= notice.Mail.Date.LocalDateTime
+                                        && r.DestAccount == accounts.Single(a => a.Id == t.AccountId).name
+                                        && r.Source.StartsWith(PayPalPrefix, StringComparison.Ordinal)))).ToList();
                         if (reverse.Count > 1) throw PayPalError("ambiguous refund sender");
                         var origin = reverse.Count == 1 ? accounts.Single(a => a.Id == reverse[0].AccountId) : null;
                         if (origin is not null)
                         {
                             if (!used.Add(reverse[0].Id)) throw PayPalError("refund transaction already claimed");
-                            Add(origin, -amount, "refund-out", "转账", account);
+                            Add(origin, -amount, "refund-out", "转账", account, evidence: reverse[0]);
                             plan.Pairs.Add(new(PayPalPrefix + notice.Key + "/refund-out", PayPalPrefix + notice.Key + "/refund-in"));
                         }
                         else if (resolveAccount(notice.Party) is not null)
@@ -217,7 +269,7 @@ partial class CombinedUtil
                     {
                         var target = notice.BankIdentifier == "" ? null : resolveAccount(notice.BankIdentifier);
                         var bankMatches = accounts.Where(a => !linked.Contains(a.Id) && a._primaryAccount_Id is null
-                            && (target is null || a.Id == target.Id)).SelectMany(a => Existing(a).Where(r => r.v == amount && r.t == currency
+                            && (target is null || a.Id == target.Id)).SelectMany(a => readRecords(a).Where(r => r.v == amount && r.t == currency
                                 && Math.Abs((r.date - notice.Mail.Date.LocalDateTime).TotalDays) <= 7
                                 && (r.DestAccount.Contains("PAYPAL", StringComparison.OrdinalIgnoreCase)
                                     || r.Source.Contains("PAYPAL", StringComparison.OrdinalIgnoreCase)))
@@ -234,14 +286,7 @@ partial class CombinedUtil
                     }
                 }
                 if (tx is not null && !used.Add(tx.Id)) throw PayPalError("transaction already claimed");
-                var fingerprint = PayPalHash(NoticeFingerprint(notice) + JsonConvert.SerializeObject(eventRecords.Select(r =>
-                    new { r._account_Id, r.v, r.t, r.date, r.postingDate, r.DestAccount, r.Reason, r.isInternal, r.Source })));
-                if (state.Applied.TryGetValue(notice.Key, out var prior))
-                {
-                    if (prior != fingerprint) throw PayPalError("previously applied receipt changed; explicit reconciliation required");
-                }
-                else plan.Records.AddRange(eventRecords);
-                plan.Applied[notice.Key] = fingerprint;
+                plan.Records.AddRange(eventRecords);
             }
             catch (Exception e) when (e is MailParseException or InvalidOperationException)
             {
@@ -251,11 +296,24 @@ partial class CombinedUtil
         }
         foreach (var tx in transactions.Where(t => !used.Contains(t.Id)))
             plan.Problems.Add("unmatched posted transaction=" + PayPalHash(tx.Id)[..12]);
-        foreach (var key in state.Applied.Keys.Where(key => !plan.Applied.ContainsKey(key)))
-            plan.Problems.Add("previously applied receipt missing=" + PayPalHash(key)[..12]);
-        foreach (var prior in state.BankMatches)
-            if (!plan.Pairs.Any(p => p.LeftSource == prior.Key && p.BankRecordId == prior.Value))
-                plan.Problems.Add("previous bank counterpart missing or changed=" + PayPalHash(prior.Key)[..12]);
+        // A bank may import its side later. Match the existing transfer Record, without reading its old receipt.
+        foreach (var transfer in accounts.Where(a => linked.Contains(a.Id)).SelectMany(readRecords)
+            .Where(r => r.isInternal && r.matchedRecordId is null && r.Source.StartsWith(PayPalPrefix, StringComparison.Ordinal)
+                && r.Source.Split(';')[0].Split('/')[^1] is "withdrawal" or "card-funding" or "refund-card"))
+        {
+            var target = accounts.SingleOrDefault(a => a.name == transfer.DestAccount && !linked.Contains(a.Id));
+            if (target is null) continue;
+            var matches = readRecords(target).Where(r => r.v == -transfer.v && r.t == transfer.t
+                && Math.Abs((r.date - transfer.date).TotalDays) <= 7
+                && (r.DestAccount.Contains("PAYPAL", StringComparison.OrdinalIgnoreCase)
+                    || r.Source.Contains("PAYPAL", StringComparison.OrdinalIgnoreCase))).ToList();
+            if (matches.Count > 1) plan.Problems.Add("ambiguous bank counterpart for existing PayPal transfer");
+            else if (matches.Count == 1)
+            {
+                try { PairBank(transfer, matches[0]); }
+                catch (MailParseException e) { plan.Problems.Add(e.Message); }
+            }
+        }
         // API balance is a validation only, never a balancing Record or an opening balance.
         foreach (var item in state.Items)
         {

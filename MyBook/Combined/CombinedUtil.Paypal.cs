@@ -11,8 +11,6 @@ partial class CombinedUtil
 {
     internal const string PayPalPrefix = "PayPalCombined/";
     private static readonly SemaphoreSlim payPalLock = new(1, 1);
-    internal static readonly JsonSerializerSettings PayPalJsonSettings = new()
-        { DateParseHandling = DateParseHandling.None, FloatParseHandling = FloatParseHandling.Decimal };
     private const string MoneyPattern = @"\$?\s*(?<value>\d[\d,]*\.\d{2})\s*(?<currency>USD|SGD|HKD|GBP|EUR|JPY|CNY|RMB)\b";
     private const string CardPattern = @"(?:VISA|Master\s*Card|American Express|AMEX|Discover|UnionPay|银联)\s*(?:信用卡|借记卡|Credit|Debit)?\s*(?:x\s*[-*]|[-*•·])+\s*(?<tail>\d{4})";
     internal static string PayPalHash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
@@ -36,30 +34,44 @@ partial class CombinedUtil
         PayPalAmount Gross, decimal Fee, decimal Net, string Party, string Card, PayPalAmount? CardAmount,
         string BankIdentifier, bool Nexus, bool ForeignExchange);
     internal sealed record PayPalItemState(int ItemRowId, int AccountId, string RemoteAccountId,
-        CurrencyType Currency, decimal Balance, string Cursor, List<JObject> Transactions);
+        CurrencyType Currency, decimal Balance, string Cursor, List<JObject> Transactions, bool IsInitial = false);
     internal sealed class PayPalState
     {
-        public int Version { get; set; } = 1;
         public List<PayPalItemState> Items { get; set; } = [];
         public List<PayPalMail> Mails { get; set; } = [];
-        public Dictionary<string, string> Applied { get; set; } = new(StringComparer.Ordinal);
-        public Dictionary<string, int> BankMatches { get; set; } = new(StringComparer.Ordinal);
-        public List<string> Problems { get; set; } = [];
     }
     internal sealed class PayPalPlan
     {
         public List<Record> Records { get; } = [];
         public List<RecordSourceSupplement> Supplements { get; } = [];
         public List<string> Problems { get; } = [];
-        public Dictionary<string, string> Applied { get; } = new(StringComparer.Ordinal);
         public Dictionary<int, string> ExpectedBankRecords { get; } = [];
         public Dictionary<(int AccountId, CurrencyType Currency), decimal> ExpectedBalances { get; } = [];
         public Dictionary<int, int> ExpectedItemAccounts { get; } = [];
+        public Dictionary<int, DateTime> ReportDates { get; } = [];
         public List<PayPalPair> Pairs { get; } = [];
         public int IgnoredCards { get; set; }
         public int MatchedTransactions { get; set; }
     }
     internal sealed record PayPalPair(string LeftSource, string? RightSource = null, int? BankRecordId = null);
+    internal sealed record PayPalImport(StatementImportProvider Provider, int AccountId, string? PreviousKey, string Key);
+    internal static readonly StatementImportProvider[] PayPalProviders = [StatementImportProvider.PayPalCN, StatementImportProvider.PayPalUS];
+
+    internal static StatementImportProvider GetPayPalProvider(Account account) => account.name switch
+    {
+        "PAYPAL_CN" => StatementImportProvider.PayPalCN,
+        "PAYPAL_US" => StatementImportProvider.PayPalUS,
+        _ => throw PayPalError("unsupported PayPal account name")
+    };
+
+    internal static string ReadPayPalCursor(string key) => Uri.UnescapeDataString(key.Split('/')[2]);
+
+    internal static string BuildPayPalKey(DateTime reportDate, string cursor, string fingerprint)
+    {
+        var key = $"PayPal/{reportDate:yyyy-MM-dd}/{Uri.EscapeDataString(cursor)}/{fingerprint}";
+        if (key.Length > 255) throw PayPalError("statement key exceeds 255 characters");
+        return key;
+    }
 
     internal static PayPalNotice? ParsePayPalNotice(PayPalMail source)
     {
@@ -160,7 +172,8 @@ partial class CombinedUtil
         return new(value, Enum.Parse<CurrencyType>(currency == "CNY" ? "RMB" : currency));
     }
 
-    public async Task FetchPayPalAsync(DateTime since, CancellationToken cancellationToken = default)
+    public async Task FetchPayPalAsync(IReadOnlyDictionary<StatementImportProvider, DateTime> since,
+        CancellationToken cancellationToken = default)
     {
         if (!await payPalLock.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -176,52 +189,63 @@ partial class CombinedUtil
             if (accounts.Any(a => String.IsNullOrWhiteSpace(a.email))
                 || accounts.Select(a => a.email!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() != accounts.Count)
                 throw PayPalError("each bound PayPal account requires its own configured mailbox");
-            var checkpoint = database.GetStatementImportCheckpointTime(StatementImportProvider.PayPalMail)
-                ?? throw PayPalError("fixed import checkpoint is missing");
-            var previousImport = database.GetLatestStatementImport(StatementImportProvider.PayPalMail);
-            var previousJson = previousImport is null ? null : database.GetStatementSource(previousImport.Id);
-            var previous = previousImport is null ? new PayPalState() : JsonConvert.DeserializeObject<PayPalState>(previousJson
-                ?? throw PayPalError("previous source state is missing"), PayPalJsonSettings) ?? throw PayPalError("invalid source state");
-            if (previous.Version != 1) throw PayPalError("unsupported source state version");
-            if (previous.Items.Any(old => !items.Any(i => i.Id == old.ItemRowId && i._account_Id == old.AccountId)))
-                throw PayPalError("Item/account binding changed; explicit reconciliation required");
-            var state = new PayPalState { Applied = new(previous.Applied, StringComparer.Ordinal), BankMatches = new(previous.BankMatches, StringComparer.Ordinal) };
+            var checkpoints = accounts.ToDictionary(a => a.Id, a => database.GetStatementImportCheckpointTime(GetPayPalProvider(a))
+                ?? throw PayPalError("fixed import checkpoint is missing"));
+            var imports = new List<PayPalImport>();
+            var state = new PayPalState();
+            var previousImports = new Dictionary<int, StatementImport?>();
+            var recordsByAccount = new Dictionary<int, List<Record>>();
+            List<Record> ReadRecords(Account account) => recordsByAccount.TryGetValue(account.Id, out var records) ? records
+                : recordsByAccount[account.Id] = database.GetAccountRecords(account);
             foreach (var item in items)
             {
-                var old = previous.Items.SingleOrDefault(i => i.ItemRowId == item.Id);
-                var data = await plaid.ReadPayPalAsync(item, old?.Cursor, timeout.Token).ConfigureAwait(false);
-                state.Items.Add(MergePayPalSync(item.Id, item._account_Id!.Value, old, data));
+                var account = accounts.Single(a => a.Id == item._account_Id);
+                var provider = GetPayPalProvider(account);
+                var previousImport = database.GetLatestStatementImport(provider);
+                previousImports.Add(account.Id, previousImport);
+                var cursor = previousImport is null ? null : ReadPayPalCursor(previousImport.statementKey);
+                var data = await plaid.ReadPayPalAsync(item, cursor, timeout.Token).ConfigureAwait(false);
+                var current = ReadPayPalSync(item.Id, account.Id, ReadRecords(account), data,
+                    isInitial: previousImport is null);
+                var messages = await mail.ReadPayPalMailsAsync(account, since[provider], timeout.Token).ConfigureAwait(false);
+                state.Items.Add(current);
+                state.Mails.AddRange(messages.DistinctBy(m => m.MessageId));
             }
-            var messages = await mail.ReadPayPalMailsAsync(accounts, since, timeout.Token).ConfigureAwait(false);
-            state.Mails = previous.Mails.Concat(messages).GroupBy(m => (m.AccountId, m.MessageId))
-                .Select(g => g.Last()).OrderBy(m => m.AccountId).ThenBy(m => m.Date).ThenBy(m => m.MessageId, StringComparer.Ordinal).ToList();
-            var plan = BuildPayPalPlan(state, database, checkpoint);
+            var plan = BuildPayPalPlan(state, database, checkpoints, ReadRecords);
             if (plan.Problems.Count != 0)
                 throw PayPalError($"source reconciliation failed ({plan.Problems.Count}); nothing saved; " + String.Join("; ", plan.Problems.Take(8)));
-            state.Applied = plan.Applied;
-            state.BankMatches = plan.Pairs.Where(p => p.BankRecordId.HasValue)
-                .ToDictionary(p => p.LeftSource, p => p.BankRecordId!.Value, StringComparer.Ordinal);
-            var json = JsonConvert.SerializeObject(state);
-            var key = previousJson == json ? previousImport!.statementKey
-                : PayPalPrefix + PayPalHash((previousImport?.statementKey ?? "") + json);
+            foreach (var current in state.Items)
+            {
+                var previous = previousImports[current.AccountId];
+                var previousDate = previous is null ? checkpoints[current.AccountId]
+                    : DateTime.ParseExact(previous.statementKey.Split('/')[1], "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                var messages = state.Mails.Where(m => m.AccountId == current.AccountId).ToList();
+                var reportDate = plan.ReportDates.GetValueOrDefault(current.AccountId, previousDate);
+                if (reportDate < previousDate) reportDate = previousDate;
+                var unchanged = previous is not null && ReadPayPalCursor(previous.statementKey) == current.Cursor
+                    && reportDate == previousDate && plan.Records.Count == 0 && plan.Pairs.Count == 0 && plan.Supplements.Count == 0;
+                var key = unchanged ? previous!.statementKey : BuildPayPalKey(reportDate, current.Cursor,
+                    PayPalHash((previous?.statementKey ?? "") + String.Join("\n", messages.Select(m => m.MessageId).Order(StringComparer.Ordinal))));
+                imports.Add(new(GetPayPalProvider(accounts.Single(a => a.Id == current.AccountId)), current.AccountId,
+                    previous?.statementKey, key));
+            }
             timeout.Token.ThrowIfCancellationRequested();
-            database.SavePayPalCombined(previousImport?.statementKey, key, json, plan);
+            database.SavePayPalCombined(imports, plan);
         }
         catch (Exception e) when (e is not MailParseException and not PlaidUtil.PlaidRequestException)
         { throw PayPalError($"import failed: {e.GetType().Name}"); }
         finally { payPalLock.Release(); }
     }
 
-    internal static PayPalItemState MergePayPalSync(int itemRowId, int accountId, PayPalItemState? old, PlaidUtil.TransactionSyncData data)
+    internal static PayPalItemState ReadPayPalSync(int itemRowId, int accountId, IReadOnlyList<Record> records,
+        PlaidUtil.TransactionSyncData data, bool isInitial = false)
     {
         var accounts = (JArray?)data.Accounts["accounts"] ?? throw PayPalError("missing account snapshot");
         if (accounts.Count != 1) throw PayPalError("expected one remote PayPal account");
         var remote = accounts[0];
         var remoteId = Required(remote, "account_id");
         var currency = ParseCurrency(Required(remote["balances"]!, "iso_currency_code"));
-        if (old is not null && (old.AccountId != accountId || old.RemoteAccountId != remoteId || old.Currency != currency))
-            throw PayPalError("remote account identity changed");
-        var rows = (old?.Transactions ?? []).ToDictionary(t => Required(t, "transaction_id"), StringComparer.Ordinal);
+        var rows = new Dictionary<string, JObject>(StringComparer.Ordinal);
         foreach (var page in data.Pages)
         {
             foreach (var field in new[] { "added", "modified" })
@@ -231,23 +255,30 @@ partial class CombinedUtil
                     if (Required(tx, "account_id") != remoteId || ParseCurrency(Required(tx, "iso_currency_code")) != currency
                         || tx["pending"]?.Type != JTokenType.Boolean) throw PayPalError("transaction account/currency/status mismatch");
                     Cash(tx, "amount");
-                    if (rows.TryGetValue(id, out var existing) && existing["pending"]!.Value<bool>() == false
-                        && TransactionFingerprint(existing) != TransactionFingerprint(tx))
-                        throw PayPalError("posted transaction changed; transaction=" + PayPalHash(id)[..12]);
+                    var saved = records.Where(r => r.Source.Contains(PayPalTransactionMarker(id), StringComparison.Ordinal)).ToList();
+                    if (saved.Count != 0)
+                    {
+                        if (saved.Any(r => !r.Source.Contains(";plaid-hash=" + TransactionFingerprint(tx) + ";", StringComparison.Ordinal)))
+                            throw PayPalError("posted transaction changed; transaction=" + PayPalHash(id)[..12]);
+                        continue;
+                    }
                     rows[id] = tx;
                 }
             foreach (var removed in ((JArray?)page["removed"] ?? throw PayPalError("missing removals")))
             {
                 var id = Required(removed, "transaction_id");
-                if (rows.TryGetValue(id, out var existing) && !existing["pending"]!.Value<bool>())
+                if (records.Any(r => r.Source.Contains(PayPalTransactionMarker(id), StringComparison.Ordinal)))
                     throw PayPalError("posted transaction removed; transaction=" + PayPalHash(id)[..12]);
                 rows.Remove(id);
             }
         }
         if (data.Pages.Count == 0) throw PayPalError("empty sync pages");
         return new(itemRowId, accountId, remoteId, currency, Cash(remote["balances"]!, "current"),
-            Required(data.Pages[^1], "next_cursor"), rows.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value).ToList());
+            Required(data.Pages[^1], "next_cursor"), rows.OrderBy(p => p.Key, StringComparer.Ordinal)
+                .Select(p => p.Value).Where(t => !t["pending"]!.Value<bool>()).ToList(), isInitial);
     }
+    private static string PayPalTransactionMarker(string id) => ";plaid=" + Uri.EscapeDataString(id) + ";";
+    private static string PayPalTransactionEvidence(PayPalTransaction tx) => PayPalTransactionMarker(tx.Id) + "plaid-hash=" + tx.Fingerprint + ";";
     private static string Required(JToken row, string name) => row[name]?.Type == JTokenType.String && !String.IsNullOrWhiteSpace((string?)row[name])
         ? (string)row[name]! : throw PayPalError("missing source field " + name);
     private static decimal Cash(JToken row, string name)

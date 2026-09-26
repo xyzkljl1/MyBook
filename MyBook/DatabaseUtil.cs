@@ -689,17 +689,23 @@ namespace MyBook
         }
 
         public void SaveStatementQueryProgress(StatementImportProvider provider, DateTime time)
+            => SaveStatementQueryProgress([provider], time);
+
+        public void SaveStatementQueryProgress(IEnumerable<StatementImportProvider> providers, DateTime time)
         {
             ExecuteLockedTransaction(() =>
             {
-                var progress = db.Queryable<StatementImport>()
-                    .Single(import => import.provider == provider && import.statementKey == ImportSchedule.SuccessfulQueryKey);
-                if (progress is null)
-                    InsertStatementImport(provider, time, ImportSchedule.SuccessfulQueryKey);
-                else
+                foreach (var provider in providers)
                 {
-                    progress.time = NormalizeStatementImportTime(time);
-                    db.Updateable(progress).UpdateColumns(import => import.time).ExecuteCommand();
+                    var progress = db.Queryable<StatementImport>()
+                        .Single(import => import.provider == provider && import.statementKey == ImportSchedule.SuccessfulQueryKey);
+                    if (progress is null)
+                        InsertStatementImport(provider, time, ImportSchedule.SuccessfulQueryKey);
+                    else
+                    {
+                        progress.time = NormalizeStatementImportTime(time);
+                        db.Updateable(progress).UpdateColumns(import => import.time).ExecuteCommand();
+                    }
                 }
             });
         }
