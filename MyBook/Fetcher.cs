@@ -150,6 +150,8 @@ namespace MyBook
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
                     await RunImportTaskAsync("ZA", () => true, mail.FetchZAMessages).ConfigureAwait(false);
+                    await RunImportTaskAsync("Ant", () => true, mail.FetchAntMessages).ConfigureAwait(false);
+                    await RunImportTaskAsync("Ele", () => true, mail.FetchEleMessages).ConfigureAwait(false);
                 }).ConfigureAwait(false);
                 if (web is not null && web.IsFirstTradeConfigured)
                     await RunImportTaskAsync("FirstTrade", ShouldFetchFirstTrade,
