@@ -39,7 +39,7 @@ namespace MyBook
                 stage = "login";
                 await client.LoginAsync(timeout.Token).ConfigureAwait(false);
                 stage = "read account data";
-                var capture = await client.FetchAsync(null, timeout.Token, account =>
+                var capture = await client.FetchAsync(timeout.Token, account =>
                 {
                     database.GetAccountByTypeAndId("FIRSTTRADE", account);
                     var prefix = FirstTradeAccountKey(account);
@@ -253,12 +253,7 @@ namespace MyBook
             return new StatementRecordHoldingImport(StatementImportProvider.FirstTradeApi, capture.CompletedAtUtc.LocalDateTime.Date, key, account, records, holdings,
                 [new AccountBalance(account, new Currency(endingTotal, CurrencyType.USD))],
                 [new AccountBalance(account, new Currency(beginningTotal, CurrencyType.USD))], beginning,
-                recordDate: time.Date,
-                sourceDataJson: JsonSerializer.Serialize(new FirstTradeCapture
-                {
-                    Version = capture.Version, StartedAtUtc = capture.StartedAtUtc,
-                    CompletedAtUtc = capture.CompletedAtUtc, Accounts = [item]
-                }));
+                recordDate: time.Date);
 
             void AddRecord(decimal amount, string reason, string source, DateTime date, bool isInternal, Holding? holding, decimal quantity,
                 DateTime? postingDate = null, string counterparty = "")
@@ -469,7 +464,7 @@ namespace MyBook
                 catch { throw new FirstTradeException("cannot persist database session; requests stopped"); }
             }
 
-            internal async Task<FirstTradeCapture> FetchAsync(FirstTradeCapture? previous, CancellationToken token,
+            internal async Task<FirstTradeCapture> FetchAsync(CancellationToken token,
                 Func<string, DateTime>? historyFrom = null)
             {
                 var result = new FirstTradeCapture { StartedAtUtc = DateTimeOffset.UtcNow };
@@ -484,8 +479,7 @@ namespace MyBook
                     var account = RequiredText(item, "account");
                     if (!seen.Add(account))
                         throw new FirstTradeException("duplicate account in response");
-                    var last = previous?.Accounts.SingleOrDefault(a => a.Account == account);
-                    var from = historyFrom?.Invoke(account) ?? (last is null ? today.AddYears(-3) : last.HistoryThrough.Date);
+                    var from = historyFrom?.Invoke(account) ?? today.AddYears(-3);
                     if (from > today)
                         throw new FirstTradeException("history checkpoint is in the future");
                     var query = "account=" + Uri.EscapeDataString(account);

@@ -312,53 +312,6 @@ namespace MyBook
             return reports.Count > 0 && SaveIBKRParsedReports(reports).Any(saved => saved);
         }
 
-        private DateTime GetNextIBKRReportDate()
-        {
-            var latestReportDates = database.GetStatementImports(IBKRProvider)
-                .Select(import => TryParseIBKRStatementKey(import.statementKey))
-                .Where(parsed => parsed is not null)
-                .Select(parsed => parsed!)
-                .GroupBy(parsed => parsed.AccountId, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(
-                    group => group.Key,
-                    group => group.Max(parsed => parsed.ReportDate),
-                    StringComparer.OrdinalIgnoreCase);
-            var accountIds = database.GetAllAccounts()
-                .Where(account => account.name.StartsWith("IBKR_", StringComparison.OrdinalIgnoreCase))
-                .Select(GetIBKRStatementAccountId)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            if (accountIds.Count == 0)
-                return GetNextDailyStatementDate(IBKRProvider);
-
-            var latestDates = accountIds
-                .Select(accountId => latestReportDates.TryGetValue(accountId, out var date)
-                    ? date.Date
-                    : (DateTime?)null)
-                .ToList();
-            if (latestDates.Any(date => !date.HasValue))
-                return GetNextDailyStatementDate(IBKRProvider);
-
-            return latestDates.Min(date => date!.Value).AddDays(1);
-        }
-
-        private async Task<List<MailAttachmentMessage>> SearchIBKRReportAttachments(DateTime startDate, DateTime endDate)
-        {
-            var searchStart = FirstDayOfMonth(startDate);
-            var searchBefore = FirstDayOfMonth(endDate).AddMonths(1);
-            var query = SearchQuery.FromContains(IBKRReportSender)
-                .And(SearchQuery.SubjectContains(IBKRReportSubjectKeyword))
-                .And(SearchQuery.SentSince(searchStart))
-                .And(SearchQuery.SentBefore(searchBefore));
-            return await SearchAttachmentMessages(
-                $"IBKR {startDate:yyyy-MM-dd}..{endDate:yyyy-MM-dd}",
-                query,
-                summary => SummaryIsFrom(summary, IBKRReportSender)
-                    && HasIBKRReportAttachment(summary, startDate, endDate),
-                fileName => IsIBKRReportAttachment(fileName, startDate, endDate),
-                GetMailDateTime).ConfigureAwait(false);
-        }
-
         private List<bool> SaveIBKRParsedReports(List<IBKRParsedReport> reports)
         {
             var saveItems = AddIBKRInitialReportsIfNeeded(reports);

@@ -118,15 +118,6 @@ namespace MyBook
                 .And(SearchQuery.SentSince(since.ToUniversalTime().AddHours(-14).Date));
         }
 
-        private DateTime GetNextDailyStatementDate(StatementImportProvider provider)
-        {
-            var latestTime = database.GetLatestStatementImportTime(provider);
-            if (latestTime is null)
-                throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
-
-            return latestTime.Value.Date.AddDays(1);
-        }
-
         private static DateTime FirstDayOfMonth(DateTime date)
         {
             return new DateTime(date.Year, date.Month, 1);

@@ -182,12 +182,11 @@ namespace MyBook
                     await RunScheduledImportTaskAsync("Crypto ETH", StatementImportProvider.EthereumApi,
                         (since, _) => crypto.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
                 if (pubWeb is not null)
-                    await RunImportTaskAsync("exchange rate", () => true, pubWeb.FetchExchangeRates).ConfigureAwait(false);
+                    await RunImportTaskAsync("exchange rate", pubWeb.FetchExchangeRates).ConfigureAwait(false);
                 if (database is not null)
                 {
                     await RunImportTaskAsync(
                         "allocated expense cache",
-                        () => true,
                         () =>
                         {
                             database.ProcessAllocatedExpenseDirtyRecords();
@@ -195,7 +194,6 @@ namespace MyBook
                         }).ConfigureAwait(false);
                     await RunImportTaskAsync(
                         "snapshot",
-                        () => true,
                         () =>
                         {
                             database.CreateDailySnapshot();
@@ -285,7 +283,7 @@ namespace MyBook
         private Task RunScheduledImportTaskAsync(string name, StatementImportProvider provider,
             Func<DateTime, int, Task> fetch, int intervalDays, int missingAfterDays = 0, bool advanceOnEmptyQuery = false)
         {
-            return RunImportTaskAsync(name, () => true, () =>
+            return RunImportTaskAsync(name, () =>
             {
                 var db = database ?? throw new InvalidOperationException("Scheduled import requires a database.");
                 return ImportSchedule.RunAsync(name, intervalDays, missingAfterDays,
@@ -298,13 +296,12 @@ namespace MyBook
             });
         }
 
-        private async Task RunImportTaskAsync(string name, Func<bool> shouldRun, Func<Task> fetch)
+        private async Task RunImportTaskAsync(string name, Func<Task> fetch)
         {
             SetCurrentTask(name);
             try
             {
-                if (shouldRun())
-                    await fetch().ConfigureAwait(false);
+                await fetch().ConfigureAwait(false);
             }
             catch (Exception e)
             {

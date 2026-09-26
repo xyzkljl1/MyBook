@@ -28,13 +28,14 @@ partial class PlaidUtil
             var account = GetLinkedAccount(item, "SCHWAB");
             var checkpoint = db.GetStatementImportCheckpointTime(SchwabRawProvider)
                 ?? throw SchwabRawError("missing fixed import checkpoint");
-            var imports = db.GetStatementImports(SchwabRawProvider).Where(i => i.statementKey != "").OrderBy(i => i.Id).ToList();
-            var sources = db.GetStatementSources(imports.Select(i => i.Id));
-            var history = imports.Select(i => JsonSerializer.Deserialize<SchwabRawReport>(sources.GetValueOrDefault(i.Id)
-                    ?? throw SchwabRawError("stored source metadata missing")) ?? throw SchwabRawError("invalid stored metadata")).ToList();
+            var previous = db.GetLatestStatementImport(SchwabRawProvider);
             var queryStart = since.Date.AddDays(-6);
             if (queryStart < checkpoint.Date) queryStart = checkpoint.Date;
             var queryEnd = queryTime.UtcDateTime.Date;
+            var previousEnd = previous is null ? (DateTime?)null
+                : DateTime.ParseExact(previous.statementKey.Split('/')[2], "yyyy-MM-dd", CultureInfo.InvariantCulture);
+            if (previousEnd.HasValue && (queryStart > previousEnd.Value || queryEnd < previousEnd.Value))
+                throw SchwabRawError("report order or overlapping coverage changed");
             stage = "investment retrieval";
             var data = await GetInvestmentsAsync(item, queryStart, queryEnd, deadline.Token).ConfigureAwait(false);
             stage = "financial reconciliation";
@@ -42,22 +43,23 @@ partial class PlaidUtil
             if (reports.Count != 1)
                 throw SchwabRawError("a linked Item must return exactly one investment account; no accounts were saved");
             var report = reports[0];
-            var prior = history.Where(r => r.AccountId == report.AccountId).ToList();
             var beginning = db.GetCurrentAccountHoldings(account);
-            if (prior.Count == 0 && (db.HasAccountHistory(account) || beginning.Any(h => h.totalPrice.v != 0 || h.quantity != 0)))
+            if (previous is null && (db.HasAccountHistory(account) || beginning.Any(h => h.totalPrice.v != 0 || h.quantity != 0)))
                 throw SchwabRawError("existing account data requires explicit migration");
             HoldingType Resolve(string symbol)
             {
-                var codes = prior.Append(report).SelectMany(r => r.Markets).Where(m => m.Key == symbol).Select(m => m.Value).Distinct().ToList();
-                return codes.Count == 1 ? codes[0] switch
+                var current = report.Markets.TryGetValue(symbol, out var market) ? market switch
                 {
                     "XNAS" => HoldingType.NASDAQ, "ARCX" => HoldingType.ARCA,
                     _ => throw SchwabRawError("unsupported equity market")
-                } : throw SchwabRawError("missing or inconsistent equity market");
+                } : (HoldingType?)null;
+                var types = beginning.Where(h => h.code == symbol).Select(h => h.holdingType)
+                    .Concat(current.HasValue ? [current.Value] : []).Distinct().ToList();
+                return types.Count == 1 ? types[0] : throw SchwabRawError("missing or inconsistent equity market");
             }
-            var import = BuildSchwabRawImport(report, prior, account, beginning, queryTime.Date, Resolve);
+            var import = BuildSchwabRawImport(report, db.GetAccountRecords(account), account, beginning, queryTime.Date, Resolve);
             // A successful empty day must also advance the query boundary.
-            var shouldSave = prior.Count == 0 || import.Records.Count != 0 || report.End > prior[^1].End;
+            var shouldSave = previous is null || import.Records.Count != 0 || report.End > previousEnd;
             deadline.Token.ThrowIfCancellationRequested();
             stage = "atomic database write";
             db.SaveStatementRecordsAndHoldingsOnce(shouldSave ? [import] : []);
@@ -177,42 +179,21 @@ partial class PlaidUtil
         if (row.Properties().Any(p => !allowed.Contains(p.Name))) throw SchwabRawError("unexpected object field; schema review required");
     }
 
-    internal static StatementRecordHoldingImport BuildSchwabRawImport(SchwabRawReport report, List<SchwabRawReport> history,
+    internal static StatementRecordHoldingImport BuildSchwabRawImport(SchwabRawReport report, List<Record> existingRecords,
         Account account, List<Holding> beginning, DateTime sourceTime, Func<string, HoldingType> resolveEquity)
     {
         if (account.relativeBalance || account.isCredit || account.usage != AccountUsage.Investment || account._primaryAccount_Id.HasValue)
             throw SchwabRawError("a primary absolute-balance investment account is required");
-        // Import revision order matters when quotes change more than once on the same date.
-        var previous = history.LastOrDefault();
-        if (previous is not null && (report.Start > previous.End || report.End < previous.End
-            || report.AccountId != previous.AccountId || report.ItemId != previous.ItemId))
-            throw SchwabRawError("report order, overlapping coverage or persistent account identity changed");
-        var known = new Dictionary<string, SchwabRawTransaction>(StringComparer.Ordinal);
-        foreach (var tx in history.SelectMany(r => r.Transactions))
-        {
-            if (known.TryGetValue(tx.Id, out var old) && old != tx) throw SchwabRawError("stored transaction history is inconsistent");
-            known[tx.Id] = tx;
-        }
-        var incoming = report.Transactions.ToDictionary(t => t.Id, StringComparer.Ordinal);
-        foreach (var tx in report.Transactions)
-            if (known.TryGetValue(tx.Id, out var old) && old != tx) throw SchwabRawError("a previously imported transaction was revised");
-        foreach (var tx in known.Values.Where(t => t.Date >= report.Start && t.Date <= report.End))
-            if (!incoming.TryGetValue(tx.Id, out var current) || current != tx)
-                throw SchwabRawError("a previously imported transaction was removed or revised in the overlap window");
-        var securities = history.SelectMany(r => r.Securities).Concat(report.Securities).GroupBy(p => p.Id)
-            .ToDictionary(g => g.Key, g => g.Last(), StringComparer.Ordinal);
+        // Overlapping transactions are deduplicated by ID only; source revisions/removals are not checked.
+        var known = existingRecords.Where(r => r.Source.StartsWith(SchwabRawPrefix + "transaction/", StringComparison.Ordinal))
+            .Select(r => r.Source.Split(';')[0]).Select(source => source[..source.LastIndexOf('/')]).ToHashSet(StringComparer.Ordinal);
+        var securities = report.Securities.ToDictionary(p => p.Id, StringComparer.Ordinal);
         var ending = report.Positions.Select(p => BuildRawHolding(p, account, resolveEquity)).ToList();
         if (ending.Select(h => (h.code, h.holdingType)).Distinct().Count() != ending.Count
             || ending.Count(h => h.holdingType == HoldingType.Cash) != 1)
             throw SchwabRawError("ambiguous holding identity or missing USD cash holding");
         RawEqual(ending.Sum(h => h.totalPrice.v), report.Total, "holding details versus account total");
         if (report.Positions.Any(p => p.PriceDate > report.End)) throw SchwabRawError("holding price is newer than query coverage");
-        if (previous is not null)
-        {
-            var expected = previous.Positions.Select(p => BuildRawHolding(p, account, resolveEquity)).ToList();
-            if (!HoldingState(beginning).SequenceEqual(HoldingState(expected)))
-                throw SchwabRawError("database holdings differ from the last imported source");
-        }
         var cash = beginning.Where(h => h.holdingType == HoldingType.Cash).Sum(h => h.totalPrice.v);
         var quantities = beginning.Where(h => h.holdingType != HoldingType.Cash).ToDictionary(h => (h.code, h.holdingType), h => h.quantity);
         var values = beginning.Where(h => h.holdingType != HoldingType.Cash).ToDictionary(h => (h.code, h.holdingType), h => h.totalPrice.v);
@@ -220,16 +201,13 @@ partial class PlaidUtil
         var records = new List<Record>();
         foreach (var tx in report.Transactions)
         {
-            if (known.ContainsKey(tx.Id)) continue;
+            var source = SchwabRawPrefix + "transaction/" + RawHash(tx.Id);
+            if (known.Contains(source)) continue;
             RawEqual(tx.Amount, Decimal.Round(tx.Amount, 2), "transaction amount precision");
             RawEqual(tx.Fees, Decimal.Round(tx.Fees, 2), "transaction fee precision");
             if (tx.Date > report.End) throw SchwabRawError("transaction is later than query coverage");
-            var source = SchwabRawPrefix + "transaction/" + RawHash(tx.Id);
             if (tx.Type is "buy" or "sell")
             {
-                var priorPosition = previous?.Positions.SingleOrDefault(p => p.Id == tx.SecurityId);
-                if (priorPosition is not null && tx.TradeDate < priorPosition.PriceDate)
-                    throw SchwabRawError("trade is backdated before this security's prior valuation");
                 if (!securities.TryGetValue(tx.SecurityId, out var security)) throw SchwabRawError("trade security metadata is missing");
                 var holding = BuildRawHolding(security, account, resolveEquity);
                 if (holding.holdingType == HoldingType.Cash || tx.Price <= 0 || tx.Fees < 0
@@ -293,15 +271,8 @@ partial class PlaidUtil
                     var current = BuildRawHolding(p, account, resolveEquity);
                     return (current.code, current.holdingType) == key;
                 });
-                var priorPosition = previous?.Positions.FirstOrDefault(p =>
-                {
-                    var prior = BuildRawHolding(p, account, resolveEquity);
-                    return (prior.code, prior.holdingType) == key;
-                });
-                if (position is not null && priorPosition is not null && position.PriceDate < priorPosition.PriceDate)
-                    throw SchwabRawError("changed valuation has stale price date");
                 // A trade can change value using an older quote; the resulting value cannot predate that trade.
-                var priceDate = position?.PriceDate ?? priorPosition?.PriceDate ?? report.End;
+                var priceDate = position?.PriceDate ?? latestTradeDates.GetValueOrDefault(key, report.End);
                 if (latestTradeDates.GetValueOrDefault(key) > priceDate) priceDate = latestTradeDates[key];
                 Add(change, "持仓价格变动", SchwabRawPrefix + "valuation/" + RawHash(JsonSerializer.Serialize(report)) + "/" + holding.code,
                     priceDate, report.AsOf.Date, false, holding, 0);
@@ -309,20 +280,14 @@ partial class PlaidUtil
         }
         var beginningValue = beginning.Sum(h => h.totalPrice.v);
         RawEqual(beginningValue + records.Sum(r => r.v), report.Total, "opening value plus records");
-        return new(SchwabRawProvider, sourceTime, SchwabRawPrefix + account.Id + "/" + RawHash(JsonSerializer.Serialize(report)),
+        return new(SchwabRawProvider, sourceTime, SchwabRawPrefix + account.Id + "/" + report.End.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "/" + RawHash(JsonSerializer.Serialize(report)),
             account, records, ending, [new(account, new(report.Total, CurrencyType.USD))],
-            [new(account, new(beginningValue, CurrencyType.USD))], beginning, recordDate: report.AsOf.Date,
-            sourceDataJson: JsonSerializer.Serialize(report));
+            [new(account, new(beginningValue, CurrencyType.USD))], beginning, recordDate: report.AsOf.Date);
 
         void Add(decimal value, string reason, string source, DateTime date, DateTime posted, bool internalTrade, Holding? holding, decimal quantity) =>
             records.Add(new Record { Account = account, v = value, t = CurrencyType.USD, date = date, postingDate = posted,
                 updateTime = DateTime.Now, Reason = reason, Source = source, isInternal = internalTrade, Holding = holding, HoldingQuantity = quantity });
     }
-
-    private static IEnumerable<(string, HoldingType, decimal, decimal, CurrencyType)> HoldingState(IEnumerable<Holding> holdings) =>
-        holdings.Where(h => h.totalPrice.v != 0 || h.holdingType != HoldingType.Cash && h.quantity != 0)
-            .OrderBy(h => h.code, StringComparer.Ordinal).ThenBy(h => h.holdingType)
-            .Select(h => (h.code, h.holdingType, h.quantity, h.totalPrice.v, h.currentPrice.t));
 
     private static Holding BuildRawHolding(SchwabRawPosition position, Account account, Func<string, HoldingType> resolveEquity)
     {
