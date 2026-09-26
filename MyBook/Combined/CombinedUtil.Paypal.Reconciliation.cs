@@ -170,7 +170,6 @@ partial class CombinedUtil
                         if (notice.Card == "" || notice.CardAmount is null
                             || (!notice.ForeignExchange && (notice.CardAmount.Currency != currency || notice.CardAmount.Value != amount)))
                             throw PayPalError("purchase funding is not fully explained by the card");
-                        plan.IgnoredCards++;
                         break;
                     case PayPalKind.Receive:
                     {
@@ -325,7 +324,6 @@ partial class CombinedUtil
             if (plan.Records.Any(r => r._account_Id == item.AccountId && r.t != item.Currency))
                 plan.Problems.Add($"account={item.AccountId}: receipt currency has no API balance snapshot");
         }
-        plan.MatchedTransactions = used.Count;
         return plan;
     }
 

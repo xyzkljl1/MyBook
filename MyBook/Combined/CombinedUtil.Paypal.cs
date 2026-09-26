@@ -33,7 +33,7 @@ partial class CombinedUtil
     internal sealed record PayPalNotice(PayPalMail Mail, string Key, string NativeId, PayPalKind Kind,
         PayPalAmount Gross, decimal Fee, decimal Net, string Party, string Card, PayPalAmount? CardAmount,
         string BankIdentifier, bool Nexus, bool ForeignExchange);
-    internal sealed record PayPalItemState(int ItemRowId, int AccountId, string RemoteAccountId,
+    internal sealed record PayPalItemState(int ItemRowId, int AccountId,
         CurrencyType Currency, decimal Balance, string Cursor, List<JObject> Transactions, bool IsInitial = false);
     internal sealed class PayPalState
     {
@@ -50,8 +50,6 @@ partial class CombinedUtil
         public Dictionary<int, int> ExpectedItemAccounts { get; } = [];
         public Dictionary<int, DateTime> ReportDates { get; } = [];
         public List<PayPalPair> Pairs { get; } = [];
-        public int IgnoredCards { get; set; }
-        public int MatchedTransactions { get; set; }
     }
     internal sealed record PayPalPair(string LeftSource, string? RightSource = null, int? BankRecordId = null);
     internal sealed record PayPalImport(StatementImportProvider Provider, int AccountId, string? PreviousKey, string Key);
@@ -209,7 +207,7 @@ partial class CombinedUtil
                     isInitial: previousImport is null);
                 var messages = await mail.ReadPayPalMailsAsync(account, since[provider], timeout.Token).ConfigureAwait(false);
                 state.Items.Add(current);
-                state.Mails.AddRange(messages.DistinctBy(m => m.MessageId));
+                state.Mails.AddRange(messages);
             }
             var plan = BuildPayPalPlan(state, database, checkpoints, ReadRecords);
             if (plan.Problems.Count != 0)
@@ -273,7 +271,7 @@ partial class CombinedUtil
             }
         }
         if (data.Pages.Count == 0) throw PayPalError("empty sync pages");
-        return new(itemRowId, accountId, remoteId, currency, Cash(remote["balances"]!, "current"),
+        return new(itemRowId, accountId, currency, Cash(remote["balances"]!, "current"),
             Required(data.Pages[^1], "next_cursor"), rows.OrderBy(p => p.Key, StringComparer.Ordinal)
                 .Select(p => p.Value).Where(t => !t["pending"]!.Value<bool>()).ToList(), isInitial);
     }
