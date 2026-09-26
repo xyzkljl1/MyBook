@@ -23,7 +23,6 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
 {
     private const StatementImportProvider Provider = StatementImportProvider.WiseApi;
     private static readonly SemaphoreSlim importLock = new(1, 1);
-    private static readonly JsonSerializerSettings JsonSettings = new() { DateParseHandling = DateParseHandling.None, FloatParseHandling = FloatParseHandling.Decimal };
     private static readonly Regex AmountPattern = new(@"^(?<sign>[+-]?)\s*(?<value>\d+(?:,\d{3})*(?:\.\d+)?) (?<currency>[A-Z]{3})$", RegexOptions.CultureInvariant);
     public bool IsConfigured => !String.IsNullOrWhiteSpace(config["wise_api_token"]);
 
@@ -41,23 +40,17 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
                 throw Error("a primary absolute-balance cash account is required");
             stage = "load previous import";
             var latest = database.GetLatestStatementImport(Provider);
-            var previous = latest is null ? null : JsonConvert.DeserializeObject<SyncState>(database.GetStatementSource(latest.Id)
-                ?? throw Error("stored metadata missing"), JsonSettings) ?? throw Error("invalid stored metadata");
             stage = "load current holdings";
             var beginning = database.GetCurrentAccountHoldings(account);
-            if (previous is null && (database.HasAccountHistory(account) || HoldingBalances(beginning).Values.Any(v => v != 0)))
+            if (latest is null && (database.HasAccountHistory(account) || HoldingBalances(beginning).Values.Any(v => v != 0)))
                 throw Error("existing Wise history requires explicit cleanup before migration");
-            if (previous is not null && (previous.Version != 2 || previous.AccountId != account.Id))
-                throw Error("stored account identity or metadata version changed");
             stage = "load fixed checkpoint";
             var checkpoint = database.GetStatementImportCheckpointTime(Provider);
             DateTimeOffset? start = checkpoint.HasValue ? new DateTimeOffset(checkpoint.Value) : null;
-            if (previous is not null && previous.Start != start) throw Error("fixed checkpoint changed");
-            var scanTime = DateTimeOffset.UtcNow;
-            if (previous?.ScannedThrough > scanTime.AddMinutes(5)) throw Error("invalid stored scan time");
             var queryStart = new DateTimeOffset(since.Date.AddDays(-6));
             if (start.HasValue && queryStart < start.Value) queryStart = start.Value;
-            var oldEvents = (previous?.Events ?? []).ToDictionary(e => EventKey(e.Activity), StringComparer.Ordinal);
+            var existingRecords = database.GetAccountRecords(account)
+                .Where(record => record.Source.StartsWith("WiseApi/", StringComparison.Ordinal)).ToList();
 
             using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
                 { BaseAddress = new Uri("https://api.wise.com"), Timeout = TimeSpan.FromSeconds(15) };
@@ -104,14 +97,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             var personal = profiles.Where(p => Text(p, "type") == "personal").ToList();
             if (personal.Count != 1) throw Error("expected exactly one personal profile");
             var profile = Id(personal[0], "id");
-            if (previous is not null && previous.Profile != profile) throw Error("personal profile changed");
             var balances = ParseBalances(await Get($"/v4/profiles/{profile}/balances?types=STANDARD,SAVINGS", "/v4/profiles/{profile}/balances"));
-            if (previous is not null)
-            {
-                if (previous.Balances.Any(b => !balances.Any(n => n.Id == b.Id && n.Currency == b.Currency)))
-                    throw Error("a previous balance account disappeared or changed currency");
-                EqualBalances(HoldingBalances(beginning), SumBalances(previous.Balances), "previous import versus database");
-            }
 
             async Task<List<JObject>> Activities()
             {
@@ -138,24 +124,13 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             }
 
             var activities = await Activities();
-            var currentKeys = activities.Select(EventKey).ToHashSet(StringComparer.Ordinal);
-            if (oldEvents.Values.Any(e => Text(e.Activity, "status") == "COMPLETED"
-                && Stamp(Text(e.Activity, "createdOn")) > queryStart
-                && !currentKeys.Contains(EventKey(e.Activity))))
-                throw Error("a previously completed activity disappeared; explicit reconciliation required");
-            var events = new Dictionary<string, EventData>(oldEvents, StringComparer.Ordinal);
+            ValidateExistingActivities(activities, existingRecords, queryStart.LocalDateTime);
             var records = new List<Record>();
-            // Only new/changed activities need enrichment. Saved source details remain private in the database.
+            // Reparse queried activities and reconcile their parts with the stored Records.
             foreach (var activity in activities)
             {
                 deadline.Token.ThrowIfCancellationRequested();
                 var key = EventKey(activity);
-                if (oldEvents.TryGetValue(key, out var old) && Fingerprint(old.Activity) == Fingerprint(activity))
-                {
-                    continue;
-                }
-                if (old is not null && Text(old.Activity, "status") == "COMPLETED")
-                    throw Error("a completed activity changed; explicit reconciliation required (" + Hash(key)[..12] + ")");
                 var data = new EventData(activity, null, null, null);
                 if (Text(activity, "status") == "COMPLETED" && Text(activity["resource"]!, "type") == "TRANSFER")
                 {
@@ -189,10 +164,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
                 var parsed = ParseEvent(data, account);
                 var evidence = FindCounterparty(data);
                 ApplyCounterparty(parsed, account, evidence);
-                // Keep the exact same-event relationship without hiding unsplit fees via matchedRecordId.
-                data = data with { Match = evidence, RecordSources = parsed.Select(r => r.Source).ToList() };
-                records.AddRange(parsed);
-                events[key] = data;
+                records.AddRange(SelectNewRecords(activity, parsed, existingRecords));
             }
             var verification = await Activities();
             if (!activities.Select(Fingerprint).SequenceEqual(verification.Select(Fingerprint)))
@@ -202,7 +174,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             stage = "balance reconciliation";
             var ending = SumBalances(end);
             var opening = HoldingBalances(beginning);
-            if (previous is null)
+            if (latest is null)
             {
                 // Same explicit first-import baseline as the former Plaid importer, not a recurring residual.
                 opening = ending.ToDictionary(p => p.Key, p => p.Value - records.Where(r => r.t == p.Key).Sum(r => r.v));
@@ -211,19 +183,15 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             var expected = opening.Keys.Union(records.Select(r => r.t)).ToDictionary(c => c,
                 c => opening.GetValueOrDefault(c) + records.Where(r => r.t == c).Sum(r => r.v));
             EqualBalances(expected, ending, "opening plus records versus API balance");
-            var state = new SyncState(2, profile, account.Id, start, end,
-                events.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => e.Value).ToList(), scanTime);
-            var source = JsonConvert.SerializeObject(state);
             Console.WriteLine($"Wise API: scanned activities={activities.Count}, new records={records.Count}, currencies={ending.Count}");
-            if (previous is not null && records.Count == 0 && previous.Balances.SequenceEqual(end)
-                && events.Count == oldEvents.Count && events.Values.All(e => oldEvents.TryGetValue(EventKey(e.Activity), out var old)
-                    && Fingerprint(e.Activity) == Fingerprint(old.Activity))) return;
+            if (latest is not null && records.Count == 0) return;
             stage = "atomic database write";
             deadline.Token.ThrowIfCancellationRequested();
-            database.SaveStatementRecordsAndHoldingsOnce([new(Provider, DateTime.Today, "WiseApi/" + Hash(source), account,
+            var statementKey = $"WiseApi/{DateTime.Today:yyyy-MM-dd}/" + Hash(String.Join("\n", records.Select(r => r.Source).Order(StringComparer.Ordinal)));
+            database.SaveStatementRecordsAndHoldingsOnce([new(Provider, DateTime.Today, statementKey, account,
                 records, Holdings(account, ending), ending.Select(p => new AccountBalance(account, new(p.Value, p.Key))).ToList(),
                 opening.Select(p => new AccountBalance(account, new(p.Value, p.Key))).ToList(), beginning,
-                sourceDataJson: source, forceValidateBeginningBalances: previous is not null)]);
+                forceValidateBeginningBalances: latest is not null)]);
         }
         catch (MailParseException e)
         {
@@ -238,6 +206,29 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             throw Error(stage + ": " + e.GetType().Name + (code.HasValue ? $" code={code}" : "") + "; private details suppressed");
         }
         finally { importLock.Release(); }
+    }
+
+    internal static void ValidateExistingActivities(IReadOnlyList<JObject> activities, IReadOnlyList<Record> existing, DateTime since)
+    {
+        var prefixes = activities.Select(EventSourcePrefix).ToArray();
+        if (existing.Any(record => record.date > since
+            && !prefixes.Any(prefix => record.Source.StartsWith(prefix, StringComparison.Ordinal))))
+            throw Error("a previously imported activity disappeared; explicit reconciliation required");
+    }
+
+    internal static List<Record> SelectNewRecords(JObject activity, List<Record> parsed, IReadOnlyList<Record> existing)
+    {
+        var prefix = EventSourcePrefix(activity);
+        var imported = existing.Where(record => record.Source.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+        if (imported.Count == 0) return parsed;
+        // Source supplements and later counterparty/matching annotations do not change the imported cash flow.
+        // Compare the transaction day stored in Record, not source metadata or later annotations.
+        if (imported.Count != parsed.Count || parsed.Any(part => imported.Count(record =>
+            record.Source.Split(';', 2)[0] == part.Source.Split(';', 2)[0]
+            && record.v == part.v && record.t == part.t && record.date.Date == part.date.Date
+            && record._descCurrency_v == part._descCurrency_v && record._descCurrency_t == part._descCurrency_t) != 1))
+            throw Error("stored transaction parts differ from API; explicit reconciliation required (" + Hash(EventKey(activity))[..12] + ")");
+        return [];
     }
 
     internal static List<Record> ParseEvent(EventData data, Account account)
@@ -270,7 +261,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             if (amount.v == 0) return;
             result.Add(new Record { Account = account, v = amount.v, t = amount.t, date = time.LocalDateTime,
                 updateTime = DateTime.Now, Reason = reason, DestAccount = description.Length > 200 ? description[..200] : description,
-                Source = "WiseApi/" + Hash(EventKey(a)) + "/" + suffix, DescCurrency = original, isInternal = false });
+                Source = EventSourcePrefix(a) + suffix, DescCurrency = original, isInternal = false });
         }
         if (type == "INTERBALANCE")
         {
@@ -412,6 +403,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
     }
     private static string EventKey(JObject activity) => Text(activity["resource"] ?? throw Error("resource missing"), "type")
         + "/" + Id(activity["resource"]!, "id");
+    internal static string EventSourcePrefix(JObject activity) => "WiseApi/" + Hash(EventKey(activity)) + "/";
     internal static string Fingerprint(JObject activity)
     {
         JToken Ordered(JToken value) => value switch
@@ -421,7 +413,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             JArray array => new JArray(array.Select(Ordered)),
             _ => value.DeepClone()
         };
-        // MySQL's JSON storage reorders nested object properties; order is not a source revision.
+        // Field ordering and updatedOn alone do not indicate a change during retrieval.
         var source = new JObject(activity.Properties().Where(p => p.Name != "updatedOn")
             .Select(p => new JProperty(p.Name, p.Value.DeepClone())));
         return Ordered(source).ToString(Formatting.None);
@@ -435,8 +427,5 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
     internal sealed record ReceiptData(int Status, string? Text, string? Sha256);
     internal sealed record AccountMatch(string Status, string[] Identifiers, string[] References, string? AccountName);
     internal sealed record EventData(JObject Activity, JObject? Transfer, JObject? Quote, JObject? Recipient,
-        JObject? Payout = null, int? PayoutStatus = null, ReceiptData? Receipt = null, AccountMatch? Match = null,
-        List<string>? RecordSources = null);
-    private sealed record SyncState(int Version, string Profile, int AccountId, DateTimeOffset? Start, List<BalanceData> Balances,
-        List<EventData> Events, DateTimeOffset? ScannedThrough = null);
+        JObject? Payout = null, int? PayoutStatus = null, ReceiptData? Receipt = null);
 }
