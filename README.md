@@ -51,6 +51,8 @@ For new transfers involving Wise, Schwab, FirstTrade, IBKR, Kraken, Nexus, ZA or
 
 Wise, iFAST, ZA, ICBC historical transfer details and PayPal receipts can also identify internal transfers from explicitly registered counterparty aliases, including aliases without a known receiving account. Only identified payer or recipient fields qualify; the account owner's details and arbitrary payment references do not. Fees remain expenses, and missing counterpart records remain unmatched. PayPal's receipt, funding and withdrawal reconciliation requirements still apply.
 
+An internal cash transfer that identifies a specific own account can also establish the counterpart transfer as internal when both sides match uniquely in that account, currency and opposite amount within 14 days, with no conflicting counterparty account. This does not apply to purchases, fees, refunds, opening balances or security transfers; ambiguous transfers remain unmatched.
+
 ## Configuration
 
 Create a local configuration file from the example and fill the values for the integrations you use:

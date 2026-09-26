@@ -2072,12 +2072,54 @@ namespace MyBook
             Dictionary<string, Account> accountsByName,
             bool requireKnownCounterparty)
         {
-            if (anchor.v == 0)
+            var candidate = FindInternalTransferCandidate(anchor, records,
+                record => ResolveInternalTransferTargetAccount(record, accountsByName), requireKnownCounterparty);
+            if (candidate is null)
                 return false;
 
-            var targetAccount = ResolveInternalTransferTargetAccount(anchor, accountsByName);
+            var inferred = !candidate.isInternal;
+            if (inferred)
+            {
+                // 对侧的完整时间窗口可能超出本次导入加载的范围，补查重复的内部转账。
+                var start = candidate.date.AddDays(-InternalTransferMatchWindowDays);
+                var end = candidate.date.AddDays(InternalTransferMatchWindowDays);
+                var competing = db.Queryable<Record>().Where(record => record.isInternal
+                    && record.matchedRecordId == null && !record.isRefundMatched
+                    && record.t == candidate.t && record.v == -candidate.v
+                    && record.date >= start && record.date <= end).ToList();
+                if (FindInternalTransferCandidate(anchor, records.Concat(competing).DistinctBy(record => record.Id).ToList(),
+                    record => ResolveInternalTransferTargetAccount(record, accountsByName), requireKnownCounterparty) is null)
+                    return false;
+            }
+            candidate.isInternal = true;
+            MatchInternalTransferPair(anchor, candidate, inferred ? "InferredCounterpartyAccountAmountDate"
+                : requireKnownCounterparty ? "KnownCounterpartyAccountAmountDate" : "CounterpartyAccountAmountDate");
+            return true;
+        }
+
+        private static Record? FindInternalTransferCandidate(
+            Record anchor, List<Record> records, Func<Record, Account?> resolveTarget, bool requireKnownCounterparty)
+        {
+            if (anchor.v == 0)
+                return null;
+
+            var targetAccount = resolveTarget(anchor);
             if ((requireKnownCounterparty || IsAcatsTransfer(anchor)) && targetAccount is null)
-                return false;
+                return null;
+
+            // 只有明确指向本人另一账户的现金转账本金，才能据此确认对侧为内部交易。
+            // 不推断消费、费用、持仓转移，也不覆盖对侧已知的不同目标账户。
+            bool CanInfer(Record known, Record other, Account? target) =>
+                known.isInternal && known.matchedRecordId is null && !known.isRefundMatched
+                && !IsInitializationRecord(known) && !IsInitializationRecord(other)
+                && target is not null && target.Id != known._account_Id && target.Id == other._account_Id
+                && IsTransferPrincipal(known) && IsTransferPrincipal(other)
+                && known.HoldingQuantity == 0 && other.HoldingQuantity == 0
+                && !IsAcatsTransfer(known) && !IsAcatsTransfer(other)
+                && known.v != 0 && known.t == other.t && known.v == -other.v
+                && known.date >= other.date.AddDays(-InternalTransferMatchWindowDays)
+                && known.date <= other.date.AddDays(InternalTransferMatchWindowDays)
+                && (resolveTarget(other) is not { } reverseTarget || reverseTarget.Id == known._account_Id);
 
             var start = anchor.date.AddDays(-InternalTransferMatchWindowDays);
             var end = anchor.date.AddDays(InternalTransferMatchWindowDays);
@@ -2085,7 +2127,7 @@ namespace MyBook
                 .Where(record => record.Id != anchor.Id
                     && record.matchedRecordId is null
                     && !record.isRefundMatched
-                    && record.isInternal
+                    && (record.isInternal || CanInfer(anchor, record, targetAccount))
                     && (targetAccount is null || record._account_Id == targetAccount.Id)
                     && record.t == anchor.t
                     && record.v == -anchor.v
@@ -2096,7 +2138,7 @@ namespace MyBook
             {
                 if (!IsAcatsTransfer(anchor) && !IsAcatsTransfer(candidate))
                     return true;
-                var candidateTarget = ResolveInternalTransferTargetAccount(candidate, accountsByName);
+                var candidateTarget = resolveTarget(candidate);
                 return CanMatchAcatsTransfer(anchor, candidate, targetAccount, candidateTarget);
             }).ToList();
             if (requireKnownCounterparty)
@@ -2104,20 +2146,20 @@ namespace MyBook
                 candidates = candidates
                     .Where(candidate =>
                     {
-                        var candidateTarget = ResolveInternalTransferTargetAccount(candidate, accountsByName);
+                        var candidateTarget = resolveTarget(candidate);
                         return candidateTarget is not null && candidateTarget.Id == anchor._account_Id;
                     })
                     .ToList();
             }
 
             if (candidates.Count != 1)
-                return false;
+                return null;
 
-            MatchInternalTransferPair(
-                anchor,
-                candidates[0],
-                requireKnownCounterparty ? "KnownCounterpartyAccountAmountDate" : "CounterpartyAccountAmountDate");
-            return true;
+            var result = candidates[0];
+            // 对侧也必须只有这一笔内部转账可匹配，避免按遍历顺序消耗重复金额。
+            if (!result.isInternal && records.Count(record => CanInfer(record, result, resolveTarget(record))) != 1)
+                return null;
+            return result;
         }
 
         private static bool IsAcatsTransfer(Record record) =>
