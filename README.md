@@ -88,9 +88,9 @@ Bind each PayPal account to its Plaid connection and configure its mailbox to fe
 
 Set `firsttrade_username`, `firsttrade_password` and `firsttrade_totp_secret` (the original Base32 authenticator key, not a six-digit code). The read-only integration references `MaxxRK/firstrade-api` and uses `mail_proxy` when configured.
 
-### Nexus OAuth
+### Nexus OAuth (deprecated)
 
-Current imports use `nexus_api_key`; OAuth authorization is not currently used by scheduled imports. To authorize or refresh a local Nexus OAuth token:
+Nexus OAuth is deprecated. Imports use `nexus_api_key`. The legacy authorization command is retained:
 
 ```powershell
 dotnet run --project MyBook\MyBook.csproj -- --debug-authorize-nexus-oauth

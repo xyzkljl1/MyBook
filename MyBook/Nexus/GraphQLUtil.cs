@@ -39,7 +39,7 @@ namespace MyBook
             else
             {
                 throw new InvalidOperationException(
-                    "Missing nexus_api_key. Nexus OAuth is temporarily disabled for imports.");
+                    "Missing nexus_api_key. Nexus OAuth is deprecated and is not used for imports.");
             }
 
             var requestBody = JsonConvert.SerializeObject(new

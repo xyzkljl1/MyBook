@@ -19,6 +19,8 @@ namespace MyBook
 
         private NexusOAuthTokenSet? cachedNexusOAuthTokens;
 
+        // Deprecated OAuth implementation retained for reference. Imports use nexus_api_key.
+        [Obsolete("Nexus OAuth is deprecated; use nexus_api_key for imports.")]
         public async Task AuthorizeNexusOAuthAsync()
         {
             var clientId = GetRequiredNexusOAuthClientId();
