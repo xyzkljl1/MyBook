@@ -64,6 +64,9 @@ partial class MailUtil
             throw new InvalidOperationException("ZA mail requires a non-credit relative-balance account.");
         record.Account = account;
         record._account_Id = account.Id;
+        if (record.Reason is "转入" or "转出")
+            DatabaseUtil.ApplyTransferCounterparty(record,
+                database.ResolveTransferCounterparty(null, [record.DestAccount], record.DestAccount));
         database.SaveStatementRecordsOnce(ZAProvider, GetMailDateTime(message), [record], statementKey: key);
         Console.WriteLine("Imported ZA transaction: records=1");
     }

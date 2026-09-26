@@ -15,7 +15,8 @@ partial class CombinedUtil
             text => database.FindAccountByInternalCardNoText(null, "PayPal counterparty", false, text) is { } account
                 ? database.GetPostingAccount(account) : null,
             database.GetAccountRecords,
-            (account, currency) => database.GetAccountBalance(account, currency).v);
+            (account, currency) => database.GetAccountBalance(account, currency).v,
+            (known, party) => database.ResolveTransferCounterparty(known, [party], party));
     }
 
     private sealed record PayPalTransaction(int AccountId, string Id, decimal Delta, CurrencyType Currency,
@@ -23,7 +24,8 @@ partial class CombinedUtil
 
     internal static PayPalPlan ReconcilePayPal(PayPalState state, DateTime checkpoint, IReadOnlyList<Account> accounts,
         Func<string, Account?> resolveAccount, Func<Account, List<Record>> readRecords,
-        Func<Account, CurrencyType, decimal> readBalance)
+        Func<Account, CurrencyType, decimal> readBalance,
+        Func<Account?, string, (bool IsInternal, Account? Account)>? resolveCounterparty = null)
     {
         var plan = new PayPalPlan();
         foreach (var item in state.Items) plan.ExpectedItemAccounts.Add(item.ItemRowId, item.AccountId);
@@ -146,10 +148,13 @@ partial class CombinedUtil
                             && PartyMatches(n.Party, Greeting(notice.Mail.Text)) && PartyMatches(notice.Party, Greeting(n.Mail.Text))).ToList();
                         if (sends.Count > 1) throw PayPalError("ambiguous transfer between PayPal accounts");
                         var origin = sends.Count == 1 ? accounts.Single(a => a.Id == sends[0].Mail.AccountId) : resolveAccount(notice.Party);
+                        var counterparty = resolveCounterparty?.Invoke(origin, notice.Party) ?? (origin is not null, origin);
+                        origin = counterparty.Item2;
                         if (notice.Nexus && (origin is null || !origin.name.StartsWith("NEXUS", StringComparison.OrdinalIgnoreCase)))
                             throw PayPalError("Donation Points payout requires a registered Nexus source account");
                         if (origin is not null && origin.Id == account.Id) throw PayPalError("receipt source resolves to itself");
-                        Add(account, amount, "principal", origin is null ? "收款" : "转账", origin);
+                        var principal = Add(account, amount, "principal", counterparty.Item1 ? "转账" : "收款", origin);
+                        DatabaseUtil.ApplyTransferCounterparty(principal, counterparty);
                         if (notice.Fee != 0) Add(account, -notice.Fee, "fee", "收款手续费", party: "PayPal");
                         if (origin is not null && !linked.Contains(origin.Id))
                         {

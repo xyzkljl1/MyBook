@@ -2398,9 +2398,6 @@ namespace MyBook
                 db.Queryable<Account>().ToList(), db.Queryable<AccountInternalId>().ToList(), accountType);
         }
 
-        internal (bool IsInternal, Account? Account) FindOwnTransferAlias(string value) =>
-            ResolveOwnTransferAlias(value, db.Queryable<Account>().ToList(), db.Queryable<AccountInternalId>().ToList());
-
         internal static (bool IsInternal, Account? Account) ResolveOwnTransferAlias(
             string value, List<Account> accounts, List<AccountInternalId> aliases)
         {
@@ -2415,6 +2412,46 @@ namespace MyBook
             var targets = accounts.Where(account => accountIds.Contains(account.Id) && !IsUndeterminedAccount(account)).ToList();
             if (targets.Count > 1) throw new InvalidOperationException("Conflicting internal transfer alias accounts.");
             return (targets.Count == 1 || matches.Any(alias => alias._account_Id is null), targets.SingleOrDefault());
+        }
+
+        // 调用方只传明确属于交易对方的标识和机构，不传我方信息或任意备注。
+        internal (bool IsInternal, Account? Account) ResolveTransferCounterparty(
+            Account? knownAccount, string[] aliases, params string?[] institutions) =>
+            ResolveTransferCounterparty(knownAccount, aliases, institutions,
+                db.Queryable<Account>().ToList(), db.Queryable<AccountInternalId>().ToList());
+
+        internal static (bool IsInternal, Account? Account) ResolveTransferCounterparty(
+            Account? knownAccount, string[] aliases, string?[] institutions,
+            List<Account> accounts, List<AccountInternalId> internalIds)
+        {
+            Account Posting(Account account) => account._primaryAccount_Id is int id
+                ? accounts.Single(a => a.Id == id) : account;
+            var candidates = new List<Account>();
+            if (knownAccount is not null && !IsUndeterminedAccount(knownAccount)) candidates.Add(Posting(knownAccount));
+            var isInternal = false;
+            foreach (var alias in aliases)
+            {
+                var match = ResolveOwnTransferAlias(alias, accounts, internalIds);
+                isInternal |= match.IsInternal;
+                if (match.Account is not null) candidates.Add(Posting(match.Account));
+            }
+            var matches = candidates.DistinctBy(account => account.Id).ToList();
+            if (matches.Count > 1) throw new InvalidOperationException("Conflicting transfer counterparty accounts.");
+            var target = ResolveTransferAccountByInstitution(matches.SingleOrDefault(), accounts, institutions);
+            return (isInternal || target is not null || IsBrokerageInstitution(institutions), target is null ? null : Posting(target));
+        }
+
+        // 只应用于已由模块确认的转账本金；手续费和消费不调用此方法。
+        internal static void ApplyTransferCounterparty(Record record, (bool IsInternal, Account? Account) match)
+        {
+            if (!match.IsInternal || match.Account is not null
+                && (match.Account.Id == record._account_Id || match.Account.Id == record.Account?.Id)) return;
+            record.isInternal = true;
+            if (match.Account is not null && record.DestAccount != match.Account.name)
+            {
+                if (!String.IsNullOrWhiteSpace(record.DestAccount)) record.Source += $"; counterparty={record.DestAccount}";
+                record.DestAccount = match.Account.name;
+            }
         }
 
         private static Account? FindAccountByExactInternalId(string cardNo, List<Account> accounts, List<AccountInternalId> internalIds, string? accountType = null)
@@ -2436,11 +2473,6 @@ namespace MyBook
 
         public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, params string?[] texts)
             => FindAccountByInternalCardNoText(preferredAccountType, matchContext, true, texts);
-
-        public Account? FindTransferAccountByInstitution(Account? matchedAccount, params string?[] counterpartyNames)
-        {
-            return ResolveTransferAccountByInstitution(matchedAccount, db.Queryable<Account>().ToList(), counterpartyNames);
-        }
 
         private static Account? ResolveTransferAccountByInstitution(Account? matchedAccount, List<Account> accounts, string?[] counterpartyNames)
         {
@@ -2466,7 +2498,7 @@ namespace MyBook
         private static List<string> GetTransferInstitutionTypes(params string?[] counterpartyNames) =>
             TransferInstitutionTypes.Where(type => counterpartyNames.Any(text => !String.IsNullOrWhiteSpace(text)
                 && Regex.IsMatch(text.Trim(), type == "IBKR"
-                    ? @"^(?:IBKR(?:_[A-Z0-9]+)?|INTERACTIVE\s+BROK(?:ERS)?(?:\s+(?:LLC|LTD\.?|LIMITED))?)$"
+                    ? @"^(?:IBKR(?:_[A-Z0-9]+)?|INTERACTIVE\s+BROK(?:ERS)?(?:\s+(?:LLC|LTD\.?|LIMITED))?(?:\s+CASHIERING)?)$"
                     : $@"(?<![A-Za-z0-9]){(type == "FIRSTTRADE" ? "(?:FIRSTTRADE|FIRSTRADE)" : type)}(?![A-Za-z0-9])",
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))).ToList();
 
@@ -2672,17 +2704,9 @@ namespace MyBook
                 {
                     var exact = FindAccountByName(record.DestAccount) ?? FindAccountByInternalCardNoText(
                         null, "transfer counterparty", false, counterparty);
-                    var target = FindTransferAccountByInstitution(exact, counterparty);
                     // 不会向别人的券商账户转账：三家券商相关本金均为内部交易。
                     // 机构有多个账户时保留原描述，由后续匹配确定具体账户。
-                    if (IsBrokerageInstitution(counterparty)) record.isInternal = true;
-                    if (target is not null && GetPostingAccount(target).Id != account.Id)
-                    {
-                        if (record.DestAccount != target.name)
-                            record.Source += $"; counterparty={record.DestAccount}";
-                        record.DestAccount = GetPostingAccount(target).name;
-                        record.isInternal = true;
-                    }
+                    ApplyTransferCounterparty(record, ResolveTransferCounterparty(exact, [], counterparty));
                 }
                 ResolveRecordHolding(record, account);
                 if (record._holding_Id <= 0)

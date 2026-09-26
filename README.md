@@ -39,7 +39,7 @@ Expected files:
 - **ZA:** transaction emails on demand, not scheduled. Email notices do not provide a complete ledger or verified ending balance.
 - **FirstTrade:** reconciled account balances, holdings and detailed transactions from account history and CSV/OFX reports.
 - **Wise:** daily read-only personal-token API imports, including multi-currency balances, activities, transfer details and payment receipts. Existing account identifiers are used to resolve counterparties; unavailable fees are not estimated. Explicitly registered own email addresses and recipient names from historical receipts also identify internal transfers, even when the receiving account is not yet known. Such transfers remain eligible for later matching; separately reported fees remain expenses. Direct debits are classified as transfers and treated as internal when the counterparty is a verified own account. Currency conversions are internal transfers, with both sides linked to the same conversion.
-- **Schwab:** direct Plaid investment imports. All cash deposits are treated as transfers between the user's own accounts.
+- **Schwab:** direct Plaid investment imports. All cash deposits and withdrawals are treated as transfers between the user's own accounts.
 - **Kraken / Ethereum:** completed-day transactions and asset valuations. Kraken supports BTC, ETH, USDT and BABY, including BABY staking rewards valued using the daily BABY/USD close. Crypto quantities use `decimal(30,18)`; unsupported precision fails. Matching internal transfers requires the same chain event and opposite asset quantities.
 - **Nexus:** monthly donation-point income through GraphQL.
 - **Google Drive:** read-only report transport restricted to the shared `Reports` folder.
@@ -47,6 +47,8 @@ Expected files:
 Imports require existing accounts and fixed starting checkpoints. They do not create accounts automatically.
 
 For new transfers involving Wise, Schwab, FirstTrade, IBKR, Kraken, Nexus, ZA or CICC, an explicit counterparty institution can resolve to its sole configured account when no account identifier matches. Transfers explicitly involving IBKR, Schwab or FirstTrade are treated as internal even when multiple brokerage accounts prevent identifying the specific account. Conflicting institution or account evidence fails; fees and unsplit amounts retain their existing treatment. Existing records are not reclassified automatically.
+
+Wise, iFAST, ZA, ICBC historical transfer details and PayPal receipts can also identify internal transfers from explicitly registered counterparty aliases, including aliases without a known receiving account. Only identified payer or recipient fields qualify; the account owner's details and arbitrary payment references do not. Fees remain expenses, and missing counterpart records remain unmatched. PayPal's receipt, funding and withdrawal reconciliation requirements still apply.
 
 ## Configuration
 
@@ -97,7 +99,7 @@ Firstrade uses different quote providers for balances and positions, so their va
 
 Scheduled imports run when more than one week has elapsed since the last successful import, covering that date through the present. Account history and CSV/OFX reports are reconciled together, using the same login session and keeping downloads in memory. Principal, commissions and fees are recorded separately. When recent sales are not yet included in the reports, SEC fees use the published rate and an assumed nearest-cent rounding rule; the resulting net amount must exactly match the reported transaction or the import fails. Incoming ACATS securities transfers require exactly one matching outgoing record from a source account, without restricting the source broker. Missing or ambiguous matches fail the import. The incoming transfer uses the outgoing value; the difference from current holdings valuation is recorded separately as a price change. Changes to transaction descriptions alone do not cause duplicate imports.
 
-All FirstTrade cash deposits are treated as transfers between the user's own accounts. Cash and securities movements between Cash and Margin are validated as complete offsetting pairs within the same import and do not create records; missing or inconsistent pairs fail the import. External securities transfers, lending income and fees remain separately recorded.
+All FirstTrade cash deposits and withdrawals are treated as transfers between the user's own accounts. Cash and securities movements between Cash and Margin are validated as complete offsetting pairs within the same import and do not create records; missing or inconsistent pairs fail the import. External securities transfers, lending income and fees remain separately recorded.
 
 ## Database
 

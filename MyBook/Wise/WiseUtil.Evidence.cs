@@ -27,21 +27,17 @@ internal sealed partial class WiseUtil
             value => database.FindAccountByInternalCardNo(value),
             texts => database.FindAccountByInternalCardNoText(null, "Wise API counterparty", false, texts),
             account => database.GetPostingAccount(account),
-            value => database.FindOwnTransferAlias(value));
+            value => database.ResolveTransferCounterparty(null, [value]));
         if (Text(data.Activity, "type") is not ("TRANSFER" or "BALANCE_DEPOSIT")) return match;
         // Historical beneficiary names are authoritative; do not scan references or intermediary banks.
         var names = new List<string> { Plain(Text(data.Activity, "title")) };
-        if (ParseAmount(Text(data.Activity, "primaryAmount")).Sign != "+" && data.Receipt?.Text is string receipt)
-        {
-            var lines = receipt.Split('\n').Select(line => line.Trim()).ToArray();
-            var start = System.Array.FindIndex(lines, line => line == "Sent to");
-            var end = start < 0 ? -1 : System.Array.FindIndex(lines, start + 1, line => line == "Account details");
-            if (start >= 0 && end > start) names.Add(String.Join(" ", lines[(start + 1)..end]));
-        }
+        if (ParseAmount(Text(data.Activity, "primaryAmount")).Sign != "+" && data.Receipt?.Text is string receipt
+            && ReceiptRecipientName(receipt, requireRecipientBoundary: true) is string name)
+            names.Add(name);
         var exact = match.AccountName is null ? null : database.GetAccountByName(match.AccountName);
-        var account = database.FindTransferAccountByInstitution(exact, names.ToArray());
-        return account is not null ? match with { Status = "Matched", AccountName = database.GetPostingAccount(account).name }
-            : DatabaseUtil.IsBrokerageInstitution(names.ToArray()) ? match with { Status = "InternalBrokerage" } : match;
+        var counterparty = database.ResolveTransferCounterparty(exact, [], names.ToArray());
+        return counterparty.Account is not null ? match with { Status = "Matched", AccountName = counterparty.Account.name }
+            : counterparty.IsInternal ? match with { Status = "InternalBrokerage" } : match;
     }
 
     internal static AccountMatch ResolveCounterparty(EventData data, Func<string, Account?> exact,

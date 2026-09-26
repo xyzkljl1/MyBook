@@ -307,6 +307,13 @@ partial class MailUtil
         else throw new MailParseException("Unsupported IFast statement transaction description.");
         record.DestAccount = description.Length > 200 ? description[..200] : description;
         record.Source = $"code={code}; {record.Source}";
-        ResolveIFastTransferAccount(record, description);
+        ResolveIFastTransferAccount(record, description, IFastStatementCounterpartyName(description));
+    }
+
+    internal static string? IFastStatementCounterpartyName(string description)
+    {
+        // 该转入格式的付款方位于固定前缀与 16 位支付编号之间；编号和 Ref 不是对方名称。
+        var match = Regex.Match(description, @"^Inbound domestic payment within UK (?<payer>.+?) \d{16}(?: |$)");
+        return match.Success ? match.Groups["payer"].Value.Trim() : null;
     }
 }

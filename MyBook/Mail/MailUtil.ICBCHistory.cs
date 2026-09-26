@@ -359,6 +359,10 @@ namespace MyBook
             if (IsICBCHistoryDetailSelfTransfer(row, cardAccount))
                 record.isInternal = true;
 
+            if (IsICBCHistoryTransferPrincipal(row.Summary))
+                DatabaseUtil.ApplyTransferCounterparty(record, database.ResolveTransferCounterparty(
+                    internalCounterparty, [row.CounterpartyName, row.CounterpartyAccount], row.CounterpartyName));
+
             return record;
         }
 
@@ -378,6 +382,13 @@ namespace MyBook
                 destAccount);
             if (internalCounterparty is not null && !IsSameAccount(database.GetPostingAccount(internalCounterparty), postingAccount))
                 destAccount = database.GetPostingAccount(internalCounterparty).name;
+
+            if (IsICBCHistoryTransferPrincipal(row.Summary))
+            {
+                var match = database.ResolveTransferCounterparty(internalCounterparty,
+                    [row.CounterpartyName, row.CounterpartyAccount], row.CounterpartyName);
+                if (match.Account is not null && !IsSameAccount(match.Account, postingAccount)) destAccount = match.Account.name;
+            }
 
             return new ICBCHistoryDetailCandidate(
                 index,
@@ -2024,6 +2035,9 @@ namespace MyBook
         {
             return ["中间业务后台方式", "快捷支付", "手机银行", "网上银行", "批量业务", "柜面", "其他"];
         }
+
+        internal static bool IsICBCHistoryTransferPrincipal(string summary) =>
+            summary is "网转" or "转账" or "转帐" or "单笔付款";
 
         private static string[] GetICBCHistoryCreditSummaries()
         {
