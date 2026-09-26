@@ -397,7 +397,7 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public bool incomingTransfersAreInternal { get; set; } = false;
 
-        // 仅用于 UI 统计分组，不影响余额、流水和导入逻辑。
+        // 用于 UI 统计分组；投资账户的现金转出本金按公共规则标记为内部转账。
         [SugarColumn(DefaultValue = "Life", ColumnDataType = MySqlEnumColumnTypes.AccountUsage, SqlParameterDbType = typeof(EnumToStringConvert))]
         public AccountUsage usage { get; set; } = AccountUsage.Life;
 

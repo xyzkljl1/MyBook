@@ -1124,8 +1124,9 @@ namespace MyBook
             {
                 var amount = ParseIBKRDecimalAt(row, 3, "deposit/withdrawal");
                 var label = row.Fields[2].StartsWith("内部转", StringComparison.Ordinal) ? "账户转账" : amount >= 0 ? "存款" : "取款";
-                // 普通入金由账户规则判断；保留出金和报表明确列出的内部账户转账标记。
-                Add(row, label, label == "存款" ? "转入" : label, label != "存款");
+                // 普通出入金由公共账户规则判断；报表明确列出的内部账户转账保留原标记。
+                var reason = label switch { "存款" => "转入", "取款" => "转出", _ => label };
+                Add(row, label, reason, label == "账户转账");
             }
             foreach (var (section, label, reason) in new[]
             {

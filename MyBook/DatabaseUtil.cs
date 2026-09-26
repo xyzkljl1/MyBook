@@ -815,7 +815,7 @@ namespace MyBook
                 : initializationRecords.Concat(beginningHoldingRestatementRecords).Concat(records).ToList();
             foreach (var record in recordsToSave)
                 if (record.Account is not null)
-                    ApplyIncomingTransferAccountRule(record, GetPostingAccount(record.Account));
+                    ApplyAccountTransferRules(record, GetPostingAccount(record.Account));
             SaveRecordsCore(recordsToSave, statementImportId);
             if (!hasExternalBalances)
                 ApplyRecordDeltasToHoldings(recordsToSave);
@@ -2556,13 +2556,15 @@ namespace MyBook
             record.Reason is "转入" or "转出" or "转账"
             && !(record.Source.StartsWith("WiseApi/", StringComparison.Ordinal) && record.Source.EndsWith("/gross", StringComparison.Ordinal));
 
-        internal static void ApplyIncomingTransferAccountRule(Record record, Account account)
+        internal static void ApplyAccountTransferRules(Record record, Account account)
         {
-            // 仅处理已明确分类的现金转入本金，不用正金额推断交易类型，也不虚构对方账户。
-            if (account.incomingTransfersAreInternal && record.v > 0
-                && record.Reason is "转入" or "转账" && IsTransferPrincipal(record)
-                && !record.isRefundMatched && !IsInitializationRecord(record) && !IsAcatsTransfer(record)
-                && record.HoldingQuantity == 0 && (record.Holding is null || record.Holding.holdingType == HoldingType.Cash))
+            // 仅处理已明确分类的现金转账本金，不用金额正负推断交易类型，也不虚构对方账户。
+            if (!IsTransferPrincipal(record) || record.isRefundMatched || IsInitializationRecord(record) || IsAcatsTransfer(record)
+                || record.HoldingQuantity != 0 || record.Holding is not null && record.Holding.holdingType != HoldingType.Cash)
+                return;
+            // 指定账户的入金和所有投资账户的出金均来自或流向本人其他账户。
+            if (account.incomingTransfersAreInternal && record.v > 0 && record.Reason is "转入" or "转账"
+                || account.usage == AccountUsage.Investment && record.v < 0 && record.Reason is "转出" or "转账")
                 record.isInternal = true;
         }
 

@@ -271,8 +271,7 @@ partial class PlaidUtil
                     ("fee", "account fee" or "management fee" or "transfer fee" or "miscellaneous fee") when tx.Amount > 0 => "手续费",
                     _ => throw SchwabRawError("unsupported investment transaction type/subtype")
                 };
-                // 不会向别人的账户出金；现金出金仍为内部转账，入金由账户规则判断。
-                Add(-tx.Amount, reason, source + "/cash", tx.TradeDate, tx.Date, reason == "转出", null, 0);
+                Add(-tx.Amount, reason, source + "/cash", tx.TradeDate, tx.Date, false, null, 0);
             }
             cash -= tx.Amount;
         }
