@@ -161,7 +161,8 @@ namespace MyBook
                 //         intervalDays: 7, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
                 if (plaid is not null)
                 {
-                    await RunImportTaskAsync("Plaid Schwab", () => true, () => plaid.FetchSchwabAsync()).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("Plaid Schwab", StatementImportProvider.PlaidSchwab,
+                        (since, _) => plaid.FetchSchwabAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
                 }
                 if (wise is not null && wise.IsConfigured)
                     await RunImportTaskAsync("Wise API", () => true, () => wise.FetchAsync()).ConfigureAwait(false);
@@ -172,15 +173,11 @@ namespace MyBook
                     await RunImportTaskAsync("PayPal", () => true,
                         () => new CombinedUtil(database, plaid, mail).FetchPayPalAsync()).ConfigureAwait(false);
                 if (kraken is not null)
-                    await RunImportTaskAsync(
-                        "Kraken",
-                        () => ShouldFetchProviderAfterDays("Kraken", StatementImportProvider.KrakenApi, 1),
-                        () => kraken.FetchDailyReportsAsync()).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("Kraken", StatementImportProvider.KrakenApi,
+                        (since, _) => kraken.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
                 if (crypto is not null)
-                    await RunImportTaskAsync(
-                        "Crypto ETH",
-                        () => ShouldFetchProviderAfterDays("Crypto ETH", StatementImportProvider.EthereumApi, 1),
-                        () => crypto.FetchDailyReportsAsync()).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("Crypto ETH", StatementImportProvider.EthereumApi,
+                        (since, _) => crypto.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
                 if (pubWeb is not null)
                     await RunImportTaskAsync("exchange rate", () => true, pubWeb.FetchExchangeRates).ConfigureAwait(false);
                 if (database is not null)
@@ -296,25 +293,6 @@ namespace MyBook
                     since => fetch(since, missingAfterDays),
                     !advanceOnEmptyQuery ? null : date => db.SaveStatementQueryProgress(provider, date));
             });
-        }
-
-        private bool ShouldFetchProviderAfterDays(string name, StatementImportProvider provider, int intervalDays)
-        {
-            if (intervalDays <= 0)
-                throw new ArgumentOutOfRangeException(nameof(intervalDays));
-            if (database is null)
-                return true;
-
-            var latestImportTime = database.GetLatestStatementImportTime(provider);
-            if (latestImportTime is null)
-                return true;
-
-            var elapsedDays = (DateTime.Today - latestImportTime.Value.Date).TotalDays;
-            if (elapsedDays >= intervalDays)
-                return true;
-
-            Console.WriteLine($"skip scheduled {name} fetch: last import {latestImportTime.Value:yyyy-MM-dd}, elapsed {elapsedDays:0} days");
-            return false;
         }
 
         private async Task RunImportTaskAsync(string name, Func<bool> shouldRun, Func<Task> fetch)

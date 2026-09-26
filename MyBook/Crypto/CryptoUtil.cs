@@ -20,9 +20,9 @@ namespace MyBook
 
         private string EtherscanApiKey => RequiredConfig(config, "etherscan_api_key");
 
-        public Task FetchDailyReportsAsync(CancellationToken cancellationToken = default)
+        public Task FetchDailyReportsAsync(DateTime since, CancellationToken cancellationToken = default)
         {
-            return FetchETHDailyReportsAsync(cancellationToken);
+            return FetchETHDailyReportsAsync(since, cancellationToken);
         }
 
         private static HttpClient CreateSharedHttpClient()

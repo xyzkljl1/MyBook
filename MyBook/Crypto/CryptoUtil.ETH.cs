@@ -22,25 +22,33 @@ namespace MyBook
         private const int UsdtDecimals = 6;
         private static readonly Regex AddressPattern = new("^0x[0-9a-fA-F]{40}$", RegexOptions.CultureInvariant);
 
-        private async Task FetchETHDailyReportsAsync(CancellationToken cancellationToken = default)
+        private async Task FetchETHDailyReportsAsync(DateTime since, CancellationToken cancellationToken)
         {
+            var queryTime = DateTimeOffset.Now;
             var accounts = database.GetAccountsByNamePrefix(AddressAccountPrefix);
+            var reportDate = database.GetLatestDailyStatementDate(StatementImportProvider.EthereumApi) ?? since.Date;
+            var firstDate = DateTime.SpecifyKind(reportDate.AddDays(1), DateTimeKind.Utc);
+            var lastCompletedDate = queryTime.UtcDateTime.Date.AddDays(-1);
+            if (accounts.Count == 0 || firstDate > lastCompletedDate)
+                return;
+            var prices = await krakenPub.FetchDailyUsdPricesAsync(
+                ["ETH", "USDT"], firstDate.AddDays(-1), lastCompletedDate, cancellationToken).ConfigureAwait(false);
+            var imports = new List<StatementRecordHoldingImport>();
             foreach (var account in accounts)
-                await FetchAccountDailyReportsAsync(account, cancellationToken).ConfigureAwait(false);
+                imports.AddRange(await FetchAccountDailyReportsAsync(account, firstDate, lastCompletedDate, queryTime.Date, prices,
+                    cancellationToken).ConfigureAwait(false));
+            cancellationToken.ThrowIfCancellationRequested();
+            // All addresses and days commit together; each day has one shared statement.
+            var saved = database.SaveStatementRecordsAndHoldingsOnce(imports.OrderBy(import => import.RecordDate),
+                CreateLatestPrices(prices, ["ETH", "USDT"], lastCompletedDate), combineAccounts: true);
+            Console.WriteLine($"Fetch Ethereum daily reports done: accounts={accounts.Count}; saved={saved.Count(value => value)}");
         }
 
-        private async Task FetchAccountDailyReportsAsync(Account account, CancellationToken cancellationToken)
+        private async Task<List<StatementRecordHoldingImport>> FetchAccountDailyReportsAsync(Account account,
+            DateTime firstDate, DateTime lastCompletedDate, DateTime queryDate, KrakenDailyPriceSet prices, CancellationToken cancellationToken)
         {
             var address = account.name[AddressAccountPrefix.Length..].ToLowerInvariant();
             ValidateEthereumAddressValue(address);
-            var checkpoint = database.GetLatestStatementImportTimeByKeyPrefix(StatementImportProvider.EthereumApi, address + ":")
-                ?? database.GetStatementImportCheckpointTime(StatementImportProvider.EthereumApi)
-                ?? throw new InvalidOperationException("Missing Ethereum statement import checkpoint.");
-            var firstDate = checkpoint.Date.AddDays(1);
-            var lastCompletedDate = DateTime.UtcNow.Date.AddDays(-1);
-            if (firstDate > lastCompletedDate)
-                return;
-
             var firstDateUtc = DateTime.SpecifyKind(firstDate, DateTimeKind.Utc);
             var quantities = GetImportedRawQuantities(account);
             var events = await FetchEventsAsync(address, firstDateUtc, cancellationToken).ConfigureAwait(false);
@@ -50,12 +58,6 @@ namespace MyBook
                 ["USDT"] = await FetchUsdtBalanceRawAsync(address, cancellationToken).ConfigureAwait(false)
             };
             ValidateCurrentQuantities(quantities, events, currentQuantities);
-            var prices = await krakenPub.FetchDailyUsdPricesAsync(
-                ["ETH", "USDT"],
-                firstDate.AddDays(-1),
-                lastCompletedDate,
-                cancellationToken).ConfigureAwait(false);
-
             var imports = new List<StatementRecordHoldingImport>();
             for (var date = firstDate; date <= lastCompletedDate; date = date.AddDays(1))
             {
@@ -80,8 +82,8 @@ namespace MyBook
                     "Ethereum");
                 imports.Add(new StatementRecordHoldingImport(
                     StatementImportProvider.EthereumApi,
-                    date,
-                    $"{address}:{date:yyyyMMdd}",
+                    queryDate,
+                    $"daily-{date:yyyyMMdd}",
                     account,
                     records,
                     endingHoldings,
@@ -95,10 +97,7 @@ namespace MyBook
             foreach (var item in events.Where(item => item.Time >= DateTime.SpecifyKind(lastCompletedDate.AddDays(1), DateTimeKind.Utc)))
                 completedQuantities[item.Asset] -= item.QuantityRaw;
             ValidateQuantities(quantities, completedQuantities, $"Ethereum completed balance {lastCompletedDate:yyyy-MM-dd}");
-            var saved = database.SaveStatementRecordsAndHoldingsOnce(
-                imports,
-                CreateLatestPrices(prices, ["ETH", "USDT"], lastCompletedDate));
-            Console.WriteLine($"Fetch Ethereum daily reports done: account={account.name}; events={events.Count}; saved={saved.Count(value => value)}");
+            return imports;
         }
 
         private static List<Record> CreateRecords(

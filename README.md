@@ -1,159 +1,172 @@
 # MyBook
 
-MyBook is a local personal finance and asset tracking application. It imports statements from banks, broker reports, mail attachments, local files, and selected web APIs, then stores records, balances, holdings, snapshots, and fixed bootstrap data in MySQL.
+MyBook 是一款本地个人财务与资产管理应用，可从银行账单、券商报表、邮件附件、本地文件及部分网络 API 导入数据，并在 MySQL 中保存交易记录、余额、持仓、快照和固定基础数据。
 
-The project has been developed with extensive vibe coding using OpenAI GPT-5 Codex, plus a small amount of manual editing.
+本项目主要借助 OpenAI GPT-5 Codex 进行自然语言驱动的开发，并包含少量手动修改。
 
-## Tech Stack
+## 技术栈
 
-- .NET 8 WPF desktop application
-- MySQL
+- .NET 8 WPF 桌面应用
+- MySQL 数据库
 - SqlSugar ORM
-- MailKit for mailbox access
-- System.IO.Ports for USB SIM modem access
-- PdfPig and HtmlAgilityPack for statement parsing
-- Newtonsoft.Json for JSON and GraphQL payloads
+- MailKit 邮箱访问
+- System.IO.Ports USB SIM 调制解调器访问
+- PdfPig 和 HtmlAgilityPack 账单解析
+- Newtonsoft.Json JSON 与 GraphQL 数据处理
 
-## Repository Layout
+## 仓库结构
 
-- `MyBook/` - WPF application source
-- `Database/bootstrap.sql` - tracked database schema used to rebuild an empty database
-- `Database/bootstrap.fixed-data.sql` - ignored local fixed-data export used with the schema for a full rebuild
-- `MyBook/config.json.example` - tracked configuration template with blank or zero values
+- `MyBook/`：WPF 应用源码。
+- `Database/bootstrap.sql`：纳入版本控制的数据库结构，用于重建空数据库。
+- `Database/bootstrap.fixed-data.sql`：不纳入版本控制的本地固定数据导出，与数据库结构文件配合完成重建。
+- `MyBook/config.json.example`：纳入版本控制的配置模板，示例值为空或零。
 
-Local statements, downloaded reports, `config.json`, database backups, and other private/runtime files are intentionally ignored.
+本地账单、下载的报表、`config.json`、数据库备份及其它私密或运行时文件均不纳入版本控制。
 
-## Local Initial Reports
+## 本地初始报表
 
-`initialReports/` is an ignored private directory for account history that predates normal recurring imports. When an IBKR account has no imported history, the importer first reads matching local files from this directory whose periods start after the provider checkpoint, validates that the initial statement starts from zero and that multi-part statements connect by balance, then continues with normal mailbox fetching. Reports ending at or before the checkpoint are skipped, while reports crossing it are rejected.
+`initialReports/` 是不纳入版本控制的私有目录，用于保存常规导入开始之前的账户历史。盈透账户尚无导入历史时，会先读取该目录中报表起点晚于固定导入起点的对应文件，验证初始报表从零余额开始，并验证多份报表之间的余额衔接，然后继续从邮箱获取报表。结束日期不晚于固定起点的报表会被跳过，跨越固定起点的报表会被拒绝。
 
-Expected files:
+支持的文件：
 
-- `IBKR_INITIAL_*.csv` - IBKR initial CSV reports.
+- `IBKR_INITIAL_*.csv`：盈透初始 CSV 报表。
 
-## Implemented Account Sources
+## 已支持的数据来源
 
-- **ICBC / BOC:** credit-card email statements and supported debit-card SMS. ICBC historical-detail imports are available on demand and scheduled when due. Historical-detail email searches begin after the fixed starting checkpoint, or at the requested search date if later; earlier transactions inside those emails retain their existing treatment. Debit-card history supports only the registered demand-deposit account; deposit certificates and investment accounts under the same card are not supported. These accounts have separate balances, and closing a deposit can transfer funds into the demand-deposit account. Every transaction must belong to the registered demand-deposit account, otherwise the statement is rejected. Overlapping debit-card statements are checked against existing bank transactions throughout the covered period, with separate validation of SMS adjustments and opening balances to prevent duplicate entries. Ignored statements and unreadable attachments are marked as processed and skipped on later imports. This includes statements entirely before the opening balance or only partly covering an unresolved SMS balance adjustment; other statements continue processing.
-- **IBKR:** daily CSV email reports and local initial reports, including transactions, holdings, dividends, interest, fees and valuation changes. Security purchases and sales retain individual trades, including purchases and sales that offset within the same day. Cash movements and balances retain their original currencies; deposits, withdrawals, interest, dividends and taxes retain individual statement entries. Accrued cash interest and stock lending income retain individual entries and settlement reversals; bond interest accruals still use the reported category valuation. Currency balances and base-currency totals are both checked. Incomplete or ambiguous trade details, unexplained interest accrual differences, and currency conversions without individual execution details, are rejected.
-- **iFAST:** one account with separate GBP, USD, EUR, HKD, SGD and RMB cash holdings, imported from transaction emails and local monthly statements. Transfers with verified own-account counterparties are treated as internal. Interest-rate update emails provide effective dates; official Gross/AER observations and notices are retained in `StatementImports.sourceDataJson`. New interest calculations use the Gross rate applicable to each day, starting with the first saved observation; existing interest is not recalculated. Missing or conflicting rates fail rather than using AER or backfilling today's rate. Months with nonzero balances before the baseline require actual statements. Monthly rounding and exact statement validation remain unchanged.
-- **ZA:** transaction emails imported on startup and daily, using the fixed starting point or the latest imported email time. Previously imported emails are skipped. Email notices do not provide a complete ledger or verified ending balance.
-- **Ant / Ele:** one configured account per bank, with Yahoo transaction emails imported on startup and daily into that account, retaining individual incoming transfers and payments. Ele refunds and card cancellations are unsupported and cause an import error. Email-only balances are inferred from recorded movements and are not verified bank balances.
-- **FirstTrade:** reconciled account balances, holdings and detailed transactions from account history and CSV/OFX reports. Automatic imports are temporarily paused; manual imports remain available.
-- **Wise:** daily read-only personal-token API imports, including multi-currency balances, activities, transfer details and payment receipts. Existing account identifiers are used to resolve counterparties; unavailable fees are not estimated. Explicitly registered own email addresses and recipient names from historical receipts also identify internal transfers, even when the receiving account is not yet known. Such transfers remain eligible for later matching; separately reported fees remain expenses. Direct debits are classified as transfers and treated as internal when the counterparty is a verified own account. Currency conversions are internal transfers, with both sides linked to the same conversion.
-- **Schwab:** direct Plaid investment imports. Cash deposits follow the account's incoming-transfer setting; cash withdrawals are treated as transfers between the user's own accounts.
-- **Kraken / Ethereum:** completed-day transactions and asset valuations. Kraken supports BTC, ETH, USDT and BABY, including BABY staking rewards valued using the daily BABY/USD close. Crypto quantities use `decimal(30,18)`; unsupported precision fails. Matching internal transfers requires the same chain event and opposite asset quantities.
-- **Nexus:** monthly donation-point income through GraphQL.
-- **Google Drive:** read-only report transport restricted to the shared `Reports` folder.
+- **工商银行 / 中国银行（ICBC / BOC）**：信用卡邮件账单及支持的借记卡短信。工行历史明细支持手动导入和到期自动查询。历史明细邮件从固定起点或上次成功查询日期开始搜索；手动指定更晚日期时使用指定日期。邮件中包含的更早交易仍按原有规则处理。借记卡历史明细只支持已登记的活期账户，不支持同一卡号下的存单或投资账户。这些账户的余额相互独立，定期存款销户可能将资金转入活期账户。明细中的每笔交易都必须属于已登记的活期账户，否则拒绝导入。与已有记录重叠的借记卡明细，会核对其覆盖期间的银行交易，并单独校验短信补偿和期初余额，避免重复入账。被忽略的明细和无法读取的附件会标记为已处理，后续导入跳过；完全早于期初余额的明细，以及仅部分覆盖尚未解决的短信余额补偿区间的明细，也会直接跳过，其它明细继续处理。
+- **盈透证券（IBKR）**：每日 CSV 邮件报表和本地初始报表，涵盖交易、持仓、股息、利息、费用与估值变动。证券买卖逐笔保留，同日互相抵消的买卖也不合并。现金流与余额保留原币种；存取款、利息、股息和税款均保留报表分项。应计现金利息与证券出借收入保留逐项明细及结算冲回；债券应计利息仍使用报表提供的分类估值。同时校验各币种余额和基础货币总额。成交明细不完整或存在歧义、应计利息差异无法解释、换汇缺少逐笔成交明细时，拒绝导入。
+- **iFAST**：一个账户分别持有 GBP、USD、EUR、HKD、SGD 和 RMB 现金，通过交易邮件和本地月度账单导入。已确认对方为本人账户的转账标记为内部交易。利率更新邮件提供生效日期，并保留官网 Gross/AER 利率及通知来源。新增利息从首次保存的利率观测开始，按每日适用的 Gross 利率计算，不重算既有利息。利率缺失或冲突时直接报错，不以 AER 替代，也不使用今日利率回填历史。在利率基准之前存在非零余额的月份，需要实际账单。月度取整和账单精确校验保持不变。
+- **众安银行（ZA）**：启动和每日导入轮次中，按查询间隔从固定起点或上次成功查询日期搜索交易邮件，跳过已导入邮件。邮件通知不能提供完整流水或经过银行确认的期末余额。
+- **香港蚂蚁银行 / 大象银行（Ant / Ele）**：每家银行仅配置一个账户，在启动和每日导入轮次中按查询间隔读取 Yahoo 交易邮件，逐笔保留收款与付款。大象银行退款和绑卡交易取消暂不支持，遇到时直接报错。仅凭邮件推算的余额不等同于银行确认的实际余额。
+- **第一证券（FirstTrade）**：联合账户历史交易及 CSV/OFX 报表核对余额、持仓和交易明细。自动导入暂时关闭，仍可手动导入。
+- **Wise**：每日通过只读个人令牌 API 导入多币种余额、活动、转账明细和付款回执。使用已登记的账户标识识别对方账户，不估算无法获取的费用。历史回执中明确登记的本人邮箱和收款人姓名，也可用于识别内部交易，即使暂时无法确定具体收款账户；这些交易仍可在之后匹配，单独列出的费用仍计为支出。直接扣款归类为转账；对方确认为本人账户时标记为内部交易。换汇标记为内部交易，两侧关联到同一笔换汇。
+- **嘉信理财（Schwab）**：直接通过 Plaid 导入投资数据。距上次保存的查询进度至少经过一个本地自然日后查询，起点为该进度日期前六天，且不早于固定起点，终点为当前 UTC 日期。不设置缺失报表期限；未保存报表的查询不推进进度。现金入金遵循账户的转入设置，现金出金视为本人账户间转账。
+- **Kraken / 以太坊（Ethereum）**：导入完整 UTC 日的交易与资产估值。距上次成功保存日报的查询日期至少经过一个自然日后查询。查询日期控制执行间隔；最后保存的报表日期决定下一次从哪个 UTC 日开始，直到最近一个完整 UTC 日。所有以太坊地址共用每日导入记录，但分别保留交易和持仓；全部地址及待导入日期都通过校验后，才整批保存。空查询不推进进度，不设置缺失报表期限。Kraken 支持 BTC、ETH、USDT 和 BABY，BABY 质押奖励按当日 BABY/USD 收盘价估值。加密资产数量最多保留 18 位小数，超出支持精度时报错。内部转账匹配要求同一链上事件及方向相反的资产数量。
+- **Nexus**：通过 GraphQL 获取每月 Donation Points 收入。
+- **Google Drive**：仅从共享的 `Reports` 文件夹只读获取报表。
 
-Imports require existing accounts and fixed starting checkpoints. They do not create accounts automatically.
+导入前必须已有对应账户和固定导入起点，导入流程不会自动创建账户。
 
-For new transfers involving Wise, Schwab, FirstTrade, IBKR, Kraken, Nexus, ZA or CICC, an explicit counterparty institution can resolve to its sole configured account when no account identifier matches. Transfers explicitly involving IBKR, Schwab or FirstTrade are treated as internal even when multiple brokerage accounts prevent identifying the specific account. Conflicting institution or account evidence fails; fees and unsplit amounts retain their existing treatment. Existing records are not reclassified automatically.
+涉及 Wise、嘉信、第一证券、盈透、Kraken、Nexus、众安或中金（CICC）的新增转账，如果没有匹配的账户标识，但明确提供了对方机构，可以在该机构只配置一个账户时确定对方账户。明确涉及盈透、嘉信或第一证券的转账，即使因配置了多个券商账户而无法确定具体账户，也标记为内部交易。机构或账户证据冲突时报错；费用与尚未区分本金、费用的金额仍按原规则处理。已有记录不会自动重新分类。
 
-Wise, iFAST, ZA, ICBC historical transfer details and PayPal receipts can also identify internal transfers from explicitly registered counterparty aliases, including aliases without a known receiving account. Only identified payer or recipient fields qualify; the account owner's details and arbitrary payment references do not. Fees remain expenses, and missing counterpart records remain unmatched. PayPal's receipt, funding and withdrawal reconciliation requirements still apply.
+Wise、iFAST、众安、工行历史转账明细和 PayPal 回执，还可通过明确登记的对方别名识别内部交易，包括尚未绑定具体收款账户的别名。只匹配明确的付款人或收款人字段，不使用我方账户信息或任意付款备注。手续费仍为支出，缺少对方记录的交易保持未匹配。PayPal 的收款、资金来源和提现核对要求仍然适用。
 
-An internal cash transfer that identifies a specific own account can also establish the counterpart transfer as internal when both sides match uniquely in that account, currency and opposite amount within 14 days, with no conflicting counterparty account. This does not apply to purchases, fees, refunds, opening balances or security transfers; ambiguous transfers remain unmatched.
+已标记为内部且指向具体本人账户的现金转账，如果在 14 天内能够按账户、币种和相反金额唯一匹配另一侧记录，且不存在对方账户冲突，也可将另一侧标记为内部转账。此规则不适用于消费、手续费、退款、期初余额或证券转账；存在歧义时保持未匹配。
 
-Accounts whose incoming transfers can only come from the user's other accounts can treat all imported incoming cash-transfer principal as internal, even when the sending account is unknown. This account-level setting is enabled for Ant, Ele, ZA, Schwab, FirstTrade and IBKR and is off by default. All accounts classified as investment accounts also treat outgoing cash-transfer principal as internal, regardless of the incoming-transfer setting. Purchases, refunds, interest, rewards and other non-transfer entries are excluded; identifying a specific counterpart and matching its record remain separate steps. Explicitly identified internal account or security transfers retain their internal treatment.
+如果某个账户的现金转入只能来自本人的其它账户，可以设置为将所有导入的现金转账本金标记为内部，即使尚不知道转出账户。该设置默认关闭，目前已为蚂蚁、大象、众安、嘉信、第一证券和盈透启用。所有投资账户的现金转出本金也标记为内部，不受转入设置影响。消费、退款、利息、奖励等非转账项目不适用；确定具体对方账户和匹配对方记录仍是独立步骤。已明确识别的内部账户转账或证券转账仍保留内部属性。
 
-## Configuration
+## 配置
 
-Create a local configuration file from the example and fill the values for the integrations you use:
+从示例创建本地配置文件，并填写需要使用的数据源配置：
 
 ```powershell
 Copy-Item MyBook\config.json.example MyBook\config.json
 ```
 
-`config.json` contains private credentials and is excluded from Git. Main settings:
+`config.json` 包含私密凭据，不纳入 Git。主要配置项：
 
-- `database_connection` - MySQL connection string. If empty, the app falls back to the built-in local default.
-- `yahoo_user` / `yahoo_pass`, `gmail_user` / `gmail_app_pwd` - statement-mail credentials.
-- `mail_proxy` - optional mailbox and FirstTrade proxy; `pubweb_proxy` - optional public market-data proxy. Leave empty for direct connections.
-- `alphavantage_key` - market-data key; `ib_gateway_port` - Interactive Brokers gateway port.
-- `nexus_api_key` - Nexus personal API key used by current imports.
-- `kraken_api_key` / `kraken_api_secret`, `etherscan_api_key` - read-only Kraken and Ethereum queries.
-- `sim_imsi` - expected SIM IMSI; leave empty to disable polling. `sim_poll_interval_minutes` defaults to 5 when unset or less than 1.
-- `GoogleCloudServeAccountKey` - Google service-account JSON key. Share the `Reports` folder with its `client_email` as Viewer; no Google Cloud/IAM roles are needed.
+- `database_connection`：MySQL 连接字符串，留空时使用内置本地默认连接。
+- `yahoo_user` / `yahoo_pass`、`gmail_user` / `gmail_app_pwd`：账单邮箱凭据。
+- `mail_proxy`：PayPal 邮件与第一证券的可选代理；其它模块读取邮件或附件时直连，不受系统代理影响。`pubweb_proxy`：公开行情数据的可选代理。代理配置留空时直连。
+- `alphavantage_key`：行情数据密钥；`ib_gateway_port`：盈透网关端口。
+- `nexus_api_key`：当前导入使用的 Nexus 个人 API 密钥。
+- `kraken_api_key` / `kraken_api_secret`、`etherscan_api_key`：Kraken 与以太坊只读查询凭据。
+- `sim_imsi`：预期的 SIM IMSI，留空时关闭短信轮询。`sim_poll_interval_minutes` 未设置或小于 1 时，默认使用 5 分钟。
+- `GoogleCloudServeAccountKey`：Google 服务账户 JSON 密钥。将 `Reports` 文件夹以查看者权限共享给其中的 `client_email` 即可，无需额外 Google Cloud/IAM 角色。
 
-### Plaid / Schwab
+### Plaid / 嘉信
 
-Set `plaid_client_id` and `plaid_production_secret`, then authorize from the build-output directory:
+设置 `plaid_client_id` 和 `plaid_production_secret`，然后在编译输出目录执行授权：
 
 ```powershell
 dotnet MyBook.dll --plaid-link --country US --product investments
 ```
 
-Production is the default. Sandbox requires changing the compile-time environment switch and using `plaid_sandbox_secret`. Authorizations are stored in the local database. If saving a new authorization fails, a plaintext `plaid-token-recovery-*.local.json` file is created beside the application for manual recovery; delete it after use.
+默认使用生产环境。使用沙箱需要切换编译时环境并设置 `plaid_sandbox_secret`。授权保存在本地数据库中。新授权保存失败时，会在应用目录生成明文 `plaid-token-recovery-*.local.json` 文件供手动恢复，使用后应删除。
 
-Before importing Schwab data, bind the Plaid connection to the corresponding local account. Each connection supports only one investment account. Missing or invalid bindings stop the import.
+导入嘉信数据前，必须将 Plaid 连接绑定到对应的本地账户。每个连接仅支持一个投资账户，绑定缺失或无效时停止导入。
 
 ### Wise
 
-Set `wise_api_token` to a personal API token. The API importer replaces Plaid Wise; the old importer is no longer compiled. The retained Plaid importer does not use Plaid's inferred personal finance categories; descriptions remain generic payments or receipts pending further detail. Switching existing Wise data requires cleanup before the first API import. Some details, including conversion fees, are unavailable through the API; recorded amounts are preserved without estimating missing fees.
+将 `wise_api_token` 设置为个人 API 令牌。当前 API 导入已替代 Plaid Wise，旧导入方式不再启用。保留的 Plaid 导入不使用 Plaid 推测的个人财务分类，缺少进一步明细时仅使用一般性的付款或收款描述。已有 Wise 数据切换至 API 导入前，需要先清理。部分信息（包括换汇手续费）无法通过 API 获取；保留实际金额，不估算缺失费用。
 
 ### PayPal
 
-PayPal combines each account's linked Plaid connection with its configured mailbox. Daily imports run after Wise and Nexus. Confirmed card-funded purchases are ignored; receipts, transfers, refunds and separately reported fees are reconciled without duplicating the same transaction from both sources. Identified withdrawals can be linked to existing bank records.
+PayPal 联合每个账户绑定的 Plaid 连接和已配置邮箱获取数据，每日导入排在 Wise 和 Nexus 之后。已确认由银行卡出资的消费直接忽略；收款、转账、退款和单独列出的手续费均进行核对，避免两种来源重复入账。已识别的提现可以关联已有银行记录。
 
-Imports retain source evidence and stop without changing financial records when history is incomplete, a match is ambiguous, or the detailed ledger disagrees with the reported balance. They do not infer missing funds or change the configured import starting point.
+导入保留来源证据。历史不完整、匹配存在歧义或明细与报告余额不一致时，停止导入且不修改财务记录。不会倒推缺失资金，也不会自行改变配置的导入起点。
 
-### FirstTrade
+### 第一证券
 
-Set `firsttrade_username`, `firsttrade_password` and `firsttrade_totp_secret` (the original Base32 authenticator key, not a six-digit code). The read-only integration references `MaxxRK/firstrade-api` and uses `mail_proxy` when configured. Sessions are stored in the database; raw financial responses are saved only with successful imports. Login failures and HTTP 403/429 are reported immediately without retries, cooldowns or saved request pauses. Only a data-request HTTP 401 triggers one automatic session renewal and request retry per import. These sensitive database contents are not DPAPI-encrypted. No session or response files are written, and old file-based sessions are not loaded.
+设置 `firsttrade_username`、`firsttrade_password` 和 `firsttrade_totp_secret`（验证器的原始 Base32 密钥，并非六位动态验证码）。只读接入参考 `MaxxRK/firstrade-api`，配置了 `mail_proxy` 时使用该代理。登录会话保存在数据库中，原始财务响应仅随成功导入保存。登录失败及 HTTP 403/429 直接报错，不重试、不等待冷却，也不保存暂停请求状态。仅数据请求返回 HTTP 401 时，每轮导入允许一次自动更新会话并重试请求。数据库中的这些敏感内容未使用 DPAPI 加密。不将会话或响应写入文件，也不读取旧的文件会话。
 
-Firstrade uses different quote providers for balances and positions, so their valuations may differ. The equity subtotal and account total checks allow an absolute difference below USD 100; differences of USD 100 or more fail. Holdings and records use detail values without residual adjustments; all other exact validations remain unchanged.
+第一证券的余额与持仓使用不同报价来源，因此估值可能不一致。证券小计和账户总额校验允许绝对差额小于 100 USD；差额达到或超过 100 USD 时失败。持仓与交易记录均使用明细值，不生成残差调整，其它精确校验保持不变。
 
-Scheduled imports are temporarily paused. When enabled, they become due seven calendar days after the last successful check, including checks with no new transactions. Each account is still queried from its last successful import date through the present. Account history and CSV/OFX reports are reconciled together, using the same login session and keeping downloads in memory. Principal, commissions and fees are recorded separately. When recent sales are not yet included in the reports, SEC fees use the published rate and an assumed nearest-cent rounding rule; the resulting net amount must exactly match the reported transaction or the import fails. Incoming ACATS securities transfers require exactly one matching outgoing record from a source account, without restricting the source broker. Missing or ambiguous matches fail the import. The incoming transfer uses the outgoing value; the difference from current holdings valuation is recorded separately as a price change. Changes to transaction descriptions alone do not cause duplicate imports.
+定时导入暂时关闭。启用后，距上次成功查询至少七个自然日时执行，即使上次没有新交易也计算间隔。各账户仍从上次成功导入日期查到当前时间。账户历史与 CSV/OFX 报表联合核对，复用同一登录会话，下载内容只保留在内存。本金、佣金和费用分别入账。近期卖出尚未进入报表时，SEC 费用按公开费率和假定的四舍五入到美分规则计算；计算所得净额必须与实际交易金额完全相同，否则报错。ACATS 证券转入必须唯一匹配到来源账户已有的转出记录，不限定来源券商；缺失或有多个候选时失败。转入沿用转出价值，与当前持仓估值的差额单独记录为价格变动。仅修改交易描述不会造成重复导入。
 
-All FirstTrade cash deposits and withdrawals are treated as transfers between the user's own accounts. Cash and securities movements between Cash and Margin are validated as complete offsetting pairs within the same import and do not create records; missing or inconsistent pairs fail the import. External securities transfers, lending income and fees remain separately recorded.
+第一证券全部现金入金和出金均视为本人账户间转账。Cash 与 Margin 子账户之间的现金和证券划转，必须在同批导入中找到完整、互相抵消的对应项；核对成功后不生成记录，缺失或不一致时报错。外部证券转账、出借收入和费用仍分别记录。
 
-## Database
+## 数据库
 
-The application validates its MySQL schema on startup. Accounts, registered account identifiers, Plaid Items, import checkpoints and Start snapshots are fixed data preserved by cleanup. Imported records, holdings, other snapshots and OAuth tokens are runtime data.
+应用启动时校验 MySQL 数据库结构。账户、已登记的账户标识、Plaid 连接、固定导入起点和起始快照属于固定数据，清理时保留。导入记录、持仓、其它快照和 OAuth 令牌属于运行数据。
 
-Rebuild an empty database from the tracked schema plus the local fixed-data file:
+使用纳入版本控制的结构文件及本地固定数据文件重建空数据库：
 
 ```powershell
 dotnet run --project MyBook\MyBook.csproj -- --rebuild-database-from-bootstrap-sql
 ```
 
-`Database/bootstrap.fixed-data.sql` contains private account metadata and unencrypted Plaid access tokens. It and its backups are excluded from Git and require secure storage.
-Automatic backup and manual export are local-debug extensions, not included in the repository. When present, they save schema/fixed-data files and versioned backup pairs in `Database` under the application directory; normal startup still runs automatic backup.
+`Database/bootstrap.fixed-data.sql` 包含私密账户信息及未加密的 Plaid 访问令牌。该文件及其备份不纳入 Git，应妥善保管。
 
-Create a start snapshot:
+自动备份与手动导出属于本地调试扩展，不包含在仓库中。安装这些扩展后，数据库结构、固定数据和成对的版本备份保存在应用目录下的 `Database` 中；正常启动时仍会执行自动备份。
+
+创建起始快照：
 
 ```powershell
 dotnet run --project MyBook\MyBook.csproj -- --create-start-snapshot
 ```
 
-## Build
+## 编译
 
 ```powershell
 dotnet build MyBook\MyBook.csproj -v minimal /p:UseSharedCompilation=false
 ```
 
-## Fetch Behavior
+## 导入与调度
 
-Release builds run an import cycle on startup and daily afterward; Debug builds do not schedule fetches. Configured modules run each cycle unless their import interval has not elapsed. IBKR checks for new reports when at least one day has elapsed since the last imported email; no new report after five days raises an error. ICBC/BOC monthly bills are checked once their latest imported email is at least 27 days old; Nexus reports are checked at least 27 days after the last query that imported a new report; a successful check with no new report raises an error after 40 days. IBKR, ICBC and BOC search from the last imported email day, including that day, and skip already imported reports by their identifiers. They process emails in date order, retaining each report's own financial dates. The first new statement email in a batch must be within the same deadline of the last imported email, or of the fixed starting checkpoint on the first import. Empty successful searches do not advance these modules' progress. Nexus retains the report month separately from its query date, so later checks continue with the next unimported month. Financial validations still apply. ICBC historical details are checked every 90 days after a successful check, even if it found no new data, searching emails from the last successful check day, including that day, or from the fixed starting checkpoint day on the first check. Previously processed statements are skipped. iFAST, ZA, Ant and Ele check daily and also advance their transaction-email search windows after empty successful checks. iFAST still updates interest rates, calculates interest and validates statements when there are no new transaction emails. These banks and ICBC historical details retain only their latest successful check and have no missing-data deadline. Failed checks do not restart the interval. Import intervals must be positive and become due on the specified day. A zero missing-data deadline disables only overdue errors, not network, parsing or financial validation errors.
+导入进度和调度统一使用运行机器所在时区的本地日期，来源时间戳先转换时区，再取日期。报表期间与实际交易日期保留原有财务含义，各数据源自行处理 UTC 日、美东日期等查询范围。因此，更换运行机器时区会改变按自然日调度的边界。
 
-SMS polling has its own configured interval. It verifies the SIM IMSI, combines complete long messages, and imports supported bank notifications. Unsupported bank formats fail visibly. Mail imports share IMAP sessions and download matching attachments.
+Release 版本在启动时及之后每日执行一轮导入；Debug 版本不执行定时导入。每轮会运行已配置且达到查询间隔的模块：
 
-Each cycle refreshes exchange rates and creates a snapshot. The UI shows the active task, last run and next run. Failures create `MyBook.import-failed.tmp` in the application directory; the clear-marker button removes the warning without retrying. Successful imports do not clear it automatically.
+- 盈透：距上次导入邮件至少一天时查询；超过五天仍未导入新报表时报错。
+- 工行和中行月账单：距上次导入邮件至少 27 天时查询；超过 40 天仍无新账单时报错。
+- Nexus：距上次成功导入新报表的查询日期至少 27 天时查询；超过 40 天仍无新报表时报错。报表月份与查询日期分别保留，后续从尚未导入的下一月份继续查询。
+- 工行历史明细：每次成功查询后间隔 90 天再次查询，即使没有新数据也推进查询日期。搜索包含上次成功查询当天；首次包含固定起点当天，跳过已处理的明细。
+- iFAST、众安、蚂蚁和大象：每日检查；空查询成功时也推进交易邮件的搜索范围。iFAST 在没有新交易邮件时，仍更新利率、计算利息并校验账单。这些银行和工行历史明细仅保留最新一次成功查询进度，不设置缺失报表期限。
+
+盈透、工行和中行从上次导入邮件日期开始搜索，包含当天，并按报表标识跳过已导入内容。邮件按时间顺序处理，各报表保留自身的财务日期。每批首封新账单邮件与上次导入邮件（首次为固定起点）的间隔，不得超过相应缺失期限。这几个模块空查询成功时不推进进度，原有财务校验仍然执行。
+
+失败的查询不会重新计算等待间隔。查询间隔必须大于零，达到指定天数时即可执行。缺失期限设为零仅关闭超期报错，不会关闭网络、解析或财务校验错误。
+
+短信按单独配置的间隔轮询，验证 SIM IMSI、拼接完整长短信，并导入支持的银行通知。不支持的银行短信格式会明确报错。邮件导入共用 IMAP 会话并下载匹配的附件。
+
+每轮还会更新汇率并生成快照。界面显示当前任务、上次运行和下次运行时间。失败时在应用目录生成 `MyBook.import-failed.tmp`；清除标记按钮仅移除警告，不会重试。后续成功导入不会自动清除该标记。
 
 ## Nexus OAuth
 
-Nexus API requests include the application headers required by the Nexus API Acceptable Use Policy:
+Nexus API 请求携带其可接受使用政策要求的应用信息：
 
 - `Application-Name: MyBook`
-- `Application-Version: <assembly version>`
+- `Application-Version: <程序集版本>`
 
-OAuth token storage uses the local database table `OAuthTokens`. Tokens are not stored in `config.json`.
-Nexus OAuth uses the PKCE public-client flow; token refresh sends `client_id` and `refresh_token` without `client_secret`.
-Nexus imports currently use `nexus_api_key`; stored OAuth tokens are not used by scheduled imports while OAuth is disabled.
+OAuth 令牌保存在本地数据库，不写入 `config.json`。授权采用 PKCE 公共客户端流程，刷新令牌时发送 `client_id` 和 `refresh_token`，不使用 `client_secret`。
 
-Authorize or refresh the local Nexus OAuth token:
+Nexus 导入目前使用 `nexus_api_key`；OAuth 关闭期间，定时导入不使用已保存的 OAuth 令牌。
+
+授权或刷新本地 Nexus OAuth 令牌：
 
 ```powershell
 dotnet run --project MyBook\MyBook.csproj -- --debug-authorize-nexus-oauth
 ```
 
-This opens the Nexus authorization page in the browser and listens for the callback on `http://127.0.0.1:4700/callback`. The command does not print the authorization URL or OAuth tokens.
+此命令在浏览器中打开 Nexus 授权页，并通过 `http://127.0.0.1:4700/callback` 接收回调，不打印授权地址或 OAuth 令牌。

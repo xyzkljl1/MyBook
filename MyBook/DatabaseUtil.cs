@@ -598,6 +598,12 @@ namespace MyBook
             return latestImport?.statementKey;
         }
 
+        public DateTime? GetLatestDailyStatementDate(StatementImportProvider provider)
+        {
+            var key = GetLatestStatementImport(provider)?.statementKey;
+            return key is null ? null : DateTime.ParseExact(key[^8..], "yyyyMMdd", CultureInfo.InvariantCulture);
+        }
+
         public bool SaveStatementRecordsOnce(
             StatementImportProvider provider,
             DateTime time,
@@ -699,9 +705,13 @@ namespace MyBook
 
         public List<bool> SaveStatementRecordsAndHoldingsOnce(
             IEnumerable<StatementRecordHoldingImport> imports,
-            IEnumerable<Finance>? finances = null)
+            IEnumerable<Finance>? finances = null,
+            bool combineAccounts = false)
         {
             var importList = imports.ToList();
+            var statements = combineAccounts
+                ? importList.GroupBy(import => (import.Provider, import.Time, import.StatementKey)).Select(group => group.ToList())
+                : importList.Select(import => new List<StatementRecordHoldingImport> { import });
             var financeList = finances?.ToList() ?? [];
             var saved = new List<bool>();
             return ExecuteLockedTransaction(() =>
@@ -712,31 +722,33 @@ namespace MyBook
                     .Distinct()
                     .ToDictionary(provider => provider, ShouldValidateBeginningAccountBalances);
 
-                foreach (var import in importList)
+                foreach (var statement in statements)
                 {
-                    var statementImportId = SaveStatementImportCore(
-                        import.Provider,
-                        import.Time,
-                        import.StatementKey,
-                        import.Records,
-                        import.AccountBalances,
-                        import.BeginningAccountBalances,
-                        import.ForceValidateBeginningBalances || shouldValidateBeginningBalances[import.Provider],
-                        import.HoldingAccount,
-                        import.Holdings,
-                        import.BeginningHoldings,
-                        import.InternalCardNos,
-                        recordDate: import.RecordDate,
-                        sourceDataJson: import.SourceDataJson);
-                    if (!statementImportId.HasValue)
+                    int? statementImportId = null;
+                    foreach (var import in statement)
                     {
-                        saved.Add(false);
-                        continue;
+                        statementImportId = SaveStatementImportCore(
+                            import.Provider,
+                            import.Time,
+                            import.StatementKey,
+                            import.Records,
+                            import.AccountBalances,
+                            import.BeginningAccountBalances,
+                            import.ForceValidateBeginningBalances || shouldValidateBeginningBalances[import.Provider],
+                            import.HoldingAccount,
+                            import.Holdings,
+                            import.BeginningHoldings,
+                            import.InternalCardNos,
+                            recordDate: import.RecordDate,
+                            sourceDataJson: import.SourceDataJson,
+                            sharedStatementImportId: statementImportId);
+                        if (!statementImportId.HasValue)
+                            break;
+                        shouldValidateBeginningBalances[import.Provider] = true;
                     }
-
-                    savedStatementImportIds.Add(statementImportId.Value);
-                    saved.Add(true);
-                    shouldValidateBeginningBalances[import.Provider] = true;
+                    if (statementImportId.HasValue)
+                        savedStatementImportIds.Add(statementImportId.Value);
+                    saved.Add(statementImportId.HasValue);
                 }
 
                 MatchBlockchainTransfersForStatements(savedStatementImportIds);
@@ -768,9 +780,10 @@ namespace MyBook
             bool preserveCurrentAccountBalances = false,
             DateTime? validateCurrentBalancesRolledBackTo = null,
             DateTime? recordDate = null,
-            string? sourceDataJson = null)
+            string? sourceDataJson = null,
+            int? sharedStatementImportId = null)
         {
-            if (IsStatementImported(provider, time, statementKey))
+            if (!sharedStatementImportId.HasValue && IsStatementImported(provider, time, statementKey))
                 return null;
             if (preserveCurrentAccountBalances && (holdingAccount is not null || holdings is not null))
                 throw new InvalidOperationException($"Preserving current account balances is not supported for holding imports: {provider}.");
@@ -808,13 +821,13 @@ namespace MyBook
 
             var initializationRecords = BuildInitializationRecords(
                 provider,
-                time,
+                recordDate ?? time,
                 statementKey,
                 records,
                 beginningAccountBalances,
                 holdingAccount,
                 beginningHoldings);
-            var statementImportId = InsertStatementImport(provider, time, statementKey, sourceDataJson);
+            var statementImportId = sharedStatementImportId ?? InsertStatementImport(provider, time, statementKey, sourceDataJson);
 
             if (holdingAccount is not null && holdings is not null)
             {
@@ -5602,7 +5615,8 @@ namespace MyBook
 
         public static DateTime NormalizeStatementImportTime(DateTime time)
         {
-            return time.Date;
+            // Unspecified values are already local calendar dates; convert UTC instants before truncating.
+            return (time.Kind == DateTimeKind.Utc ? time.ToLocalTime() : time).Date;
         }
 
         private static bool IsDuplicateKeyException(Exception exception)

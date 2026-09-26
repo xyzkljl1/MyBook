@@ -42,8 +42,12 @@ namespace MyBook
                 var capture = await client.FetchAsync(null, timeout.Token, account =>
                 {
                     database.GetAccountByTypeAndId("FIRSTTRADE", account);
-                    var last = imports.Where(i => i.statementKey.StartsWith(FirstTradeAccountKey(account), StringComparison.Ordinal))
-                        .Select(i => (DateTime?)i.time).Max();
+                    var prefix = FirstTradeAccountKey(account);
+                    // Keep the broker's Eastern query boundary separate from local scheduling dates.
+                    var last = imports.Where(i => i.statementKey.StartsWith(prefix, StringComparison.Ordinal))
+                        .Select(i => (DateTime?)TimeZoneInfo.ConvertTimeBySystemTimeZoneId(
+                            DateTimeOffset.FromUnixTimeMilliseconds(Int64.Parse(i.statementKey[prefix.Length..], CultureInfo.InvariantCulture)),
+                            "Eastern Standard Time").Date).Max();
                     return last.HasValue && last.Value.Date > checkpoint.Date
                         ? last.Value.Date : checkpoint.Date;
                 }).ConfigureAwait(false);
@@ -246,9 +250,10 @@ namespace MyBook
             }
             var beginningTotal = beginning.Sum(h => h.totalPrice.v);
             FirstTradeEqual(beginningTotal + records.Sum(r => r.v), endingTotal, "beginning value plus records");
-            return new StatementRecordHoldingImport(StatementImportProvider.FirstTradeApi, time, key, account, records, holdings,
+            return new StatementRecordHoldingImport(StatementImportProvider.FirstTradeApi, capture.CompletedAtUtc.LocalDateTime.Date, key, account, records, holdings,
                 [new AccountBalance(account, new Currency(endingTotal, CurrencyType.USD))],
                 [new AccountBalance(account, new Currency(beginningTotal, CurrencyType.USD))], beginning,
+                recordDate: time.Date,
                 sourceDataJson: JsonSerializer.Serialize(new FirstTradeCapture
                 {
                     Version = capture.Version, StartedAtUtc = capture.StartedAtUtc,

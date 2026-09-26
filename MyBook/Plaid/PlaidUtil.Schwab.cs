@@ -12,7 +12,7 @@ partial class PlaidUtil
     private const string SchwabRawPrefix = "PlaidSchwab/";
     private const StatementImportProvider SchwabRawProvider = StatementImportProvider.PlaidSchwab;
     private static readonly SemaphoreSlim schwabLock = new(1, 1);
-    public async Task FetchSchwabAsync(CancellationToken cancellationToken = default)
+    public async Task FetchSchwabAsync(DateTime since, CancellationToken cancellationToken = default)
     {
         if (!await schwabLock.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -20,6 +20,7 @@ partial class PlaidUtil
         var stage = "Item selection";
         try
         {
+            var queryTime = DateTimeOffset.Now;
             var item = await FindItemByInstitutionAsync(SchwabInstitutionId, deadline.Token).ConfigureAwait(false)
                 ?? throw SchwabRawError("no Schwab Item linked in the active environment");
             var db = database ?? throw SchwabRawError("database unavailable");
@@ -30,12 +31,13 @@ partial class PlaidUtil
             var history = db.GetStatementImports(SchwabRawProvider).Where(i => i.statementKey != "").OrderBy(i => i.Id)
                 .Select(i => JsonSerializer.Deserialize<SchwabRawReport>(i.sourceDataJson
                     ?? throw SchwabRawError("stored source metadata missing")) ?? throw SchwabRawError("invalid stored metadata")).ToList();
-            var since = history.Select(r => r.End.AddDays(-7)).Append(checkpoint.Date).Max();
-            var queryEnd = DateTime.UtcNow.Date;
+            var queryStart = since.Date.AddDays(-6);
+            if (queryStart < checkpoint.Date) queryStart = checkpoint.Date;
+            var queryEnd = queryTime.UtcDateTime.Date;
             stage = "investment retrieval";
-            var data = await GetInvestmentsAsync(item, since, queryEnd, deadline.Token).ConfigureAwait(false);
+            var data = await GetInvestmentsAsync(item, queryStart, queryEnd, deadline.Token).ConfigureAwait(false);
             stage = "financial reconciliation";
-            var reports = ParseSchwabInvestments(data, item.itemId, since, queryEnd);
+            var reports = ParseSchwabInvestments(data, item.itemId, queryStart, queryEnd);
             if (reports.Count != 1)
                 throw SchwabRawError("a linked Item must return exactly one investment account; no accounts were saved");
             var report = reports[0];
@@ -52,7 +54,7 @@ partial class PlaidUtil
                     _ => throw SchwabRawError("unsupported equity market")
                 } : throw SchwabRawError("missing or inconsistent equity market");
             }
-            var import = BuildSchwabRawImport(report, prior, account, beginning, report.AsOf.Date, Resolve);
+            var import = BuildSchwabRawImport(report, prior, account, beginning, queryTime.Date, Resolve);
             // A successful empty day must also advance the query boundary.
             var shouldSave = prior.Count == 0 || import.Records.Count != 0 || report.End > prior[^1].End;
             deadline.Token.ThrowIfCancellationRequested();

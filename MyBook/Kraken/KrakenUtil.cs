@@ -39,16 +39,14 @@ namespace MyBook
             this.krakenPub = krakenPub ?? new KrakenPubUtil();
         }
 
-        public async Task FetchDailyReportsAsync(CancellationToken cancellationToken = default)
+        public async Task FetchDailyReportsAsync(DateTime since, CancellationToken cancellationToken = default)
         {
+            var queryTime = DateTimeOffset.Now;
             var db = database ?? throw new InvalidOperationException("FetchDailyReportsAsync requires a database.");
             var account = db.GetAccountByName("KRAKEN");
-            var latestReportDate = db.GetLatestStatementImportTime(StatementImportProvider.KrakenApi);
-            if (!latestReportDate.HasValue)
-                throw new InvalidOperationException("Missing Kraken statement import checkpoint.");
-
-            var firstDate = latestReportDate.Value.Date.AddDays(1);
-            var lastCompletedUtcDate = DateTime.UtcNow.Date.AddDays(-1);
+            var latestReportDate = db.GetLatestDailyStatementDate(StatementImportProvider.KrakenApi) ?? since.Date;
+            var firstDate = latestReportDate.AddDays(1);
+            var lastCompletedUtcDate = queryTime.UtcDateTime.Date.AddDays(-1);
             if (firstDate > lastCompletedUtcDate)
             {
                 Console.WriteLine($"Fetch Kraken daily reports: no completed UTC day after {latestReportDate:yyyy-MM-dd}");
@@ -125,7 +123,7 @@ namespace MyBook
                 AddValuationRecords(records, account, date, previousQuantities, endingQuantities, prices);
                 imports.Add(new StatementRecordHoldingImport(
                         StatementImportProvider.KrakenApi,
-                        date,
+                        queryTime.Date,
                         $"daily-{date:yyyyMMdd}",
                         account,
                         records,
