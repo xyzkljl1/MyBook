@@ -34,75 +34,19 @@ namespace MyBook
             @"^\(?-?\d[\d,]*(?:\.\d+)?\)?$",
             RegexOptions.CultureInvariant);
 
-        public async Task FetchBOCBills()
+        public Task FetchBOCBills(int missingAfterDays = 0)
         {
-            await RunWithMailSessionScope(FetchBOCBillsBatch).ConfigureAwait(false);
+            return FetchStatementMails(BOCProvider, SearchBOCStatementMails, ImportBOCStatement, missingAfterDays);
         }
 
-        private async Task FetchBOCBillsBatch()
+        private Task<List<MailAttachmentMessage>> SearchBOCStatementMails(DateTime searchSince)
         {
-            var latestStatementMonth = GetLatestBOCStatementMonth();
-            var latestImportTime = database.GetLatestStatementImportTime(BOCProvider);
-            var searchSince = latestImportTime.HasValue
-                ? FirstDayOfMonth(latestImportTime.Value)
-                : new DateTime(2000, 1, 1);
-            var currentMonth = FirstDayOfMonth(DateTime.Today);
-            var messages = await SearchBOCStatementMails(searchSince).ConfigureAwait(false);
-            var messagesByMonth = messages
-                .Select(message => new
-                {
-                    Message = message,
-                    Month = ReadBOCStatementAttachmentMonth(message)
-                })
-                .Where(item => item.Month <= currentMonth)
-                .GroupBy(item => item.Month)
-                .OrderBy(group => group.Key)
-                .ToList();
-
-            var expectedMonth = latestStatementMonth?.AddMonths(1);
-            foreach (var group in messagesByMonth)
-            {
-                var statementMonth = group.Key;
-                if (latestStatementMonth.HasValue && statementMonth <= latestStatementMonth.Value)
-                    continue;
-                if (expectedMonth.HasValue && statementMonth > expectedMonth.Value && expectedMonth.Value < currentMonth)
-                    throw new InvalidOperationException($"Missing BOC statement for {expectedMonth.Value:yyyy-MM}");
-
-                var message = group
-                    .Select(item => item.Message)
-                    .OrderByDescending(GetMailDateTime)
-                    .ThenByDescending(item => item.UniqueId)
-                    .First();
-                ImportBOCStatement(statementMonth, message);
-                expectedMonth = statementMonth.AddMonths(1);
-            }
-
-            if (expectedMonth.HasValue && expectedMonth.Value < currentMonth)
-                throw new InvalidOperationException($"Missing BOC statement for {expectedMonth.Value:yyyy-MM}");
-        }
-
-        private DateTime? GetLatestBOCStatementMonth()
-        {
-            var latestKey = database.GetLatestStatementImportKey(BOCProvider);
-            if (String.IsNullOrWhiteSpace(latestKey))
-                return null;
-            if (!DateTime.TryParseExact(latestKey, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var statementDate))
-                throw new InvalidOperationException($"Invalid BOC statement key: {latestKey}");
-
-            return FirstDayOfMonth(statementDate);
-        }
-
-        private async Task<List<MailAttachmentMessage>> SearchBOCStatementMails(DateTime searchSince)
-        {
-            var query = SearchQuery.FromContains(BOCMailSender)
-                .And(SearchQuery.SubjectContains(BOCStatementSubject))
-                .And(SearchQuery.SentSince(searchSince.Date));
-            return await SearchAttachmentMessages(
+            return SearchAttachmentMessages(
                 $"BOC statement since {searchSince:yyyy-MM-dd}",
-                query,
-                IsBOCStatementSummary,
+                StatementMailQuery(BOCMailSender, BOCStatementSubject, searchSince),
+                summary => IsBOCStatementSummary(summary) && GetSummaryDateTime(summary) >= searchSince,
                 IsBOCStatementAttachmentFileName,
-                GetMailDateTime).ConfigureAwait(false);
+                GetMailDateTime);
         }
 
         private static bool IsBOCStatementSummary(IMessageSummary summary)
@@ -142,16 +86,14 @@ namespace MyBook
             return ParseBOCStatementAttachmentMonth(attachments[0].FileName);
         }
 
-        private void ImportBOCStatement(DateTime statementMonth, MailAttachmentMessage message)
+        private bool ImportBOCStatement(MailAttachmentMessage message, DateTime? firstMailDeadline)
         {
+            var statementMonth = ReadBOCStatementAttachmentMonth(message);
             var attachment = ReadBOCStatementAttachment(message);
             var accounts = GetBOCCreditCardAccounts();
             var parsed = ParseBOCStatement(statementMonth, GetMailDate(message), attachment.Content, accounts);
-            if (database.IsStatementKeyImported(BOCProvider, parsed.StatementKey))
-            {
-                Console.WriteLine($"Skip imported BOC statement {parsed.StatementKey}");
-                return;
-            }
+            if (!ShouldImportStatementMail(BOCProvider, parsed.StatementKey, GetMailDate(message), firstMailDeadline))
+                return false;
 
             var saved = database.SaveStatementRecordsOnce(
                 BOCProvider,
@@ -164,6 +106,7 @@ namespace MyBook
             Console.WriteLine(saved
                 ? $"Import BOC statement {parsed.StatementKey}, records={parsed.Records.Count}"
                 : $"Skip imported BOC statement {parsed.StatementKey}");
+            return saved;
         }
 
         private static BOCStatementAttachment ReadBOCStatementAttachment(MailAttachmentMessage message)

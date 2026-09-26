@@ -88,41 +88,36 @@ namespace MyBook
             return left.name == right.name;
         }
 
-        private DateTime GetNextMonthlyStatementDate(StatementImportProvider provider)
+        private async Task FetchStatementMails<T>(StatementImportProvider provider,
+            Func<DateTime, Task<List<T>>> search, Func<T, DateTime?, bool> import, int missingAfterDays)
         {
-            var latestKey = database.GetLatestStatementImportKey(provider);
-            if (DateTime.TryParseExact(latestKey, "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out var latestKeyDate))
-                return FirstDayOfMonth(latestKeyDate).AddMonths(1);
-
-            var latestTime = database.GetLatestStatementImportTime(provider);
-            if (latestTime is null)
-                throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
-
-            return FirstDayOfMonth(latestTime.Value).AddMonths(1);
-        }
-
-        private async Task FetchMonthlyStatements(
-            StatementImportProvider provider,
-            string displayName,
-            Func<DateTime, Task<bool>> fetchStatement)
-        {
+            var since = database.GetLatestStatementImportTime(provider)
+                ?? throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
             await RunWithMailSessionScope(async () =>
             {
-                var month = GetNextMonthlyStatementDate(provider);
-                var currentMonth = FirstDayOfMonth(DateTime.Today);
-                while (month <= currentMonth)
-                {
-                    var imported = await fetchStatement(month).ConfigureAwait(false);
-                    if (!imported)
-                    {
-                        if (DateTime.Today >= month.AddMonths(1))
-                            throw new InvalidOperationException($"Missing {displayName} for {month:yyyy-MM}");
-                        return;
-                    }
-
-                    month = month.AddMonths(1);
-                }
+                var messages = await search(since.Date).ConfigureAwait(false);
+                DateTime? firstMailDeadline = missingAfterDays > 0 ? since.Date.AddDays(missingAfterDays) : null;
+                foreach (var message in messages)
+                    if (import(message, firstMailDeadline))
+                        firstMailDeadline = null;
             }).ConfigureAwait(false);
+        }
+
+        private bool ShouldImportStatementMail(StatementImportProvider provider, string statementKey,
+            DateTime mailDate, DateTime? deadline)
+        {
+            if (database.IsStatementKeyImported(provider, statementKey))
+                return false;
+            if (deadline.HasValue && mailDate.Date > deadline.Value)
+                throw new InvalidOperationException($"First new statement mail {mailDate:yyyy-MM-dd} exceeds deadline {deadline:yyyy-MM-dd}.");
+            return true;
+        }
+
+        private static SearchQuery StatementMailQuery(string sender, string subject, DateTime since)
+        {
+            // IMAP dates have no timezone. Broaden discovery, then compare local mail dates.
+            return SearchQuery.FromContains(sender).And(SearchQuery.SubjectContains(subject))
+                .And(SearchQuery.SentSince(since.ToUniversalTime().AddHours(-14).Date));
         }
 
         private DateTime GetNextDailyStatementDate(StatementImportProvider provider)
@@ -164,12 +159,6 @@ namespace MyBook
                     directory = directory.Parent;
                 }
             }
-        }
-
-        private static (DateTime Since, DateTime Before) GetMonthRange(DateTime date)
-        {
-            var since = FirstDayOfMonth(date);
-            return (since, since.AddMonths(1));
         }
 
         private static DateTime GetMailDateTime(MimeMessage message)
@@ -349,66 +338,6 @@ namespace MyBook
             var cc = envelope.Cc?.Mailboxes ?? Enumerable.Empty<MailboxAddress>();
             return to.Concat(cc).Any(mailbox =>
                 String.Equals(mailbox.Address, recipient, StringComparison.OrdinalIgnoreCase));
-        }
-
-        private static bool SummarySubjectEquals(IMessageSummary summary, string subject)
-        {
-            var summarySubject = summary.Envelope?.Subject;
-            return summarySubject is null
-                || String.Equals(summarySubject.Trim(), subject, StringComparison.Ordinal);
-        }
-
-        private async Task<MimeMessage?> SearchBill(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
-        {
-            return (await SearchBills(sender, subject, date, messageFilter)).FirstOrDefault();
-        }
-
-        private async Task<List<MimeMessage>> SearchBills(string sender, string subject, DateTime date, Func<MimeMessage, bool>? messageFilter)
-        {
-            return await SearchBills(sender, subject, date, null, messageFilter).ConfigureAwait(false);
-        }
-
-        private async Task<List<MimeMessage>> SearchBills(
-            string sender,
-            string subject,
-            DateTime date,
-            Func<IMessageSummary, bool>? summaryFilter,
-            Func<MimeMessage, bool>? messageFilter)
-        {
-            var range = GetMonthRange(date);
-            var query = SearchQuery.FromContains(sender)
-                .And(SearchQuery.SubjectContains(subject))
-                .And(SearchQuery.SentSince(range.Since))
-                .And(SearchQuery.SentBefore(range.Before.AddSeconds(-1)));
-            var messages = await SearchMessages($"{subject} {date:yyyy-MM-dd}", query, summaryFilter, messageFilter);
-            if (messages.Count > 1)
-                Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
-
-            return messages;
-        }
-
-        private async Task<List<MailAttachmentMessage>> SearchBillAttachments(
-            string sender,
-            string subject,
-            DateTime date,
-            Func<IMessageSummary, bool>? summaryFilter,
-            Func<string, bool> attachmentFileNameFilter)
-        {
-            var range = GetMonthRange(date);
-            var query = SearchQuery.FromContains(sender)
-                .And(SearchQuery.SubjectContains(subject))
-                .And(SearchQuery.SentSince(range.Since))
-                .And(SearchQuery.SentBefore(range.Before.AddSeconds(-1)));
-            var messages = await SearchAttachmentMessages(
-                $"{subject} {date:yyyy-MM-dd}",
-                query,
-                summaryFilter,
-                attachmentFileNameFilter,
-                GetMailDateTime).ConfigureAwait(false);
-            if (messages.Count > 1)
-                Console.WriteLine($"Find multiple bills {sender} {subject} {date}");
-
-            return messages;
         }
 
         private async Task<List<MimeMessage>> SearchSupplementalStatementMails(

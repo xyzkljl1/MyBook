@@ -27,9 +27,6 @@ namespace MyBook
         readonly SemaphoreSlim simPollLock = new(1, 1);
         readonly object runtimeStatusLock = new();
         FetchRuntimeStatus runtimeStatus = new();
-        const int MonthlyFetchIntervalDays = 27;
-        const int ICBCHistoryDetailFetchIntervalDays = 90;
-        const int ICBCHistoryDetailSearchWindowMonths = 5;
         const int DefaultSIMPollIntervalMinutes = 5;
         const string ImportFailureMarkerFileName = "MyBook.import-failed.tmp";
         static readonly UTF8Encoding ImportFailureMarkerEncoding = new(false);
@@ -137,25 +134,32 @@ namespace MyBook
                 {
                     await RunImportTaskAsync(
                         "ICBC",
-                        () => ShouldFetchMonthlyProvider("ICBC", StatementImportProvider.ICBCBillMail),
-                        mail.FetchICBCBills).ConfigureAwait(false);
+                        () => true,
+                        () => FetchScheduledProviderAsync("ICBC", StatementImportProvider.ICBCBillMail,
+                            (_, limit) => mail.FetchICBCBills(limit), intervalDays: 27, missingAfterDays: 40)).ConfigureAwait(false);
                     await RunImportTaskAsync(
                         "BOC",
-                        () => ShouldFetchMonthlyProvider("BOC", StatementImportProvider.BOCBillMail),
-                        mail.FetchBOCBills).ConfigureAwait(false);
+                        () => true,
+                        () => FetchScheduledProviderAsync("BOC", StatementImportProvider.BOCBillMail,
+                            (_, limit) => mail.FetchBOCBills(limit), intervalDays: 27, missingAfterDays: 40)).ConfigureAwait(false);
                     await RunImportTaskAsync(
                         "ICBC history detail",
-                        () => ShouldFetchProviderAfterDays("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail, ICBCHistoryDetailFetchIntervalDays),
-                        FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
-                    await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
+                        () => true,
+                        () => FetchScheduledProviderAsync("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail,
+                            (since, _) => mail.FetchICBCHistoryDetails(since),
+                            intervalDays: 90, missingAfterDays: 0, advanceOnEmptyQuery: true)).ConfigureAwait(false);
+                    await RunImportTaskAsync("IBKR", () => true,
+                        () => FetchScheduledProviderAsync("IBKR", StatementImportProvider.IBKRReportMail,
+                            (_, limit) => mail.FetchIBKRReports(limit), intervalDays: 1, missingAfterDays: 5)).ConfigureAwait(false);
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
                     await RunImportTaskAsync("ZA", () => true, mail.FetchZAMessages).ConfigureAwait(false);
                     await RunImportTaskAsync("Ant", () => true, mail.FetchAntMessages).ConfigureAwait(false);
                     await RunImportTaskAsync("Ele", () => true, mail.FetchEleMessages).ConfigureAwait(false);
                 }).ConfigureAwait(false);
-                if (web is not null && web.IsFirstTradeConfigured)
-                    await RunImportTaskAsync("FirstTrade", ShouldFetchFirstTrade,
-                        () => web.FetchFirstTradeAsync()).ConfigureAwait(false);
+                // FirstTrade 定时导入暂时停用；恢复时启用以下调用。
+                // if (web is not null && web.IsFirstTradeConfigured)
+                //     await RunImportTaskAsync("FirstTrade", ShouldFetchFirstTrade,
+                //         () => web.FetchFirstTradeAsync()).ConfigureAwait(false);
                 if (plaid is not null)
                 {
                     await RunImportTaskAsync("Plaid Schwab", () => true, () => plaid.FetchSchwabAsync()).ConfigureAwait(false);
@@ -165,20 +169,21 @@ namespace MyBook
                 if (graphQL is not null)
                     await RunImportTaskAsync(
                         "Nexus DP",
-                        () => ShouldFetchMonthlyProvider("Nexus DP", StatementImportProvider.NexusDpMonthlyReport),
-                        graphQL.FetchNexusDpMonthlyReports).ConfigureAwait(false);
+                        () => true,
+                        () => FetchScheduledProviderAsync("Nexus DP", StatementImportProvider.NexusDpMonthlyReport,
+                            (_, _) => graphQL.FetchNexusDpMonthlyReports(), intervalDays: 27, missingAfterDays: 40)).ConfigureAwait(false);
                 if (plaid is not null && database is not null)
                     await RunImportTaskAsync("PayPal", () => true,
                         () => new CombinedUtil(database, plaid, mail).FetchPayPalAsync()).ConfigureAwait(false);
                 if (kraken is not null)
                     await RunImportTaskAsync(
                         "Kraken",
-                        () => ShouldFetchProviderAfterDays("Kraken", StatementImportProvider.KrakenApi, 0),
+                        () => ShouldFetchProviderAfterDays("Kraken", StatementImportProvider.KrakenApi, 1),
                         () => kraken.FetchDailyReportsAsync()).ConfigureAwait(false);
                 if (crypto is not null)
                     await RunImportTaskAsync(
                         "Crypto ETH",
-                        () => ShouldFetchProviderAfterDays("Crypto ETH", StatementImportProvider.EthereumApi, 0),
+                        () => ShouldFetchProviderAfterDays("Crypto ETH", StatementImportProvider.EthereumApi, 1),
                         () => crypto.FetchDailyReportsAsync()).ConfigureAwait(false);
                 if (pubWeb is not null)
                     await RunImportTaskAsync("exchange rate", () => true, pubWeb.FetchExchangeRates).ConfigureAwait(false);
@@ -281,9 +286,18 @@ namespace MyBook
             }
         }
 
-        private bool ShouldFetchMonthlyProvider(string name, StatementImportProvider provider)
+        private Task FetchScheduledProviderAsync(string name, StatementImportProvider provider,
+            Func<DateTime, int, Task> fetch, int intervalDays, int missingAfterDays = 0, bool advanceOnEmptyQuery = false)
         {
-            return ShouldFetchProviderAfterDays(name, provider, MonthlyFetchIntervalDays);
+            var db = database ?? throw new InvalidOperationException("Scheduled import requires a database.");
+            return ImportSchedule.RunAsync(name, intervalDays, missingAfterDays,
+                () => advanceOnEmptyQuery
+                    ? db.GetLatestStatementImportTimeByKeyPrefix(provider, ImportSchedule.SuccessfulQueryKeyPrefix)
+                        ?? db.GetStatementImportCheckpointTime(provider)
+                    : db.GetLatestStatementImportTime(provider),
+                since => fetch(since, missingAfterDays),
+                !advanceOnEmptyQuery ? null : date => db.MarkStatementProcessedOnce(
+                    provider, date, $"{ImportSchedule.SuccessfulQueryKeyPrefix}{date:yyyyMMdd}"));
         }
 
         private bool ShouldFetchFirstTrade()
@@ -300,6 +314,8 @@ namespace MyBook
 
         private bool ShouldFetchProviderAfterDays(string name, StatementImportProvider provider, int intervalDays)
         {
+            if (intervalDays <= 0)
+                throw new ArgumentOutOfRangeException(nameof(intervalDays));
             if (database is null)
                 return true;
 
@@ -308,24 +324,11 @@ namespace MyBook
                 return true;
 
             var elapsedDays = (DateTime.Today - latestImportTime.Value.Date).TotalDays;
-            if (elapsedDays > intervalDays)
+            if (elapsedDays >= intervalDays)
                 return true;
 
             Console.WriteLine($"skip scheduled {name} fetch: last import {latestImportTime.Value:yyyy-MM-dd}, elapsed {elapsedDays:0} days");
             return false;
-        }
-
-        private async Task FetchICBCHistoryDetailsScheduledAsync()
-        {
-            if (mail is null || database is null)
-                return;
-
-            var today = DateTime.Today;
-            await mail.FetchICBCHistoryDetails(today.AddMonths(-ICBCHistoryDetailSearchWindowMonths)).ConfigureAwait(false);
-            database.MarkStatementProcessedOnce(
-                StatementImportProvider.ICBCHistoryDetailMail,
-                today,
-                $"scheduled-empty-import-{today:yyyyMMdd}");
         }
 
         private async Task RunImportTaskAsync(string name, Func<bool> shouldRun, Func<Task> fetch)

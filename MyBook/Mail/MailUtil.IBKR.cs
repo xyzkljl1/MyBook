@@ -20,7 +20,6 @@ namespace MyBook
         private const string IBKRReportSubjectKeyword = "\u81ea\u5b9a\u4e49\u6d3b\u52a8\u62a5\u8868";
         private const string IBKRDailyReportType = "DailyMyBook";
         private const string IBKRInitialReportFilePrefix = "IBKR_INITIAL_";
-        private const int IBKRMissingReportLimitDays = 14;
         private const string IBKRStockYieldEnhancementLoanSection = "股票收益提升计划股证券出借活动";
         private const string IBKRStockYieldEnhancementLoanSectionWithoutActivity = "股票收益提升计划股证券出借";
         private const string IBKRStockYieldEnhancementCollateralHeldSection = "在IBKRSS持有的股票收益提升计划证券抵押品";
@@ -278,35 +277,39 @@ namespace MyBook
             return reader.ReadToEnd();
         }
 
-        public async Task FetchIBKRReports()
+        public Task FetchIBKRReports(int missingAfterDays = 0)
         {
-            await RunWithMailSessionScope(async () =>
-            {
-                var startDate = GetNextIBKRReportDate();
-                var endDate = DateTime.Today;
-                Console.WriteLine($"Fetch IBKR reports from {startDate:yyyy-MM-dd}");
-                var reportsByDate = await FetchIBKRReports(startDate, endDate).ConfigureAwait(false);
-                var missingDays = 0;
-                var date = startDate;
-                while (date <= endDate)
-                {
-                    Console.WriteLine($"Fetch IBKR report {date:yyyy-MM-dd}");
-                    if (reportsByDate.TryGetValue(date.Date, out var reports) && reports.Count > 0)
-                    {
-                        SaveIBKRParsedReports(reports);
-                        missingDays = 0;
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Find no IBKR {IBKRDailyReportType} report {date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture)}");
-                        missingDays++;
-                        if (missingDays >= IBKRMissingReportLimitDays)
-                            throw new InvalidOperationException($"Missing IBKR reports for {IBKRMissingReportLimitDays} consecutive days ending {date:yyyy-MM-dd}");
-                    }
+            return FetchStatementMails(IBKRProvider, SearchIBKRStatementMails, ImportIBKRStatementMail, missingAfterDays);
+        }
 
-                    date = date.AddDays(1);
-                }
-            }).ConfigureAwait(false);
+        private Task<List<MailAttachmentMessage>> SearchIBKRStatementMails(DateTime since)
+        {
+            return SearchAttachmentMessages(
+                $"IBKR statements since {since:yyyy-MM-dd}",
+                StatementMailQuery(IBKRReportSender, IBKRReportSubjectKeyword, since),
+                summary => SummaryIsFrom(summary, IBKRReportSender) && GetSummaryDateTime(summary) >= since
+                    && HasIBKRReportAttachment(summary, DateTime.MinValue, DateTime.MaxValue),
+                fileName => IsIBKRReportAttachment(fileName, DateTime.MinValue, DateTime.MaxValue),
+                GetMailDateTime);
+        }
+
+        private bool ImportIBKRStatementMail(MailAttachmentMessage message, DateTime? firstMailDeadline)
+        {
+            var attachments = ReadIBKRReportAttachments(message, DateTime.MinValue, DateTime.MaxValue);
+            if (attachments.Count == 0)
+                throw new MailParseException("Parse IBKR Report Fail, Missing Supported CSV Attachment");
+
+            var mailDate = GetMailDate(message);
+            var reports = new List<IBKRParsedReport>();
+            foreach (var attachment in attachments)
+            {
+                var csv = Encoding.UTF8.GetString(attachment.Content);
+                var report = ParseIBKRReportCsv(csv, attachment.ReportDate, attachment.FileName, mailDate);
+                if (ShouldImportStatementMail(IBKRProvider, report.StatementKey, mailDate, firstMailDeadline))
+                    reports.Add(report);
+            }
+            // All new attachments from one mail are validated and saved in one transaction.
+            return reports.Count > 0 && SaveIBKRParsedReports(reports).Any(saved => saved);
         }
 
         private DateTime GetNextIBKRReportDate()
@@ -339,56 +342,6 @@ namespace MyBook
             return latestDates.Min(date => date!.Value).AddDays(1);
         }
 
-        private async Task<Dictionary<DateTime, List<IBKRParsedReport>>> FetchIBKRReports(DateTime startDate, DateTime endDate)
-        {
-            if (endDate.Date < startDate.Date)
-                return [];
-
-            var messages = await SearchIBKRReportAttachments(startDate, endDate).ConfigureAwait(false);
-            if (messages.Count == 0)
-            {
-                Console.WriteLine($"Find no IBKR {IBKRDailyReportType} reports {startDate:yyyy-MM-dd}..{endDate:yyyy-MM-dd}");
-                return [];
-            }
-
-            var result = new Dictionary<DateTime, List<IBKRParsedReport>>();
-            foreach (var message in messages)
-            {
-                var reportAttachments = ReadIBKRReportAttachments(message, startDate, endDate);
-                if (reportAttachments.Count == 0)
-                {
-                    Console.WriteLine($"parse IBKR report mail fail: no supported csv attachment, subject={message.Subject}");
-                    throw new MailParseException($"Parse IBKR Report Fail, Missing Supported CSV Attachment: {message.Subject}");
-                }
-
-                var mailDate = GetMailDate(message);
-                foreach (var attachment in reportAttachments)
-                {
-                    Console.WriteLine($"Load IBKR csv report in memory: {attachment.FileName}, id={attachment.ReportId}, bytes={attachment.Content.Length}");
-                    var csv = Encoding.UTF8.GetString(attachment.Content);
-                    var report = ParseIBKRReportCsv(csv, attachment.ReportDate, attachment.FileName, mailDate);
-                    var reportDate = report.ReportDate.Date;
-                    if (!IsDateInRange(reportDate, startDate, endDate))
-                        throw new MailParseException($"Parse IBKR Report Fail, Date Out Of Range: {reportDate:yyyy-MM-dd}");
-
-                    if (!result.TryGetValue(reportDate, out var reports))
-                    {
-                        reports = [];
-                        result.Add(reportDate, reports);
-                    }
-
-                    reports.Add(report);
-                }
-            }
-
-            return result.ToDictionary(
-                item => item.Key,
-                item => item.Value
-                    .OrderBy(report => report.Account.name, StringComparer.Ordinal)
-                    .ThenBy(report => report.StatementKey, StringComparer.Ordinal)
-                    .ToList());
-        }
-
         private async Task<List<MailAttachmentMessage>> SearchIBKRReportAttachments(DateTime startDate, DateTime endDate)
         {
             var searchStart = FirstDayOfMonth(startDate);
@@ -396,7 +349,7 @@ namespace MyBook
             var query = SearchQuery.FromContains(IBKRReportSender)
                 .And(SearchQuery.SubjectContains(IBKRReportSubjectKeyword))
                 .And(SearchQuery.SentSince(searchStart))
-                .And(SearchQuery.SentBefore(searchBefore.AddSeconds(-1)));
+                .And(SearchQuery.SentBefore(searchBefore));
             return await SearchAttachmentMessages(
                 $"IBKR {startDate:yyyy-MM-dd}..{endDate:yyyy-MM-dd}",
                 query,
@@ -404,51 +357,6 @@ namespace MyBook
                     && HasIBKRReportAttachment(summary, startDate, endDate),
                 fileName => IsIBKRReportAttachment(fileName, startDate, endDate),
                 GetMailDateTime).ConfigureAwait(false);
-        }
-
-        private async Task<bool> FetchIBKRReport(DateTime date)
-        {
-            var subjectDate = date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
-            var expectedSubject = $"{subjectDate}的自定义活动报表";
-            var messages = await SearchBillAttachments(
-                IBKRReportSender,
-                expectedSubject,
-                date,
-                summary => SummarySubjectEquals(summary, expectedSubject)
-                    && SummaryIsFrom(summary, IBKRReportSender)
-                    && HasIBKRReportAttachment(summary, date),
-                fileName => IsIBKRReportAttachment(fileName, date));
-
-            if (messages.Count == 0)
-            {
-                Console.WriteLine($"Find no IBKR {IBKRDailyReportType} report {subjectDate}");
-                return false;
-            }
-
-            var reports = new List<IBKRParsedReport>();
-            foreach (var message in messages)
-            {
-                var reportAttachments = ReadIBKRReportAttachments(message, date);
-                if (reportAttachments.Count == 0)
-                {
-                    Console.WriteLine($"parse IBKR report mail fail: no supported csv attachment, subject={message.Subject}");
-                    throw new MailParseException($"Parse IBKR Report Fail, Missing Supported CSV Attachment: {message.Subject}");
-                }
-
-                var mailDate = GetMailDate(message);
-                foreach (var attachment in reportAttachments)
-                {
-                    if (attachment.ReportDate.Date != date.Date)
-                        throw new MailParseException($"Parse IBKR Report Fail, Date Mismatch: expected {date:yyyy-MM-dd}, got {attachment.ReportDate:yyyy-MM-dd}");
-
-                    Console.WriteLine($"Load IBKR csv report in memory: {attachment.FileName}, id={attachment.ReportId}, bytes={attachment.Content.Length}");
-                    var csv = Encoding.UTF8.GetString(attachment.Content);
-                    reports.Add(ParseIBKRReportCsv(csv, attachment.ReportDate, attachment.FileName, mailDate));
-                }
-            }
-
-            SaveIBKRParsedReports(reports);
-            return true;
         }
 
         private List<bool> SaveIBKRParsedReports(List<IBKRParsedReport> reports)
@@ -3970,27 +3878,6 @@ namespace MyBook
 
         private static List<InMemoryIBKRReportAttachment> ReadIBKRReportAttachments(
             MailAttachmentMessage message,
-            DateTime reportDate)
-        {
-            return ReadMatchingAttachments(message, (attachment, fileName) =>
-            {
-                if (!TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
-                    || !IsDailyMyBookReportType(attachmentInfo.ReportType)
-                    || attachmentInfo.ReportDate.Date != reportDate.Date
-                    || !IsIBKRCsvAttachment(fileName))
-                    return null;
-
-                return new InMemoryIBKRReportAttachment(
-                    fileName,
-                    attachmentInfo.ReportType,
-                    attachmentInfo.ReportId,
-                    attachmentInfo.ReportDate,
-                    attachment.Content);
-            });
-        }
-
-        private static List<InMemoryIBKRReportAttachment> ReadIBKRReportAttachments(
-            MailAttachmentMessage message,
             DateTime startDate,
             DateTime endDate)
         {
@@ -4011,25 +3898,12 @@ namespace MyBook
             });
         }
 
-        private static bool IsIBKRReportAttachment(string fileName, DateTime reportDate)
-        {
-            return TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
-                && IsDailyMyBookReportType(attachmentInfo.ReportType)
-                && attachmentInfo.ReportDate.Date == reportDate.Date
-                && IsIBKRCsvAttachment(fileName);
-        }
-
         private static bool IsIBKRReportAttachment(string fileName, DateTime startDate, DateTime endDate)
         {
             return TryParseIBKRReportAttachmentName(fileName, out var attachmentInfo)
                 && IsDailyMyBookReportType(attachmentInfo.ReportType)
                 && IsDateInRange(attachmentInfo.ReportDate, startDate, endDate)
                 && IsIBKRCsvAttachment(fileName);
-        }
-
-        private static bool HasIBKRReportAttachment(IMessageSummary summary, DateTime reportDate)
-        {
-            return SummaryHasMatchingAttachment(summary, fileName => IsIBKRReportAttachment(fileName, reportDate));
         }
 
         private static bool HasIBKRReportAttachment(IMessageSummary summary, DateTime startDate, DateTime endDate)

@@ -23,60 +23,51 @@ namespace MyBook
             return database.GetPostingAccount(GetICBCCardAccount(name));
         }
 
-        public async Task FetchICBCBills()
+        public Task FetchICBCBills(int missingAfterDays = 0)
         {
-            await FetchMonthlyStatements(ICBCProvider, "ICBC bill", FetchICBCBill);
+            return FetchStatementMails(ICBCProvider,
+                since => SearchMessages($"ICBC bill since {since:yyyy-MM-dd}",
+                    StatementMailQuery("webmaster@icbc.com.cn", "中国工商银行客户对账单", since),
+                    message => GetMailDateTime(message) >= since && IsICBCInlineBillMessage(message),
+                    GetMailDateTime),
+                ImportICBCBill, missingAfterDays);
         }
 
         // 工行对账单，按卡号区分用途。
-        public async Task<bool> FetchICBCBill(DateTime date)
+        private bool ImportICBCBill(MimeMessage message, DateTime? firstMailDeadline)
         {
-            var reportMonth = FirstDayOfMonth(date);
-            var message = await SearchBill("webmaster@icbc.com.cn", "中国工商银行客户对账单", reportMonth, IsICBCInlineBillMessage);
-            if (message is null)
-                return false;
-
             var billText = message.HtmlBody ?? message.TextBody ?? "";
             if (String.IsNullOrEmpty(billText))
-                return false;
+                throw new MailParseException("Parse ICBC Bill Fail, Empty Body");
 
             Records records = new();
-            try
-            {
-                var statementEndDate = ParseICBCStatementEndDate(billText);
-                var statementKey = statementEndDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-                if (database.IsStatementKeyImported(ICBCProvider, statementKey))
-                    return true;
+            var statementEndDate = ParseICBCStatementEndDate(billText);
+            var statementKey = statementEndDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            if (!ShouldImportStatementMail(ICBCProvider, statementKey, GetMailDate(message), firstMailDeadline))
+                return false;
 
-                var tables = FormUtil.ReadFromHTML(billText);
-                if (!IsICBCInlineBillTables(tables))
-                    throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
-                var beginningAccountBalances = ParseICBCAccountBalances(tables[1], 1);
-                var accountBalances = ParseICBCAccountBalances(tables[1], 4);
-                // 只从汇总表登记卡号；交易明细里的卡号只用于该交易本身，不能作为卡号来源。
-                var internalCardNos = ParseICBCInternalCardNos(tables[1]);
+            var tables = FormUtil.ReadFromHTML(billText);
+            if (!IsICBCInlineBillTables(tables))
+                throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
+            var beginningAccountBalances = ParseICBCAccountBalances(tables[1], 1);
+            var accountBalances = ParseICBCAccountBalances(tables[1], 4);
+            // 只从汇总表登记卡号；交易明细里的卡号只用于该交易本身，不能作为卡号来源。
+            var internalCardNos = ParseICBCInternalCardNos(tables[1]);
 
-                records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细。
-                records.AddRange(ParseICBCTransactionRecords(tables[3])); // 外币交易明细。
-                database.SaveStatementRecordsOnce(
-                    ICBCProvider,
-                    GetMailDate(message),
-                    records,
-                    accountBalances,
-                    statementKey,
-                    beginningAccountBalances,
-                    internalCardNos: internalCardNos,
-                    afterSaveInTransaction: statementImportId =>
-                    {
-                        OffsetMatchedICBCRefundRecords(statementImportId);
-                    });
-                return true;
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"parse mail fail :{e.Message}");
-                throw;
-            }
+            records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细。
+            records.AddRange(ParseICBCTransactionRecords(tables[3])); // 外币交易明细。
+            return database.SaveStatementRecordsOnce(
+                ICBCProvider,
+                GetMailDate(message),
+                records,
+                accountBalances,
+                statementKey,
+                beginningAccountBalances,
+                internalCardNos: internalCardNos,
+                afterSaveInTransaction: statementImportId =>
+                {
+                    OffsetMatchedICBCRefundRecords(statementImportId);
+                });
         }
 
         private static DateTime ParseICBCStatementEndDate(string billText)

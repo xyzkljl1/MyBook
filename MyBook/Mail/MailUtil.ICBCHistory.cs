@@ -38,17 +38,16 @@ namespace MyBook
 
         public async Task<int> FetchICBCHistoryDetails(DateTime since)
         {
-            since = GetICBCHistoryDetailSearchStart(since);
+            var searchSince = since.Date;
             return await RunWithMailSessionScope(async () =>
             {
-                var label = $"ICBC history detail since {since:yyyy-MM-dd}";
-                var query = SearchQuery.FromContains(ICBCHistoryDetailSender)
-                    .And(SearchQuery.SubjectContains(ICBCHistoryDetailSubjectKeyword))
-                    .And(SearchQuery.SentSince(since.Date));
+                var label = $"ICBC history detail since {searchSince:yyyy-MM-dd}";
+                var query = StatementMailQuery(ICBCHistoryDetailSender, ICBCHistoryDetailSubjectKeyword, searchSince);
                 var messages = await SearchAttachmentMessages(
                     label,
                     query,
                     summary => IsICBCHistoryDetailSummary(summary)
+                        && GetSummaryDateTime(summary) >= searchSince
                         && SummaryHasMatchingAttachment(summary, fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)),
                     fileName => fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase),
                     GetMailDateTime).ConfigureAwait(false);
@@ -78,14 +77,6 @@ namespace MyBook
                 Console.WriteLine($"Imported remote ICBC history detail statements: {importedCount}, skippedUnreadable={skippedUnreadableCount}");
                 return importedCount;
             }).ConfigureAwait(false);
-        }
-
-        private DateTime GetICBCHistoryDetailSearchStart(DateTime since)
-        {
-            var checkpoint = database.GetStatementImportCheckpointTime(ICBCHistoryDetailProvider)
-                ?? throw new InvalidOperationException("Missing ICBC history detail fixed import checkpoint.");
-            // 固定起点只限制邮件发送日期，不截断附件中的历史交易。
-            return MaxDate(since.Date, checkpoint.Date.AddDays(1));
         }
 
         private static List<ICBCHistoryDetailParsedStatement> OrderICBCHistoryDetailStatementsForImport(

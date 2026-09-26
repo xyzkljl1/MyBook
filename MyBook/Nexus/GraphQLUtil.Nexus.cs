@@ -1,4 +1,5 @@
 using Newtonsoft.Json.Linq;
+using System.Globalization;
 
 namespace MyBook
 {
@@ -7,7 +8,6 @@ namespace MyBook
     {
         private const StatementImportProvider NexusDpProvider = StatementImportProvider.NexusDpMonthlyReport;
         private const string DefaultNexusAccountName = "NEXUS";
-        private const int DefaultNexusMonthlyBackfillMonths = 6;
         private const decimal NexusDpPerUsd = 1000m;
 
         public async Task<int> FetchNexusAccountId()
@@ -55,7 +55,7 @@ namespace MyBook
             return Task.FromResult(new List<NexusDpTransaction>());
         }
 
-        public async Task<NexusDpMonthlyReport> FetchNexusDpMonthlyReport(int year, int month, int? accountId = null)
+        public async Task<NexusDpMonthlyReport?> FetchNexusDpMonthlyReport(int year, int month, int? accountId = null)
         {
             if (month is < 1 or > 12)
                 throw new ArgumentOutOfRangeException(nameof(month), "month must be in 1..12");
@@ -84,11 +84,15 @@ namespace MyBook
                 year,
                 month
             });
+            if (data["userMonthlyReport"]?.Type == JTokenType.Null)
+                return null;
             var report = data["userMonthlyReport"] as JObject
                 ?? throw new InvalidOperationException("Nexus userMonthlyReport response is missing");
-            var entries = report["entries"]?
+            var reportEntries = report["entries"] as JArray
+                ?? throw new InvalidOperationException("Nexus userMonthlyReport entries are missing");
+            var entries = reportEntries
                 .Select(token => ParseNexusDpMonthlyReportEntry(token, year, month))
-                .ToList() ?? [];
+                .ToList();
             return new NexusDpMonthlyReport(
                 resolvedAccountId,
                 report["userId"]?.Value<int>() ?? resolvedAccountId,
@@ -129,8 +133,10 @@ namespace MyBook
         {
             var db = database ?? throw new InvalidOperationException("FetchNexusDpMonthlyReports requires a database.");
             var account = db.GetAccountByName(GetNexusAccountName());
-            var firstMonth = GetFirstNexusMonthlyReportMonth(db);
-            var lastMonth = FirstDayOfMonth(DateTime.Today).AddMonths(-1);
+            var queryDate = DateTime.Today;
+            var firstMonth = GetFirstNexusMonthlyReportMonth(
+                db.GetLatestStatementImportKey(NexusDpProvider), db.GetStatementImportCheckpointTime(NexusDpProvider));
+            var lastMonth = FirstDayOfMonth(queryDate).AddMonths(-1);
             if (firstMonth > lastMonth)
                 return;
 
@@ -156,9 +162,8 @@ namespace MyBook
 
                 for (var month = firstMonth; month <= lastMonth; month = month.AddMonths(1))
                 {
-                    var statementDate = LastDayOfMonth(month);
                     var statementKey = BuildNexusDpStatementKey(account, month);
-                    if (db.IsStatementImported(NexusDpProvider, statementDate, statementKey))
+                    if (db.IsStatementKeyImported(NexusDpProvider, statementKey))
                     {
                         skippedCount++;
                         continue;
@@ -166,7 +171,7 @@ namespace MyBook
 
                     if (summaryDpByMonth.TryGetValue(month, out var totalDp))
                     {
-                        if (SaveNexusDpMonthlyReport(db, account, month.Year, month.Month, totalDp))
+                        if (SaveNexusDpMonthlyReport(db, account, month.Year, month.Month, totalDp, queryDate))
                             savedCount++;
                         else
                             skippedCount++;
@@ -183,16 +188,19 @@ namespace MyBook
                 : fallbackMonths;
             foreach (var month in monthlyReportMonths)
             {
-                var statementDate = LastDayOfMonth(month);
                 var statementKey = BuildNexusDpStatementKey(account, month);
-                if (db.IsStatementImported(NexusDpProvider, statementDate, statementKey))
+                if (db.IsStatementKeyImported(NexusDpProvider, statementKey))
                 {
                     skippedCount++;
                     continue;
                 }
 
                 var report = await FetchNexusDpMonthlyReport(month.Year, month.Month, accountId).ConfigureAwait(false);
-                if (SaveNexusDpMonthlyReport(db, account, report))
+                // An absent/empty unpublished report must not advance the successful-report date.
+                // An explicit zero-valued entry (including one in the summary) is still imported.
+                if (report is null || report.Entries.Count == 0)
+                    continue;
+                if (SaveNexusDpMonthlyReport(db, account, report.Year, report.Month, report.TotalDp, queryDate))
                     savedCount++;
                 else
                     skippedCount++;
@@ -201,12 +209,7 @@ namespace MyBook
             Console.WriteLine($"Fetch Nexus DP monthly reports done: saved={savedCount}, skipped={skippedCount}, summary={(summary is null ? "failed" : "used")}, monthlyReports={monthlyReportMonths.Count}");
         }
 
-        private bool SaveNexusDpMonthlyReport(DatabaseUtil db, Account account, NexusDpMonthlyReport report)
-        {
-            return SaveNexusDpMonthlyReport(db, account, report.Year, report.Month, report.TotalDp);
-        }
-
-        private bool SaveNexusDpMonthlyReport(DatabaseUtil db, Account account, int year, int month, int totalDp)
+        private bool SaveNexusDpMonthlyReport(DatabaseUtil db, Account account, int year, int month, int totalDp, DateTime queryDate)
         {
             var statementMonth = new DateTime(year, month, 1);
             var statementDate = LastDayOfMonth(statementMonth);
@@ -232,7 +235,7 @@ namespace MyBook
 
             return db.SaveStatementRecordsOnce(
                 NexusDpProvider,
-                statementDate,
+                queryDate,
                 records,
                 [new AccountBalance(account, endingBalance)],
                 statementKey,
@@ -246,14 +249,14 @@ namespace MyBook
                 : config["nexus_account_name"]!.Trim();
         }
 
-        private DateTime GetFirstNexusMonthlyReportMonth(DatabaseUtil db)
+        private static DateTime GetFirstNexusMonthlyReportMonth(string? latestStatementKey, DateTime? checkpoint)
         {
-            var latestImport = db.GetLatestStatementImportTime(NexusDpProvider);
-            if (latestImport.HasValue)
-                return FirstDayOfMonth(latestImport.Value).AddMonths(1);
-
-            var currentMonth = FirstDayOfMonth(DateTime.Today);
-            return currentMonth.AddMonths(-DefaultNexusMonthlyBackfillMonths);
+            // Query dates control scheduling; only the report month identifies the next report.
+            var reportDate = latestStatementKey is not null
+                ? DateTime.ParseExact(latestStatementKey[(latestStatementKey.LastIndexOf('_') + 1)..],
+                    "yyyy-MM", CultureInfo.InvariantCulture)
+                : checkpoint ?? throw new InvalidOperationException("Missing Nexus DP import checkpoint.");
+            return FirstDayOfMonth(reportDate).AddMonths(1);
         }
 
         private async Task<int> ResolveNexusAccountId(int? accountId)
