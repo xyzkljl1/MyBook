@@ -31,7 +31,8 @@ partial class MailUtil
                 SearchQuery.FromContains(ZASender).And(SearchQuery.SentSince(searchDate)),
                 summary => SummaryIsFrom(summary, ZASender) && GetSummaryDateTime(summary) >= since
                     && IsZATransactionSubject(summary.Envelope?.Subject ?? "")
-                    && !database.IsStatementKeyImported(ZAProvider, ZAMessageKey(summary.Envelope?.MessageId)),
+                    && (String.IsNullOrWhiteSpace(summary.Envelope?.MessageId)
+                        || !database.IsStatementKeyImported(ZAProvider, ZAMessageKey(summary.Envelope.MessageId))),
                 message => IsFrom(message, ZASender), GetMailDateTime).ConfigureAwait(false);
             foreach (var message in messages) ImportZAMessage(message);
         }).ConfigureAwait(false);
@@ -86,6 +87,8 @@ partial class MailUtil
         if (!IsZATransactionSubject(message.Subject)) throw new MailParseException("Not a ZA transaction notification.");
         var document = new HtmlDocument();
         document.LoadHtml(message.HtmlBody ?? "");
+        foreach (var node in document.DocumentNode.SelectNodes("//style|//script")?.ToList() ?? [])
+            node.Remove();
         var text = NormalizeMailText(WebUtility.HtmlDecode(message.TextBody ?? document.DocumentNode.InnerText));
         Match detail;
         string reason;
@@ -102,7 +105,7 @@ partial class MailUtil
         {
             detail = MatchZAMail(text, @"^完成一笔转出\s+你好.*?你已于\s+" + ZADatePattern
                 + @"\s+完成以下交易。\s+转出金额：\s*" + ZAMoneyPattern
-                + @"\s+收款人：(?<party>.+?)\s+交易类型：(?:转出|手机号转出)\s+你可到 ZA Bank App");
+                + @"\s+收款人：(?<party>.+?)\s+交易类型：(?:转出|手机号转出|Email转出)\s+你可到 ZA Bank App");
             reason = "转出";
         }
         else

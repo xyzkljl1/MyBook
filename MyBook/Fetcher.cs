@@ -149,6 +149,7 @@ namespace MyBook
                         FetchICBCHistoryDetailsScheduledAsync).ConfigureAwait(false);
                     await RunImportTaskAsync("IBKR", () => true, mail.FetchIBKRReports).ConfigureAwait(false);
                     await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
+                    await RunImportTaskAsync("ZA", () => true, mail.FetchZAMessages).ConfigureAwait(false);
                 }).ConfigureAwait(false);
                 if (web is not null && web.IsFirstTradeConfigured)
                     await RunImportTaskAsync("FirstTrade", ShouldFetchFirstTrade,
