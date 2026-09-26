@@ -12,6 +12,7 @@ CREATE TABLE `accounts` (
   `usage` enum('Life','Investment','Transit','Undetermined') NOT NULL DEFAULT 'Life',
   `_primaryAccount_Id` int DEFAULT NULL,
   `email` varchar(255) DEFAULT NULL,
+  `incomingTransfersAreInternal` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`Id`),
   UNIQUE KEY `unique_Accounts_name` (`name`),
   KEY `idx_Accounts_primaryAccount` (`_primaryAccount_Id`),

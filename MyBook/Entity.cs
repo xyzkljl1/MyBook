@@ -393,6 +393,10 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public bool isCredit { get; set; } = false; // 是否是信用卡账户。
 
+        // 本账户的外部转入本金只可能来自本人其他账户，不包括退款、利息或奖励。
+        [SugarColumn(DefaultValue = "0")]
+        public bool incomingTransfersAreInternal { get; set; } = false;
+
         // 仅用于 UI 统计分组，不影响余额、流水和导入逻辑。
         [SugarColumn(DefaultValue = "Life", ColumnDataType = MySqlEnumColumnTypes.AccountUsage, SqlParameterDbType = typeof(EnumToStringConvert))]
         public AccountUsage usage { get; set; } = AccountUsage.Life;

@@ -813,6 +813,9 @@ namespace MyBook
             var recordsToSave = initializationRecords.Count == 0
                 ? beginningHoldingRestatementRecords.Concat(records).ToList()
                 : initializationRecords.Concat(beginningHoldingRestatementRecords).Concat(records).ToList();
+            foreach (var record in recordsToSave)
+                if (record.Account is not null)
+                    ApplyIncomingTransferAccountRule(record, GetPostingAccount(record.Account));
             SaveRecordsCore(recordsToSave, statementImportId);
             if (!hasExternalBalances)
                 ApplyRecordDeltasToHoldings(recordsToSave);
@@ -2552,6 +2555,16 @@ namespace MyBook
         private static bool IsTransferPrincipal(Record record) =>
             record.Reason is "转入" or "转出" or "转账"
             && !(record.Source.StartsWith("WiseApi/", StringComparison.Ordinal) && record.Source.EndsWith("/gross", StringComparison.Ordinal));
+
+        internal static void ApplyIncomingTransferAccountRule(Record record, Account account)
+        {
+            // 仅处理已明确分类的现金转入本金，不用正金额推断交易类型，也不虚构对方账户。
+            if (account.incomingTransfersAreInternal && record.v > 0
+                && record.Reason is "转入" or "转账" && IsTransferPrincipal(record)
+                && !record.isRefundMatched && !IsInitializationRecord(record) && !IsAcatsTransfer(record)
+                && record.HoldingQuantity == 0 && (record.Holding is null || record.Holding.holdingType == HoldingType.Cash))
+                record.isInternal = true;
+        }
 
         public Account? FindAccountByInternalCardNoText(string? preferredAccountType, string? matchContext, bool logDetails, params string?[] texts)
         {

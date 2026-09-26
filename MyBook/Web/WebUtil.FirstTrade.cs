@@ -167,8 +167,8 @@ namespace MyBook
                 var postingDate = tx.SettlementDate ?? tx.Date;
                 string reason;
                 var trade = tx.Type is "BOUGHT" or "SOLD";
-                // 没有其他人会给我入金，也不会向别人的账户出金；所有现金入金和出金都是内部转账。
-                var isInternal = trade || tx.Type is "OTHER" or "DEPOSIT" or "WITHDRAWAL";
+                // 不会向别人的账户出金；现金出金仍为内部转账，入金由账户规则判断。
+                var isInternal = trade || tx.Type is "OTHER" or "WITHDRAWAL";
                 if (tx.Type == "OTHER" && tx.Quantity != 0)
                 {
                     var security = equities.GetValueOrDefault(tx.Symbol)
