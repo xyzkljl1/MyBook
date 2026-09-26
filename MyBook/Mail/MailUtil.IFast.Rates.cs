@@ -74,8 +74,11 @@ partial class MailUtil
 
     private Dictionary<CurrencyType, List<IFastScheduledRate>> ReadIFastRateSchedule()
     {
-        var imports = database.GetStatementImports(IFastProvider);
-        T Read<T>(StatementImport item) => JsonSerializer.Deserialize<T>(item.sourceDataJson
+        var imports = database.GetStatementImports(IFastProvider).Where(item =>
+            item.statementKey.StartsWith(IFastRateSnapshotPrefix, StringComparison.Ordinal)
+            || item.statementKey.StartsWith(IFastRateMailPrefix, StringComparison.Ordinal)).ToList();
+        var sources = database.GetStatementSources(imports.Select(item => item.Id));
+        T Read<T>(StatementImport item) => JsonSerializer.Deserialize<T>(sources.GetValueOrDefault(item.Id)
             ?? throw new InvalidOperationException("Missing IFast rate source data."), IFastRateJsonOptions)
             ?? throw new InvalidOperationException("Invalid IFast rate source data.");
         return BuildIFastRateSchedule(imports.Where(item => item.statementKey.StartsWith(IFastRateSnapshotPrefix, StringComparison.Ordinal))

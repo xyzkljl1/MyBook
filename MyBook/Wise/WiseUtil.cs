@@ -27,7 +27,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
     private static readonly Regex AmountPattern = new(@"^(?<sign>[+-]?)\s*(?<value>\d+(?:,\d{3})*(?:\.\d+)?) (?<currency>[A-Z]{3})$", RegexOptions.CultureInvariant);
     public bool IsConfigured => !String.IsNullOrWhiteSpace(config["wise_api_token"]);
 
-    public async Task FetchAsync(CancellationToken cancellationToken = default)
+    public async Task FetchAsync(DateTime since, CancellationToken cancellationToken = default)
     {
         if (!await importLock.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -41,7 +41,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
                 throw Error("a primary absolute-balance cash account is required");
             stage = "load previous import";
             var latest = database.GetLatestStatementImport(Provider);
-            var previous = latest is null ? null : JsonConvert.DeserializeObject<SyncState>(latest.sourceDataJson
+            var previous = latest is null ? null : JsonConvert.DeserializeObject<SyncState>(database.GetStatementSource(latest.Id)
                 ?? throw Error("stored metadata missing"), JsonSettings) ?? throw Error("invalid stored metadata");
             stage = "load current holdings";
             var beginning = database.GetCurrentAccountHoldings(account);
@@ -50,14 +50,13 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             if (previous is not null && (previous.Version != 2 || previous.AccountId != account.Id))
                 throw Error("stored account identity or metadata version changed");
             stage = "load fixed checkpoint";
-            var checkpoint = database.GetStatementImportCheckpointTime(Provider)
-                ?? database.GetStatementImportCheckpointTime(StatementImportProvider.WiseMail);
+            var checkpoint = database.GetStatementImportCheckpointTime(Provider);
             DateTimeOffset? start = checkpoint.HasValue ? new DateTimeOffset(checkpoint.Value) : null;
             if (previous is not null && previous.Start != start) throw Error("fixed checkpoint changed");
             var scanTime = DateTimeOffset.UtcNow;
             if (previous?.ScannedThrough > scanTime.AddMinutes(5)) throw Error("invalid stored scan time");
-            var since = previous?.ScannedThrough?.AddDays(-7) ?? start;
-            if (start.HasValue && since < start) since = start;
+            var queryStart = new DateTimeOffset(since.Date.AddDays(-6));
+            if (start.HasValue && queryStart < start.Value) queryStart = start.Value;
             var oldEvents = (previous?.Events ?? []).ToDictionary(e => EventKey(e.Activity), StringComparer.Ordinal);
 
             using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
@@ -122,7 +121,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
                 do
                 {
                     var query = "?size=100";
-                    if (since.HasValue) query += "&since=" + Uri.EscapeDataString(since.Value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
+                    query += "&since=" + Uri.EscapeDataString(queryStart.UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
                     if (cursor is not null) query += "&nextCursor=" + Uri.EscapeDataString(cursor);
                     var page = await Get($"/v1/profiles/{profile}/activities{query}", "/v1/profiles/{profile}/activities");
                     var rows = Array(page["activities"]);
@@ -141,7 +140,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             var activities = await Activities();
             var currentKeys = activities.Select(EventKey).ToHashSet(StringComparer.Ordinal);
             if (oldEvents.Values.Any(e => Text(e.Activity, "status") == "COMPLETED"
-                && (!since.HasValue || Stamp(Text(e.Activity, "createdOn")) > since.Value)
+                && Stamp(Text(e.Activity, "createdOn")) > queryStart
                 && !currentKeys.Contains(EventKey(e.Activity))))
                 throw Error("a previously completed activity disappeared; explicit reconciliation required");
             var events = new Dictionary<string, EventData>(oldEvents, StringComparer.Ordinal);
@@ -217,7 +216,6 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             var source = JsonConvert.SerializeObject(state);
             Console.WriteLine($"Wise API: scanned activities={activities.Count}, new records={records.Count}, currencies={ending.Count}");
             if (previous is not null && records.Count == 0 && previous.Balances.SequenceEqual(end)
-                && previous.ScannedThrough?.UtcDateTime.Date == scanTime.UtcDateTime.Date
                 && events.Count == oldEvents.Count && events.Values.All(e => oldEvents.TryGetValue(EventKey(e.Activity), out var old)
                     && Fingerprint(e.Activity) == Fingerprint(old.Activity))) return;
             stage = "atomic database write";

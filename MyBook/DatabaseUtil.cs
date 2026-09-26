@@ -27,7 +27,7 @@ namespace MyBook
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport), typeof(StatementImportSource)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -38,6 +38,7 @@ namespace MyBook
             new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
             new("fk_Records_holding", "Records", "_holding_Id", "Holdings", "Id"),
             new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id"),
+            new("fk_StatementImportSources_statementImport", "StatementImportSources", "_statementImport_Id", "StatementImports", "Id"),
             new("fk_Records_matchedRecord", "Records", "matchedRecordId", "Records", "Id"),
             new("fk_AllocatedExpenseItems_record", "AllocatedExpenseItems", "_record_Id", "Records", "Id"),
             new("fk_SnapshotItems_snapshot", "SnapshotItems", "_snapshot_Id", "Snapshots", "Id"),
@@ -2763,13 +2764,15 @@ namespace MyBook
 
         private int InsertStatementImport(StatementImportProvider provider, DateTime time, string statementKey, string? sourceDataJson = null)
         {
-            return db.Insertable(new StatementImport
+            var id = db.Insertable(new StatementImport
             {
                 provider = provider,
                 time = NormalizeStatementImportTime(time),
-                statementKey = statementKey,
-                sourceDataJson = sourceDataJson
+                statementKey = statementKey
             }).ExecuteReturnIdentity();
+            if (sourceDataJson is not null)
+                db.Insertable(new StatementImportSource { _statementImport_Id = id, sourceDataJson = sourceDataJson }).ExecuteCommand();
+            return id;
         }
 
         private void SaveRecordsCore(List<Record> recordList, int statementImportId)
@@ -5431,15 +5434,27 @@ namespace MyBook
                 .ToList();
         }
 
+        public string? GetStatementSource(int statementImportId)
+        {
+            return db.Queryable<StatementImportSource>()
+                .Where(source => source._statementImport_Id == statementImportId)
+                .Select(source => source.sourceDataJson).First();
+        }
+
+        public Dictionary<int, string> GetStatementSources(IEnumerable<int> statementImportIds)
+        {
+            var ids = statementImportIds.Distinct().ToArray();
+            return ids.Length == 0 ? [] : db.Queryable<StatementImportSource>()
+                .Where(source => ids.Contains(source._statementImport_Id)).ToList()
+                .ToDictionary(source => source._statementImport_Id, source => source.sourceDataJson);
+        }
+
         public StatementImport? GetLatestStatementImport(StatementImportProvider provider)
         {
-            // Sorting rows containing large source JSON can exhaust MySQL's sort buffer.
-            var id = db.Queryable<StatementImport>()
-                .Where(statementImport => statementImport.provider == provider && statementImport.statementKey != "")
-                .Max(statementImport => statementImport.Id);
-            return id == 0 ? null : db.Queryable<StatementImport>()
-                .Where(statementImport => statementImport.Id == id)
-                .First();
+            return db.Queryable<StatementImport>()
+                .Where(statementImport => statementImport.provider == provider && statementImport.statementKey != ""
+                    && statementImport.statementKey != ImportSchedule.SuccessfulQueryKey)
+                .OrderByDescending(statementImport => statementImport.Id).First();
         }
 
         public HashSet<string> GetRecordSourceCodes(string prefix)
@@ -5846,6 +5861,8 @@ namespace MyBook
                 return "SnapshotItems";
             if (type == typeof(StatementImport))
                 return "StatementImports";
+            if (type == typeof(StatementImportSource))
+                return "StatementImportSources";
             return type.Name;
         }
 

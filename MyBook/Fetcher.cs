@@ -165,13 +165,16 @@ namespace MyBook
                         (since, _) => plaid.FetchSchwabAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
                 }
                 if (wise is not null && wise.IsConfigured)
-                    await RunImportTaskAsync("Wise API", () => true, () => wise.FetchAsync()).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("Wise API", StatementImportProvider.WiseApi,
+                        (since, _) => wise.FetchAsync(since), intervalDays: 1, missingAfterDays: 0,
+                        advanceOnEmptyQuery: true).ConfigureAwait(false);
                 if (graphQL is not null)
                     await RunScheduledImportTaskAsync("Nexus DP", StatementImportProvider.NexusDpMonthlyReport,
                         (_, _) => graphQL.FetchNexusDpMonthlyReports(), intervalDays: 27, missingAfterDays: 40).ConfigureAwait(false);
                 if (plaid is not null && database is not null)
-                    await RunImportTaskAsync("PayPal", () => true,
-                        () => new CombinedUtil(database, plaid, mail).FetchPayPalAsync()).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("PayPal", StatementImportProvider.PayPalMail,
+                        (since, _) => new CombinedUtil(database, plaid, mail).FetchPayPalAsync(since),
+                        intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
                 if (kraken is not null)
                     await RunScheduledImportTaskAsync("Kraken", StatementImportProvider.KrakenApi,
                         (since, _) => kraken.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);

@@ -723,9 +723,17 @@ namespace MyBook
         [SugarColumn(DefaultValue = "''")]
         public string statementKey { get; set; } = "";
 
-        // Normalized source data for cumulative reports; saved atomically with their records.
-        [SugarColumn(IsNullable = true, ColumnDataType = "json")]
-        public string? sourceDataJson { get; set; }
+    }
+
+    [SugarTable("StatementImportSources")]
+    public class StatementImportSource
+    {
+        [SugarColumn(IsPrimaryKey = true)]
+        public int _statementImport_Id { get; set; }
+
+        // Loaded explicitly and saved in the same transaction as the import and its records.
+        [SugarColumn(ColumnDataType = "json")]
+        public string sourceDataJson { get; set; } = null!;
     }
 
     //币种

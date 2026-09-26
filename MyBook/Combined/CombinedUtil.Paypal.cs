@@ -160,7 +160,7 @@ partial class CombinedUtil
         return new(value, Enum.Parse<CurrencyType>(currency == "CNY" ? "RMB" : currency));
     }
 
-    public async Task FetchPayPalAsync(CancellationToken cancellationToken = default)
+    public async Task FetchPayPalAsync(DateTime since, CancellationToken cancellationToken = default)
     {
         if (!await payPalLock.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -179,7 +179,8 @@ partial class CombinedUtil
             var checkpoint = database.GetStatementImportCheckpointTime(StatementImportProvider.PayPalMail)
                 ?? throw PayPalError("fixed import checkpoint is missing");
             var previousImport = database.GetLatestStatementImport(StatementImportProvider.PayPalMail);
-            var previous = previousImport is null ? new PayPalState() : JsonConvert.DeserializeObject<PayPalState>(previousImport.sourceDataJson
+            var previousJson = previousImport is null ? null : database.GetStatementSource(previousImport.Id);
+            var previous = previousImport is null ? new PayPalState() : JsonConvert.DeserializeObject<PayPalState>(previousJson
                 ?? throw PayPalError("previous source state is missing"), PayPalJsonSettings) ?? throw PayPalError("invalid source state");
             if (previous.Version != 1) throw PayPalError("unsupported source state version");
             if (previous.Items.Any(old => !items.Any(i => i.Id == old.ItemRowId && i._account_Id == old.AccountId)))
@@ -191,24 +192,20 @@ partial class CombinedUtil
                 var data = await plaid.ReadPayPalAsync(item, old?.Cursor, timeout.Token).ConfigureAwait(false);
                 state.Items.Add(MergePayPalSync(item.Id, item._account_Id!.Value, old, data));
             }
-            var messages = await mail.ReadPayPalMailsAsync(accounts, checkpoint, timeout.Token).ConfigureAwait(false);
+            var messages = await mail.ReadPayPalMailsAsync(accounts, since, timeout.Token).ConfigureAwait(false);
             state.Mails = previous.Mails.Concat(messages).GroupBy(m => (m.AccountId, m.MessageId))
                 .Select(g => g.Last()).OrderBy(m => m.AccountId).ThenBy(m => m.Date).ThenBy(m => m.MessageId, StringComparer.Ordinal).ToList();
             var plan = BuildPayPalPlan(state, database, checkpoint);
-            state.Problems = plan.Problems;
-            if (plan.Problems.Count == 0)
-            {
-                state.Applied = plan.Applied;
-                state.BankMatches = plan.Pairs.Where(p => p.BankRecordId.HasValue)
-                    .ToDictionary(p => p.LeftSource, p => p.BankRecordId!.Value, StringComparer.Ordinal);
-            }
+            if (plan.Problems.Count != 0)
+                throw PayPalError($"source reconciliation failed ({plan.Problems.Count}); nothing saved; " + String.Join("; ", plan.Problems.Take(8)));
+            state.Applied = plan.Applied;
+            state.BankMatches = plan.Pairs.Where(p => p.BankRecordId.HasValue)
+                .ToDictionary(p => p.LeftSource, p => p.BankRecordId!.Value, StringComparer.Ordinal);
             var json = JsonConvert.SerializeObject(state);
-            var key = previousImport?.sourceDataJson == json ? previousImport.statementKey
+            var key = previousJson == json ? previousImport!.statementKey
                 : PayPalPrefix + PayPalHash((previousImport?.statementKey ?? "") + json);
             timeout.Token.ThrowIfCancellationRequested();
             database.SavePayPalCombined(previousImport?.statementKey, key, json, plan);
-            if (plan.Problems.Count != 0)
-                throw PayPalError($"source reconciliation failed ({plan.Problems.Count}); financial records unchanged; " + String.Join("; ", plan.Problems.Take(8)));
         }
         catch (Exception e) when (e is not MailParseException and not PlaidUtil.PlaidRequestException)
         { throw PayPalError($"import failed: {e.GetType().Name}"); }

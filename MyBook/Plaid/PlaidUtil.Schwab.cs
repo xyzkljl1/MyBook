@@ -28,8 +28,9 @@ partial class PlaidUtil
             var account = GetLinkedAccount(item, "SCHWAB");
             var checkpoint = db.GetStatementImportCheckpointTime(SchwabRawProvider)
                 ?? throw SchwabRawError("missing fixed import checkpoint");
-            var history = db.GetStatementImports(SchwabRawProvider).Where(i => i.statementKey != "").OrderBy(i => i.Id)
-                .Select(i => JsonSerializer.Deserialize<SchwabRawReport>(i.sourceDataJson
+            var imports = db.GetStatementImports(SchwabRawProvider).Where(i => i.statementKey != "").OrderBy(i => i.Id).ToList();
+            var sources = db.GetStatementSources(imports.Select(i => i.Id));
+            var history = imports.Select(i => JsonSerializer.Deserialize<SchwabRawReport>(sources.GetValueOrDefault(i.Id)
                     ?? throw SchwabRawError("stored source metadata missing")) ?? throw SchwabRawError("invalid stored metadata")).ToList();
             var queryStart = since.Date.AddDays(-6);
             if (queryStart < checkpoint.Date) queryStart = checkpoint.Date;

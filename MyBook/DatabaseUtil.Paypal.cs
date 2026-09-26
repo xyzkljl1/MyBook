@@ -15,30 +15,25 @@ partial class DatabaseUtil
                 if (!db.Queryable<PlaidItem>().Any(i => i.Id == expected.Key && i._account_Id == expected.Value
                     && i.institutionId == PlaidUtil.PayPalInstitutionId))
                     throw new InvalidOperationException("PayPal Item/account binding changed during retrieval; retry required.");
-            var records = plan.Problems.Count == 0 ? plan.Records : [];
-            var supplements = plan.Problems.Count == 0 ? plan.Supplements : [];
-            if (plan.Problems.Count == 0)
+            foreach (var expected in plan.ExpectedBankRecords)
             {
-                foreach (var expected in plan.ExpectedBankRecords)
-                {
-                    var record = db.Queryable<Record>().First(r => r.Id == expected.Key);
-                    if (record is null || CombinedUtil.PayPalBankRecordFingerprint(record) != expected.Value)
-                        throw new InvalidOperationException("PayPal bank counterpart changed during retrieval; retry required.");
-                }
-                foreach (var expected in plan.ExpectedBalances)
-                {
-                    var account = db.Queryable<Account>().First(a => a.Id == expected.Key.AccountId);
-                    if (account is null || GetAccountBalance(account, expected.Key.Currency).v != expected.Value)
-                        throw new InvalidOperationException("PayPal balance changed during retrieval; retry required.");
-                }
+                var record = db.Queryable<Record>().First(r => r.Id == expected.Key);
+                if (record is null || CombinedUtil.PayPalBankRecordFingerprint(record) != expected.Value)
+                    throw new InvalidOperationException("PayPal bank counterpart changed during retrieval; retry required.");
             }
-            foreach (var record in records)
+            foreach (var expected in plan.ExpectedBalances)
+            {
+                var account = db.Queryable<Account>().First(a => a.Id == expected.Key.AccountId);
+                if (account is null || GetAccountBalance(account, expected.Key.Currency).v != expected.Value)
+                    throw new InvalidOperationException("PayPal balance changed during retrieval; retry required.");
+            }
+            foreach (var record in plan.Records)
                 if (db.Queryable<Record>().Any(r => r.Source == record.Source))
                     throw new InvalidOperationException("PayPal record already exists without matching source state.");
             var statementId = SaveStatementImportCore(StatementImportProvider.PayPalMail, DateTime.Today, key,
-                records, [], [], false, sourceDataJson: sourceDataJson,
-                afterSaveInTransaction: _ => AppendRecordSourceSupplements(supplements));
-            if (!statementId.HasValue || plan.Problems.Count != 0) return;
+                plan.Records, [], [], false, sourceDataJson: sourceDataJson,
+                afterSaveInTransaction: _ => AppendRecordSourceSupplements(plan.Supplements));
+            if (!statementId.HasValue) return;
             foreach (var pair in plan.Pairs)
                 {
                     var left = db.Queryable<Record>().Single(r => r.Source == pair.LeftSource);
