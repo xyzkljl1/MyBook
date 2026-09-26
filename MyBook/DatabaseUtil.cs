@@ -2017,6 +2017,8 @@ namespace MyBook
             Dictionary<string, Account> accountsByName,
             bool requireKnownCounterparty)
         {
+            // 初始化记录沿用内部标记排除收支，但不是一笔可匹配的转账。
+            records = records.Where(record => !IsInitializationRecord(record)).ToList();
             if (records.Any(IsAcatsTransfer))
             {
                 var holdingIds = records.Select(record => record._holding_Id).Distinct().ToList();
