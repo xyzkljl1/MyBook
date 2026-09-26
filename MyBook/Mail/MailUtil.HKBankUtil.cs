@@ -13,7 +13,7 @@ partial class MailUtil
 {
     private const string HKBankMoneyPattern = @"(?<currency>HKD|USD|CNY|RMB)\s*(?<amount>(?:\d+|\d{1,3}(?:,\d{3})+)\.\d{2})(?![\d.])";
 
-    private async Task FetchHKBankMessages(string bank, string sender, StatementImportProvider provider,
+    private Task FetchHKBankMessages(string bank, string sender, StatementImportProvider provider,
         Func<string, bool> isTransaction, Func<MimeMessage, Record> parse)
     {
         var accounts = database.GetAccountsByNamePrefix(bank + "_");
@@ -22,6 +22,12 @@ partial class MailUtil
         var account = accounts[0];
         if (account.isCredit || !account.relativeBalance)
             throw new InvalidOperationException($"{bank} mail requires a non-credit relative-balance account.");
+        return FetchHKBankMessages(bank, sender, provider, isTransaction, message => (parse(message), account));
+    }
+
+    private async Task FetchHKBankMessages(string bank, string sender, StatementImportProvider provider,
+        Func<string, bool> isTransaction, Func<MimeMessage, (Record Record, Account Account)> parse)
+    {
         var imports = database.GetStatementImports(provider);
         var checkpoint = imports.Where(item => item.statementKey == "")
             .Select(item => (DateTime?)item.time).SingleOrDefault()
@@ -42,7 +48,9 @@ partial class MailUtil
             {
                 var key = HKBankMessageKey(bank, message.MessageId);
                 if (database.IsStatementKeyImported(provider, key)) continue;
-                var record = parse(message);
+                var (record, account) = parse(message);
+                if (account.isCredit || !account.relativeBalance)
+                    throw new InvalidOperationException($"{bank} mail requires a non-credit relative-balance account.");
                 record.Account = account;
                 record._account_Id = account.Id;
                 if (record.Reason is "转入" or "转出")
