@@ -132,34 +132,33 @@ namespace MyBook
             {
                 await mail.RunWithMailSessionScope(async () =>
                 {
-                    await RunImportTaskAsync(
-                        "ICBC",
-                        () => true,
-                        () => FetchScheduledProviderAsync("ICBC", StatementImportProvider.ICBCBillMail,
-                            (_, limit) => mail.FetchICBCBills(limit), intervalDays: 27, missingAfterDays: 40)).ConfigureAwait(false);
-                    await RunImportTaskAsync(
-                        "BOC",
-                        () => true,
-                        () => FetchScheduledProviderAsync("BOC", StatementImportProvider.BOCBillMail,
-                            (_, limit) => mail.FetchBOCBills(limit), intervalDays: 27, missingAfterDays: 40)).ConfigureAwait(false);
-                    await RunImportTaskAsync(
-                        "ICBC history detail",
-                        () => true,
-                        () => FetchScheduledProviderAsync("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail,
-                            (since, _) => mail.FetchICBCHistoryDetails(since),
-                            intervalDays: 90, missingAfterDays: 0, advanceOnEmptyQuery: true)).ConfigureAwait(false);
-                    await RunImportTaskAsync("IBKR", () => true,
-                        () => FetchScheduledProviderAsync("IBKR", StatementImportProvider.IBKRReportMail,
-                            (_, limit) => mail.FetchIBKRReports(limit), intervalDays: 1, missingAfterDays: 5)).ConfigureAwait(false);
-                    await RunImportTaskAsync("iFAST", () => true, mail.FetchIFastMessages).ConfigureAwait(false);
-                    await RunImportTaskAsync("ZA", () => true, mail.FetchZAMessages).ConfigureAwait(false);
-                    await RunImportTaskAsync("Ant", () => true, mail.FetchAntMessages).ConfigureAwait(false);
-                    await RunImportTaskAsync("Ele", () => true, mail.FetchEleMessages).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("ICBC", StatementImportProvider.ICBCBillMail,
+                        (since, limit) => mail.FetchICBCBills(since, limit), intervalDays: 27, missingAfterDays: 40).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("BOC", StatementImportProvider.BOCBillMail,
+                        (since, limit) => mail.FetchBOCBills(since, limit), intervalDays: 27, missingAfterDays: 40).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("ICBC history detail", StatementImportProvider.ICBCHistoryDetailMail,
+                        (since, _) => mail.FetchICBCHistoryDetails(since),
+                        intervalDays: 90, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("IBKR", StatementImportProvider.IBKRReportMail,
+                        (since, limit) => mail.FetchIBKRReports(since, limit), intervalDays: 1, missingAfterDays: 5).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("iFAST", StatementImportProvider.IFastMail,
+                        (since, _) => mail.FetchIFastMessages(since),
+                        intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("ZA", StatementImportProvider.ZAMail,
+                        (since, _) => mail.FetchZAMessages(since),
+                        intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("Ant", StatementImportProvider.AntMail,
+                        (since, _) => mail.FetchAntMessages(since),
+                        intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("Ele", StatementImportProvider.EleMail,
+                        (since, _) => mail.FetchEleMessages(since),
+                        intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
                 }).ConfigureAwait(false);
                 // FirstTrade 定时导入暂时停用；恢复时启用以下调用。
                 // if (web is not null && web.IsFirstTradeConfigured)
-                //     await RunImportTaskAsync("FirstTrade", ShouldFetchFirstTrade,
-                //         () => web.FetchFirstTradeAsync()).ConfigureAwait(false);
+                //     await RunScheduledImportTaskAsync("FirstTrade", StatementImportProvider.FirstTradeApi,
+                //         (_, _) => web.FetchFirstTradeAsync(),
+                //         intervalDays: 7, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
                 if (plaid is not null)
                 {
                     await RunImportTaskAsync("Plaid Schwab", () => true, () => plaid.FetchSchwabAsync()).ConfigureAwait(false);
@@ -167,11 +166,8 @@ namespace MyBook
                 if (wise is not null && wise.IsConfigured)
                     await RunImportTaskAsync("Wise API", () => true, () => wise.FetchAsync()).ConfigureAwait(false);
                 if (graphQL is not null)
-                    await RunImportTaskAsync(
-                        "Nexus DP",
-                        () => true,
-                        () => FetchScheduledProviderAsync("Nexus DP", StatementImportProvider.NexusDpMonthlyReport,
-                            (_, _) => graphQL.FetchNexusDpMonthlyReports(), intervalDays: 27, missingAfterDays: 40)).ConfigureAwait(false);
+                    await RunScheduledImportTaskAsync("Nexus DP", StatementImportProvider.NexusDpMonthlyReport,
+                        (_, _) => graphQL.FetchNexusDpMonthlyReports(), intervalDays: 27, missingAfterDays: 40).ConfigureAwait(false);
                 if (plaid is not null && database is not null)
                     await RunImportTaskAsync("PayPal", () => true,
                         () => new CombinedUtil(database, plaid, mail).FetchPayPalAsync()).ConfigureAwait(false);
@@ -286,30 +282,20 @@ namespace MyBook
             }
         }
 
-        private Task FetchScheduledProviderAsync(string name, StatementImportProvider provider,
+        private Task RunScheduledImportTaskAsync(string name, StatementImportProvider provider,
             Func<DateTime, int, Task> fetch, int intervalDays, int missingAfterDays = 0, bool advanceOnEmptyQuery = false)
         {
-            var db = database ?? throw new InvalidOperationException("Scheduled import requires a database.");
-            return ImportSchedule.RunAsync(name, intervalDays, missingAfterDays,
-                () => advanceOnEmptyQuery
-                    ? db.GetLatestStatementImportTimeByKeyPrefix(provider, ImportSchedule.SuccessfulQueryKeyPrefix)
-                        ?? db.GetStatementImportCheckpointTime(provider)
-                    : db.GetLatestStatementImportTime(provider),
-                since => fetch(since, missingAfterDays),
-                !advanceOnEmptyQuery ? null : date => db.MarkStatementProcessedOnce(
-                    provider, date, $"{ImportSchedule.SuccessfulQueryKeyPrefix}{date:yyyyMMdd}"));
-        }
-
-        private bool ShouldFetchFirstTrade()
-        {
-            var last = database?.GetLatestStatementImportTime(StatementImportProvider.FirstTradeApi);
-            if (last is null) return true;
-            // FirstTrade import times are stored in US Eastern local time.
-            var lastUtc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(last.Value, DateTimeKind.Unspecified),
-                TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"));
-            if (DateTime.UtcNow - lastUtc > TimeSpan.FromDays(7)) return true;
-            Console.WriteLine($"skip scheduled FirstTrade fetch: last import {last.Value:yyyy-MM-dd HH:mm:ss} ET, not over one week ago");
-            return false;
+            return RunImportTaskAsync(name, () => true, () =>
+            {
+                var db = database ?? throw new InvalidOperationException("Scheduled import requires a database.");
+                return ImportSchedule.RunAsync(name, intervalDays, missingAfterDays,
+                    () => advanceOnEmptyQuery
+                        ? db.GetLatestStatementImportTimeByKeyPrefix(provider, ImportSchedule.SuccessfulQueryKey)
+                            ?? db.GetStatementImportCheckpointTime(provider)
+                        : db.GetLatestStatementImportTime(provider),
+                    since => fetch(since, missingAfterDays),
+                    !advanceOnEmptyQuery ? null : date => db.SaveStatementQueryProgress(provider, date));
+            });
         }
 
         private bool ShouldFetchProviderAfterDays(string name, StatementImportProvider provider, int intervalDays)

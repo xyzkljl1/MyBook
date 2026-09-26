@@ -2,7 +2,7 @@ namespace MyBook;
 
 internal static class ImportSchedule
 {
-    internal const string SuccessfulQueryKeyPrefix = "scheduled-empty-import-";
+    internal const string SuccessfulQueryKey = "scheduled-query";
 
     // When supplied, the callback advances query progress even after an empty successful query.
     internal static async Task RunAsync(string name, int intervalDays, int missingAfterDays,

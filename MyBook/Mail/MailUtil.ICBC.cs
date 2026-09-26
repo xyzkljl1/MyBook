@@ -23,12 +23,12 @@ namespace MyBook
             return database.GetPostingAccount(GetICBCCardAccount(name));
         }
 
-        public Task FetchICBCBills(int missingAfterDays = 0)
+        public Task FetchICBCBills(DateTime since, int missingAfterDays = 0)
         {
-            return FetchStatementMails(ICBCProvider,
-                since => SearchMessages($"ICBC bill since {since:yyyy-MM-dd}",
-                    StatementMailQuery("webmaster@icbc.com.cn", "中国工商银行客户对账单", since),
-                    message => GetMailDateTime(message) >= since && IsICBCInlineBillMessage(message),
+            return FetchStatementMails(since,
+                searchSince => SearchMessages($"ICBC bill since {searchSince:yyyy-MM-dd}",
+                    StatementMailQuery("webmaster@icbc.com.cn", "中国工商银行客户对账单", searchSince),
+                    message => GetMailDateTime(message) >= searchSince && IsICBCInlineBillMessage(message),
                     GetMailDateTime),
                 ImportICBCBill, missingAfterDays);
         }

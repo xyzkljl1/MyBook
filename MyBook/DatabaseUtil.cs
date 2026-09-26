@@ -681,6 +681,22 @@ namespace MyBook
             }
         }
 
+        public void SaveStatementQueryProgress(StatementImportProvider provider, DateTime time)
+        {
+            ExecuteLockedTransaction(() =>
+            {
+                var progress = db.Queryable<StatementImport>()
+                    .Single(import => import.provider == provider && import.statementKey == ImportSchedule.SuccessfulQueryKey);
+                if (progress is null)
+                    InsertStatementImport(provider, time, ImportSchedule.SuccessfulQueryKey);
+                else
+                {
+                    progress.time = NormalizeStatementImportTime(time);
+                    db.Updateable(progress).UpdateColumns(import => import.time).ExecuteCommand();
+                }
+            });
+        }
+
         public List<bool> SaveStatementRecordsAndHoldingsOnce(
             IEnumerable<StatementRecordHoldingImport> imports,
             IEnumerable<Finance>? finances = null)

@@ -34,9 +34,9 @@ namespace MyBook
             @"^\(?-?\d[\d,]*(?:\.\d+)?\)?$",
             RegexOptions.CultureInvariant);
 
-        public Task FetchBOCBills(int missingAfterDays = 0)
+        public Task FetchBOCBills(DateTime since, int missingAfterDays = 0)
         {
-            return FetchStatementMails(BOCProvider, SearchBOCStatementMails, ImportBOCStatement, missingAfterDays);
+            return FetchStatementMails(since, SearchBOCStatementMails, ImportBOCStatement, missingAfterDays);
         }
 
         private Task<List<MailAttachmentMessage>> SearchBOCStatementMails(DateTime searchSince)

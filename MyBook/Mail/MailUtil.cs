@@ -88,11 +88,9 @@ namespace MyBook
             return left.name == right.name;
         }
 
-        private async Task FetchStatementMails<T>(StatementImportProvider provider,
+        private async Task FetchStatementMails<T>(DateTime since,
             Func<DateTime, Task<List<T>>> search, Func<T, DateTime?, bool> import, int missingAfterDays)
         {
-            var since = database.GetLatestStatementImportTime(provider)
-                ?? throw new InvalidOperationException($"Missing statement import checkpoint for {provider}");
             await RunWithMailSessionScope(async () =>
             {
                 var messages = await search(since.Date).ConfigureAwait(false);

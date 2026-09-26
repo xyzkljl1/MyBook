@@ -18,14 +18,13 @@ partial class MailUtil
     private const string IFastPaymentSubject = "QR Payment is successful";
     private const string IFastMoneyPattern = @"(?<currency>GBP|USD|EUR|HKD|SGD|CNY|RMB|HK\$|S\$|US\$|£|€)\s*(?<amount>(?:\d+|\d{1,3}(?:,\d{3})+)\.\d{2})(?![\d.])";
 
-    public async Task FetchIFastMessages()
+    public async Task FetchIFastMessages(DateTime since)
     {
         ImportIFastInitialStatements();
-        var since = GetIFastMailScanStart(database.GetStatementImports(IFastProvider));
         // Import times are stored as dates. Include that day and deduplicate its successful mails.
         // IMAP header dates may use another timezone, so keep a small date-boundary margin.
         var searchDate = since.ToUniversalTime().AddHours(-14).Date;
-        Console.WriteLine($"IFast mail scan from last successful mail: {since:yyyy-MM-dd HH:mm:ss}");
+        Console.WriteLine($"IFast mail scan from: {since:yyyy-MM-dd HH:mm:ss}");
         await RunWithMailSessionScope(async () =>
         {
             var messages = await SearchMessagesFromMailbox(
@@ -42,19 +41,6 @@ partial class MailUtil
         }).ConfigureAwait(false);
         await GenerateIFastInterest().ConfigureAwait(false);
         ValidateIFastStatements();
-    }
-
-    private static DateTime GetIFastMailScanStart(IEnumerable<StatementImport> imports)
-    {
-        var items = imports.ToList();
-        var checkpoint = items.Where(item => item.statementKey == "")
-            .Select(item => (DateTime?)item.time).SingleOrDefault()
-            ?? throw new InvalidOperationException("Missing IFast mail checkpoint.");
-        // Statement and calculated-interest dates are not mail progress.
-        return items.Where(item => item.statementKey.StartsWith("IFast-mail-", StringComparison.Ordinal)
-                || item.statementKey.StartsWith("IFast-receipt-", StringComparison.Ordinal)
-                || item.statementKey.StartsWith("IFast-conversion-", StringComparison.Ordinal))
-            .Select(item => item.time).Append(checkpoint).Max();
     }
 
     private static bool IsIFastTransactionSubject(string subject)

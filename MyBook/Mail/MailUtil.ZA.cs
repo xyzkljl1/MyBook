@@ -10,7 +10,7 @@ partial class MailUtil
     private const string ZAMoneyPattern = @"(?<currency>HKD|USD|CNY|RMB)\s+(?<amount>(?:\d+|\d{1,3}(?:,\d{3})+)\.\d{2})(?![\d.])";
     private const string ZADatePattern = @"(?<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})";
 
-    public Task FetchZAMessages() => FetchHKBankMessages("ZA", ZASender, ZAProvider,
+    public Task FetchZAMessages(DateTime since) => FetchHKBankMessages("ZA", ZASender, ZAProvider, since,
         IsZATransactionSubject, message =>
         {
             var record = ParseZAMessage(message, out var cardTail);
@@ -81,7 +81,6 @@ partial class MailUtil
         var party = detail.Groups["party"].Value.Trim();
         if (String.IsNullOrWhiteSpace(party) || party.Length > 255) throw new MailParseException("Invalid ZA counterparty.");
         var record = HKBankRecord("ZA", message, amount, date, reason, party);
-        record.DescCurrency = new Currency(amount.v, amount.t);
         return record;
     }
 }

@@ -7,7 +7,7 @@ partial class MailUtil
 {
     private const string EleSender = "appsendmail@notification.elebank.com";
 
-    public Task FetchEleMessages() => FetchHKBankMessages("ELE", EleSender, StatementImportProvider.EleMail,
+    public Task FetchEleMessages(DateTime since) => FetchHKBankMessages("ELE", EleSender, StatementImportProvider.EleMail, since,
         IsEleTransactionSubject, ParseEleMessage);
 
     private static bool IsEleTransactionSubject(string subject)

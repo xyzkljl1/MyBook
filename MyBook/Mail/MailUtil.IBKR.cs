@@ -277,9 +277,9 @@ namespace MyBook
             return reader.ReadToEnd();
         }
 
-        public Task FetchIBKRReports(int missingAfterDays = 0)
+        public Task FetchIBKRReports(DateTime since, int missingAfterDays = 0)
         {
-            return FetchStatementMails(IBKRProvider, SearchIBKRStatementMails, ImportIBKRStatementMail, missingAfterDays);
+            return FetchStatementMails(since, SearchIBKRStatementMails, ImportIBKRStatementMail, missingAfterDays);
         }
 
         private Task<List<MailAttachmentMessage>> SearchIBKRStatementMails(DateTime since)

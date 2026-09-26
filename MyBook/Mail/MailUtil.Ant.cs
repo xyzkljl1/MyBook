@@ -7,7 +7,7 @@ partial class MailUtil
 {
     private const string AntSender = "hk_antbank_service@notify.antbank.hk";
 
-    public Task FetchAntMessages() => FetchHKBankMessages("Ant", AntSender, StatementImportProvider.AntMail,
+    public Task FetchAntMessages(DateTime since) => FetchHKBankMessages("Ant", AntSender, StatementImportProvider.AntMail, since,
         IsAntTransactionSubject, ParseAntMessage);
 
     private static bool IsAntTransactionSubject(string subject)

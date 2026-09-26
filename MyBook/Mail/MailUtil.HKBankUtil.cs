@@ -13,7 +13,7 @@ partial class MailUtil
 {
     private const string HKBankMoneyPattern = @"(?<currency>HKD|USD|CNY|RMB)\s*(?<amount>(?:\d+|\d{1,3}(?:,\d{3})+)\.\d{2})(?![\d.])";
 
-    private Task FetchHKBankMessages(string bank, string sender, StatementImportProvider provider,
+    private Task FetchHKBankMessages(string bank, string sender, StatementImportProvider provider, DateTime since,
         Func<string, bool> isTransaction, Func<MimeMessage, Record> parse)
     {
         var accounts = database.GetAccountsByNamePrefix(bank + "_");
@@ -22,20 +22,13 @@ partial class MailUtil
         var account = accounts[0];
         if (account.isCredit || !account.relativeBalance)
             throw new InvalidOperationException($"{bank} mail requires a non-credit relative-balance account.");
-        return FetchHKBankMessages(bank, sender, provider, isTransaction, message => (parse(message), account));
+        return FetchHKBankMessages(bank, sender, provider, since, isTransaction, message => (parse(message), account));
     }
 
-    private async Task FetchHKBankMessages(string bank, string sender, StatementImportProvider provider,
+    private Task FetchHKBankMessages(string bank, string sender, StatementImportProvider provider, DateTime since,
         Func<string, bool> isTransaction, Func<MimeMessage, (Record Record, Account Account)> parse)
     {
-        var imports = database.GetStatementImports(provider);
-        var checkpoint = imports.Where(item => item.statementKey == "")
-            .Select(item => (DateTime?)item.time).SingleOrDefault()
-            ?? throw new InvalidOperationException($"Missing {bank} mail checkpoint.");
-        var prefix = $"{bank}-mail-";
-        var since = imports.Where(item => item.statementKey.StartsWith(prefix, StringComparison.Ordinal))
-            .Select(item => item.time).Append(checkpoint).Max();
-        await RunWithMailSessionScope(async () =>
+        return RunWithMailSessionScope(async () =>
         {
             var messages = await SearchMessagesFromMailbox(CreateYahooMailbox() with { Proxy = null }, $"{bank} transactions",
                 SearchQuery.FromContains(sender).And(SearchQuery.SentSince(since.ToUniversalTime().AddHours(-14).Date)),
@@ -56,10 +49,9 @@ partial class MailUtil
                 if (record.Reason is "转入" or "转出")
                     DatabaseUtil.ApplyTransferCounterparty(record,
                         database.ResolveTransferCounterparty(null, [record.DestAccount], record.DestAccount));
-                record.DescCurrency = new Currency(record.v, record.t);
                 database.SaveStatementRecordsOnce(provider, GetMailDateTime(message), [record], statementKey: key);
             }
-        }).ConfigureAwait(false);
+        });
     }
 
     private static string HKBankMessageKey(string bank, string? messageId)
@@ -100,6 +92,7 @@ partial class MailUtil
         var record = new Record { date = date, postingDate = date, updateTime = DateTime.Now,
             Reason = reason, DestAccount = party.Trim(), Source = $"code={HKBankMessageKey(bank, message.MessageId)}; {bank} mail" };
         record.CopyFrom(amount);
+        record.DescCurrency = new Currency(amount.v, amount.t);
         return record;
     }
 }
