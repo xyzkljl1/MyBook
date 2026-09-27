@@ -170,9 +170,6 @@
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" SharedSizeGroup="CurrencyNet"/>
                                 <ColumnDefinition Width="Auto" SharedSizeGroup="CurrencyExact"/>
-                                <ColumnDefinition Width="Auto" SharedSizeGroup="CurrencyAssets"/>
-                                <ColumnDefinition Width="Auto" SharedSizeGroup="CurrencySeparator"/>
-                                <ColumnDefinition Width="Auto" SharedSizeGroup="CurrencyLiabilities"/>
                             </Grid.ColumnDefinitions>
                             <TextBox Style="{StaticResource SelectableText}"
                                      Grid.Column="0"
@@ -183,35 +180,11 @@
                                      TextAlignment="Right"/>
                             <TextBox Style="{StaticResource SelectableText}"
                                      Grid.Column="1"
-                                     Text="{Binding NetExactText}"
+                                     Text="{Binding ExactDetailText, Mode=OneWay}"
                                      FontSize="11"
                                      Foreground="#64748B"
                                      Margin="12,4,0,0"
-                                     TextAlignment="Right"/>
-                            <TextBox Style="{StaticResource SelectableText}"
-                                     Grid.Column="2"
-                                     Text="{Binding AssetsText}"
-                                     FontSize="13"
-                                     FontWeight="SemiBold"
-                                     Foreground="#334155"
-                                     Margin="18,2,0,0"
-                                     TextAlignment="Right"/>
-                            <TextBlock Grid.Column="3"
-                                       Text="{Binding BreakdownSeparatorText}"
-                                       FontSize="13"
-                                       FontWeight="SemiBold"
-                                       Foreground="#64748B"
-                                       Margin="8,2,8,0"
-                                       VerticalAlignment="Center"
-                                       HorizontalAlignment="Center"/>
-                            <TextBox Style="{StaticResource SelectableText}"
-                                     Grid.Column="4"
-                                     Text="{Binding LiabilitiesText}"
-                                     FontSize="13"
-                                     FontWeight="SemiBold"
-                                     Foreground="#334155"
-                                     Margin="0,2,0,0"
-                                     TextAlignment="Right"/>
+                                     TextAlignment="Left"/>
                         </Grid>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
@@ -422,7 +395,7 @@
                                                 <ColumnDefinition Width="24"/>
                                                 <ColumnDefinition Width="158"/>
                                                 <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="210"/>
+                                                <ColumnDefinition Width="300"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Text="{Binding KindText}" FontSize="12" VerticalAlignment="Center">
                                                 <TextBlock.Style>

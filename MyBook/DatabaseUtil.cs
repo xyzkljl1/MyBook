@@ -3687,8 +3687,10 @@ namespace MyBook
                     balances,
                     accountNetFlowRecords,
                     exchangeRates),
-                RmbReasonFlowSeriesByMonth = reasonMonths
-                    .Select(month => BuildRmbReasonFlowSeries(lifeRecords, month, month.AddMonths(1), exchangeRates))
+                RmbReasonFlowSeriesByMonth = CalculateMonthlyRmbExpenses(lifeRecords, GetRateHistory(RateSource.GoogleFinance),
+                    reasonFirstMonth, reasonMonths.Count, DateTime.Now, allowUnavailableMonths: true)
+                    .Select(result => result.Series.IsAvailable ? result.Series
+                        : BuildRmbReasonFlowSeries(lifeRecords, result.Series.Month, result.Series.Month.AddMonths(1), exchangeRates))
                     .ToList(),
                 DefaultReasonMonthIndex = Math.Max(0, reasonMonths.FindIndex(month => month == lastMonthStart)),
                 InvestmentByReason = BuildInvestmentStatistics(

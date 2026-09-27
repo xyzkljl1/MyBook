@@ -130,6 +130,8 @@ namespace MyBook
 
     public class ReasonFlowSeries
     {
+        public bool IsAvailable { get; set; } = true;
+        public string RateDescription { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public CurrencyType Currency { get; set; }
         public DateTime Month { get; set; }

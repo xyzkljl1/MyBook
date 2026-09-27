@@ -1734,6 +1734,8 @@ namespace MyBook
         public string AssetsText { get; set; } = "";
         public string LiabilitiesText { get; set; } = "";
         public string BreakdownSeparatorText { get; set; } = "";
+        public string ExactDetailText => BreakdownSeparatorText.Length == 0
+            ? NetExactText : $"{AssetsText} - {LiabilitiesText}";
 
         public static CurrencySummaryViewModel From(CurrencyBalanceSummary summary)
         {
@@ -1755,8 +1757,7 @@ namespace MyBook
 
         private static MoneyText FormatSummaryMoney(decimal value, CurrencyType currency)
         {
-            var text = MoneyText.From(value);
-            return new MoneyText($"{text.DisplayText}  {currency}", text.ExactText);
+            return new MoneyText($"{value / 1000m:0.##}k  {currency}", MoneyText.FormatAmount(value));
         }
 
         public static string FormatCurrencySymbol(CurrencyType currency)
@@ -2152,6 +2153,7 @@ namespace MyBook
 
     public class ReasonFlowSeriesViewModel
     {
+        public string RateDescription { get; set; } = "";
         public string Currency { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public string MonthLabel { get; set; } = "";
@@ -2163,10 +2165,10 @@ namespace MyBook
         public static ReasonFlowSeriesViewModel From(ReasonFlowSeries series)
         {
             var items = series.Items.Select(ReasonFlowItemViewModel.From).ToList();
-            var maxTotal = Math.Max(1, items.Count == 0 ? 1 : items.Max(item => item.Total));
+            var maxTotal = Math.Max(1, items.Count == 0 ? 1 : items.Max(item => Math.Abs(item.Total)));
             foreach (var item in items)
             {
-                item.BarPercent = 100 * (double)(item.Total / maxTotal);
+                item.BarPercent = 100 * (double)(Math.Abs(item.Total) / maxTotal);
             }
 
             return new ReasonFlowSeriesViewModel
@@ -2174,9 +2176,10 @@ namespace MyBook
                 Currency = series.Currency.ToString(),
                 DisplayName = series.DisplayName,
                 MonthLabel = series.MonthLabel,
+                RateDescription = series.RateDescription,
                 TotalIncomeText = $"+¥{series.TotalIncome:N2}",
                 TotalExpenseText = $"-¥{series.TotalExpense:N2}",
-                TotalFlowText = $"¥{series.TotalIncome + series.TotalExpense:N2}",
+                TotalFlowText = $"支出 ¥{series.TotalExpense:N2}　收入 ¥{series.TotalIncome:N2}　净支出 ¥{series.TotalExpense - series.TotalIncome:N2}",
                 Items = items
             };
         }
@@ -2199,7 +2202,7 @@ namespace MyBook
                 Reason = item.Reason,
                 IsIncome = item.IsIncome,
                 Total = item.Total,
-                TotalText = $"¥{item.Total:N0}",
+                TotalText = $"¥{item.Total:N2}",
                 CurrencyDetails = item.CurrencyDetails
             };
         }
