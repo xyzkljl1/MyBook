@@ -10,17 +10,18 @@ namespace MyBook
 {
     partial class Fetcher : IDisposable
     {
-        IConfigurationRoot? config;
-        MailUtil? mail;
-        PubWebUtil? pubWeb;
-        GraphQLUtil? graphQL;
-        KrakenUtil? kraken;
-        CryptoUtil? crypto;
-        WebUtil? web;
-        PlaidUtil? plaid;
-        WiseUtil? wise;
-        DatabaseUtil? database;
-        SIMUtil? sim;
+        // RunSchedule initializes these before starting any scheduled work.
+        IConfigurationRoot config = null!;
+        MailUtil mail = null!;
+        PubWebUtil pubWeb = null!;
+        GraphQLUtil graphQL = null!;
+        KrakenUtil kraken = null!;
+        CryptoUtil crypto = null!;
+        WebUtil web = null!;
+        PlaidUtil plaid = null!;
+        WiseUtil wise = null!;
+        DatabaseUtil database = null!;
+        SIMUtil sim = null!;
         Timer? dailyTimer;
         Timer? simTimer;
         readonly SemaphoreSlim fetchLock = new(1, 1);
@@ -48,26 +49,9 @@ namespace MyBook
             graphQL = new(config, database);
             web = new(config, database);
             wise = new(config, database);
-            if (!String.IsNullOrWhiteSpace(config["plaid_client_id"])
-                && !String.IsNullOrWhiteSpace(config[PlaidUtil.SelectedSecretConfigKey]))
-                plaid = new(config, database);
+            plaid = new(config, database);
             var krakenPub = new KrakenPubUtil();
-            var krakenApiKey = config["kraken_api_key"];
-            var krakenApiSecret = config["kraken_api_secret"];
-            if (String.IsNullOrWhiteSpace(krakenApiKey) && String.IsNullOrWhiteSpace(krakenApiSecret))
-            {
-                Console.WriteLine("skip scheduled Kraken fetch: missing Kraken API credentials");
-                kraken = null;
-            }
-            else if (String.IsNullOrWhiteSpace(krakenApiKey) || String.IsNullOrWhiteSpace(krakenApiSecret))
-            {
-                Console.WriteLine("skip scheduled Kraken fetch: incomplete Kraken API credentials");
-                kraken = null;
-            }
-            else
-            {
-                kraken = new(config, database, krakenPub);
-            }
+            kraken = new(config, database, krakenPub);
             crypto = new(config, database, krakenPub);
             sim = new(database);
             dailyTimer?.Dispose();
@@ -128,16 +112,13 @@ namespace MyBook
 
         private async Task RunDailyFetchAsync()
         {
-            if (mail is null)
-                return;
             if (!await fetchLock.WaitAsync(0).ConfigureAwait(false))
                 return;
 
             SetCurrentTask("每日导入");
             try
             {
-                if (pubWeb is not null)
-                    await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates).ConfigureAwait(false);
+                await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates).ConfigureAwait(false);
                 await mail.RunWithMailSessionScope(async () =>
                 {
                     await RunScheduledImportTaskAsync("ICBC", StatementImportProvider.ICBCBillMail,
@@ -163,49 +144,39 @@ namespace MyBook
                         intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
                 }).ConfigureAwait(false);
                 // FirstTrade 定时导入暂时停用；恢复时启用以下调用。
-                // if (web is not null && web.IsFirstTradeConfigured)
+                // if (web.IsFirstTradeConfigured)
                 //     await RunScheduledImportTaskAsync("FirstTrade", StatementImportProvider.FirstTradeApi,
                 //         (_, _) => web.FetchFirstTradeAsync(),
                 //         intervalDays: 7, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
-                if (plaid is not null)
-                {
-                    await RunScheduledImportTaskAsync("Plaid Schwab", StatementImportProvider.PlaidSchwab,
-                        (since, _) => plaid.FetchSchwabAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
-                }
-                if (wise is not null && wise.IsConfigured)
+                await RunScheduledImportTaskAsync("Plaid Schwab", StatementImportProvider.PlaidSchwab,
+                    (since, _) => plaid.FetchSchwabAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
+                if (wise.IsConfigured)
                     await RunScheduledImportTaskAsync("Wise API", StatementImportProvider.WiseApi,
                         (since, _) => wise.FetchAsync(since), intervalDays: 1, missingAfterDays: 0,
                         advanceOnEmptyQuery: true).ConfigureAwait(false);
-                if (graphQL is not null)
-                    await RunScheduledImportTaskAsync("Nexus DP", StatementImportProvider.NexusDpMonthlyReport,
-                        (_, _) => graphQL.FetchNexusDpMonthlyReports(), intervalDays: 27, missingAfterDays: 40).ConfigureAwait(false);
-                if (plaid is not null && database is not null)
-                    await RunScheduledImportTaskAsync("PayPal", CombinedUtil.PayPalProviders,
-                        since => new CombinedUtil(database, plaid, mail).FetchPayPalAsync(since),
-                        intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
-                if (kraken is not null)
-                    await RunScheduledImportTaskAsync("Kraken", StatementImportProvider.KrakenApi,
-                        (since, _) => kraken.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
-                if (crypto is not null)
-                    await RunScheduledImportTaskAsync("Crypto ETH", StatementImportProvider.EthereumApi,
-                        (since, _) => crypto.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
-                if (database is not null)
-                {
-                    await RunImportTaskAsync(
-                        "allocated expense cache",
-                        () =>
-                        {
-                            database.ProcessAllocatedExpenseDirtyRecords();
-                            return Task.CompletedTask;
-                        }).ConfigureAwait(false);
-                    await RunImportTaskAsync(
-                        "snapshot",
-                        () =>
-                        {
-                            database.CreateDailySnapshot();
-                            return Task.CompletedTask;
-                        }).ConfigureAwait(false);
-                }
+                await RunScheduledImportTaskAsync("Nexus DP", StatementImportProvider.NexusDpMonthlyReport,
+                    (_, _) => graphQL.FetchNexusDpMonthlyReports(), intervalDays: 27, missingAfterDays: 40).ConfigureAwait(false);
+                await RunScheduledImportTaskAsync("PayPal", CombinedUtil.PayPalProviders,
+                    since => new CombinedUtil(database, plaid, mail).FetchPayPalAsync(since),
+                    intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
+                await RunScheduledImportTaskAsync("Kraken", StatementImportProvider.KrakenApi,
+                    (since, _) => kraken.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
+                await RunScheduledImportTaskAsync("Crypto ETH", StatementImportProvider.EthereumApi,
+                    (since, _) => crypto.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
+                await RunImportTaskAsync(
+                    "allocated expense cache",
+                    () =>
+                    {
+                        database.ProcessAllocatedExpenseDirtyRecords();
+                        return Task.CompletedTask;
+                    }).ConfigureAwait(false);
+                await RunImportTaskAsync(
+                    "snapshot",
+                    () =>
+                    {
+                        database.CreateDailySnapshot();
+                        return Task.CompletedTask;
+                    }).ConfigureAwait(false);
             }
             finally
             {
@@ -217,9 +188,6 @@ namespace MyBook
 
         private void StartSIMPolling()
         {
-            if (config is null)
-                return;
-
             if (String.IsNullOrWhiteSpace(config["sim_imsi"]))
             {
                 Console.WriteLine("skip scheduled SIM SMS polling: missing sim_imsi in config.json");
@@ -238,8 +206,7 @@ namespace MyBook
 
         private TimeSpan GetSIMPollInterval()
         {
-            if (config is not null
-                && Int32.TryParse(config["sim_poll_interval_minutes"], out var configuredMinutes)
+            if (Int32.TryParse(config["sim_poll_interval_minutes"], out var configuredMinutes)
                 && configuredMinutes > 0)
                 return TimeSpan.FromMinutes(Math.Max(1, configuredMinutes));
 
@@ -253,9 +220,6 @@ namespace MyBook
 
         private async Task RunSIMPollAsync()
         {
-            if (config is null || sim is null)
-                return;
-
             if (!await simPollLock.WaitAsync(0).ConfigureAwait(false))
             {
                 Console.WriteLine("skip scheduled SIM SMS polling: previous poll is still running");
@@ -297,20 +261,19 @@ namespace MyBook
         {
             return RunImportTaskAsync(name, () =>
             {
-                var db = database ?? throw new InvalidOperationException("Scheduled import requires a database.");
                 var progress = new Dictionary<StatementImportProvider, DateTime>();
                 return ImportSchedule.RunAsync(name, intervalDays, missingAfterDays,
                     () =>
                     {
                         progress = providers.ToDictionary(provider => provider, provider => (advanceOnEmptyQuery
-                            ? db.GetLatestStatementImportTimeByKeyPrefix(provider, ImportSchedule.SuccessfulQueryKey)
-                            ?? db.GetStatementImportCheckpointTime(provider)
-                            : db.GetLatestStatementImportTime(provider))?.Date
+                            ? database.GetLatestStatementImportTimeByKeyPrefix(provider, ImportSchedule.SuccessfulQueryKey)
+                            ?? database.GetStatementImportCheckpointTime(provider)
+                            : database.GetLatestStatementImportTime(provider))?.Date
                             ?? throw new InvalidOperationException($"Missing {provider} import checkpoint."));
                         return progress.Values.Min();
                     },
                     _ => fetch(progress),
-                    !advanceOnEmptyQuery ? null : date => db.SaveStatementQueryProgress(providers, date));
+                    !advanceOnEmptyQuery ? null : date => database.SaveStatementQueryProgress(providers, date));
             });
         }
 
