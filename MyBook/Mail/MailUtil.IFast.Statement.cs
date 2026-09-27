@@ -123,7 +123,7 @@ partial class MailUtil
             && record.t == expected.t && record.v == expected.v && IFastBankDate(record) == IFastBankDate(expected)
             && (code.Length > 0 && record.Source.StartsWith($"code={code};", StringComparison.Ordinal)
                 || expected.Reason == "利息" && record.Reason == "利息"
-                || expected.Reason == "消费" && record.Reason == "消费"
+                || expected.Reason == "吃喝" && record.Reason == "吃喝"
                     && (expected.DestAccount.Contains(record.DestAccount, StringComparison.Ordinal)
                         || record.DestAccount.Contains(expected.DestAccount, StringComparison.Ordinal))
                     && !String.IsNullOrWhiteSpace(expected.DestAccount)
@@ -301,7 +301,7 @@ partial class MailUtil
         }
         else if (record.v < 0 && Regex.IsMatch(description, @"QR|Scan.*Pay", RegexOptions.IgnoreCase))
         {
-            record.Reason = "消费";
+            record.Reason = "吃喝";
             code = "";
         }
         else throw new MailParseException("Unsupported IFast statement transaction description.");

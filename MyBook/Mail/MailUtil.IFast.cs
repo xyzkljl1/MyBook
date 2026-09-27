@@ -118,7 +118,7 @@ partial class MailUtil
                 + @" \((?<originalCurrency>[A-Z]{3}) (?<originalAmount>\d[\d,]*\.\d{2})\) to (?<merchant>.+?) is successful\.");
             var amount = ParseIFastMoney(match);
             amount.v = -amount.v;
-            var record = BuildIFastRecord(amount, time, "消费", match.Groups["merchant"].Value, key);
+            var record = BuildIFastRecord(amount, time, "吃喝", match.Groups["merchant"].Value, key);
             record.DescCurrency = new Currency(-Decimal.Parse(match.Groups["originalAmount"].Value, NumberStyles.Number, CultureInfo.InvariantCulture),
                 match.Groups["originalCurrency"].Value);
             return (key, [record]);
