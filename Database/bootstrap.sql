@@ -77,7 +77,7 @@ CREATE TABLE `statementimports` (
 
 CREATE TABLE `ratehistory` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `source` enum('GoogleFinance','IFastWebsite','IFastMail') NOT NULL DEFAULT 'GoogleFinance',
+  `source` enum('GoogleFinance','IFastWebsite','IFastMail','KylcCcb','KylcIcbc','KylcCib','KylcHfBank') NOT NULL DEFAULT 'GoogleFinance',
   `currency` enum('RMB','USD','JPY','SGD','HKD','GBP','EUR') NOT NULL DEFAULT 'RMB',
   `rateDate` datetime(6) NOT NULL,
   `fetchedAt` datetime(6) NOT NULL,

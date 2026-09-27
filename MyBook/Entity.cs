@@ -212,7 +212,7 @@ namespace MyBook
         public CurrencyType _currentPrice_t { get; set; } = CurrencyType.RMB;
     }
 
-    public enum RateSource { GoogleFinance, IFastWebsite, IFastMail }
+    public enum RateSource { GoogleFinance, IFastWebsite, IFastMail, KylcCcb, KylcIcbc, KylcCib, KylcHfBank }
 
     [SugarTable("RateHistory")]
     [SugarIndex("idx_RateHistory_source_currency_date", nameof(source), OrderByType.Asc, nameof(currency), OrderByType.Asc, nameof(rateDate), OrderByType.Asc)]
@@ -221,7 +221,7 @@ namespace MyBook
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
 
-        [SugarColumn(DefaultValue = "GoogleFinance", ColumnDataType = "enum('GoogleFinance','IFastWebsite','IFastMail')", SqlParameterDbType = typeof(EnumToStringConvert))]
+        [SugarColumn(DefaultValue = "GoogleFinance", ColumnDataType = "enum('GoogleFinance','IFastWebsite','IFastMail','KylcCcb','KylcIcbc','KylcCib','KylcHfBank')", SqlParameterDbType = typeof(EnumToStringConvert))]
         public RateSource source { get; set; } = RateSource.GoogleFinance;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]

@@ -119,6 +119,8 @@ namespace MyBook
             try
             {
                 await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates).ConfigureAwait(false);
+                foreach (var source in PubWebUtil.KylcSources)
+                    await RunImportTaskAsync(source.ToString(), () => pubWeb.FetchKylcRates(source)).ConfigureAwait(false);
                 await mail.RunWithMailSessionScope(async () =>
                 {
                     await RunScheduledImportTaskAsync("ICBC", StatementImportProvider.ICBCBillMail,

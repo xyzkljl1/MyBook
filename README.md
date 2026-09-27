@@ -41,7 +41,7 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **Kraken:** balances and ledger entries through a read-only API; prices through public market-data endpoints.
 - **Ethereum:** transactions and balances for configured addresses through blockchain query endpoints; prices through public market-data endpoints.
 - **Nexus:** monthly Donation Points income through GraphQL.
-- **Exchange rates:** daily historical foreign-currency quotes against CNY from Google Finance; current quotes are fetched separately for valuation.
+- **Exchange rates:** daily historical quotes against CNY from Google Finance and Kylc bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR). Current valuation quotes are fetched separately from Google Finance.
 
 Configure the corresponding accounts and fixed import starting points before importing.
 
@@ -117,7 +117,7 @@ dotnet build MyBook\MyBook.csproj -v minimal /p:UseSharedCompilation=false
 
 Import progress and scheduling use dates in the runtime machine's local time zone. Source timestamps are converted before taking their dates. Statement periods and transaction dates retain their financial meaning; integrations handle UTC days, US Eastern dates and other source-specific query ranges. Changing the runtime time zone changes calendar-day scheduling boundaries.
 
-Historical rate timestamps are stored as full local date-times converted from the source, separately from the local time of retrieval.
+Historical rate timestamps use local time, separately from retrieval time. Kylc supplies dates only; its dates use Beijing midnight converted to local time as date markers, not actual publication times.
 
 Release builds wait until the next 00:05 local time to start daily imports, fetching exchange rates first; startup does not trigger an immediate cycle. Debug builds do not schedule imports. Each cycle runs configured, enabled integrations whose query intervals have elapsed. Intervals must be positive and become due on the specified day. Failed queries do not restart the interval. A zero missing-report deadline disables only overdue errors, not network, parsing or financial validation errors.
 
