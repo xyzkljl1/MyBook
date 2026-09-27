@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Configuration;
+﻿using Microsoft.Extensions.Configuration;
 using SqlSugar;
 using System.Globalization;
 using System.IO;
@@ -243,24 +243,34 @@ namespace MyBook
             public string? Read()
             {
                 EnsureLock();
-                try { return connection.Queryable<FirstTradeSession>().Where(row => row.loginHash == loginHash).First()?.stateJson; }
+                try { return connection.Queryable<FirstTradeSession>().Where(row => row.loginHash == loginHash).OrderByDescending(row => row.Id).First()?.stateJson; }
                 catch { throw new InvalidOperationException("FirstTrade session database read failed."); }
             }
 
-            public void Save(string stateJson)
+            public void Save(string stateJson, bool newSession = false)
             {
                 EnsureLock();
                 try
                 {
                     // Session writes commit independently of financial import validation.
-                    var affected = connection.Ado.ExecuteCommand("""
-                        insert into FirstTradeSessions (loginHash, stateJson, updateTimeUtc)
-                        select @hash, @state, utc_timestamp(6)
-                        where connection_id() = @id and is_used_lock(@name) = @id
-                        on duplicate key update stateJson = @state, updateTimeUtc = utc_timestamp(6)
-                        """, new SugarParameter("@hash", loginHash), new SugarParameter("@state", stateJson),
-                        new SugarParameter("@id", connectionId), new SugarParameter("@name", lockName));
-                    if (affected == 0) throw new InvalidOperationException();
+                    var result = connection.Ado.UseTran(() =>
+                    {
+                        var latest = connection.Queryable<FirstTradeSession>().Where(row => row.loginHash == loginHash)
+                            .OrderByDescending(row => row.Id).First();
+                        // Temporary debug: retain login history; updateTimeUtc is fixed at login, not ordinary session saves.
+                        if (newSession || latest is null)
+                        {
+                            if (latest is not null)
+                                connection.Ado.ExecuteCommand("UPDATE FirstTradeSessions SET stateJson=JSON_OBJECT('Version',1,'Cookies',JSON_ARRAY()) WHERE Id=@id",
+                                    new SugarParameter("@id", latest.Id));
+                            connection.Ado.ExecuteCommand("INSERT INTO FirstTradeSessions (loginHash,stateJson,updateTimeUtc) VALUES (@hash,@state,UTC_TIMESTAMP(6))",
+                                new SugarParameter("@hash", loginHash), new SugarParameter("@state", stateJson));
+                        }
+                        else
+                            connection.Ado.ExecuteCommand("UPDATE FirstTradeSessions SET stateJson=@state WHERE Id=@id",
+                                new SugarParameter("@state", stateJson), new SugarParameter("@id", latest.Id));
+                    });
+                    if (!result.IsSuccess) throw new InvalidOperationException();
                 }
                 catch { throw new InvalidOperationException("FirstTrade session database write failed; requests stopped."); }
             }

@@ -288,7 +288,7 @@ namespace MyBook
     }
 
     // A login can own multiple investment accounts; this is not an Account relationship.
-    [SugarIndex("unique_FirstTradeSessions_login_hash", nameof(loginHash), OrderByType.Asc, true)]
+    [SugarIndex("index_FirstTradeSessions_login_hash", nameof(loginHash), OrderByType.Asc, false)]
     [SugarTable("FirstTradeSessions")]
     public class FirstTradeSession
     {
@@ -301,6 +301,7 @@ namespace MyBook
         [SugarColumn(ColumnDataType = "json")]
         public required string stateJson { get; set; }
 
+        // Temporary debug: login creation time; legacy rows retain their original last-update time.
         [SugarColumn(ColumnDataType = "datetime(6)")]
         public DateTime updateTimeUtc { get; set; }
     }

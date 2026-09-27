@@ -36,7 +36,7 @@ CREATE TABLE `firsttradesessions` (
   `stateJson` json NOT NULL,
   `updateTimeUtc` datetime(6) NOT NULL,
   PRIMARY KEY (`Id`),
-  UNIQUE KEY `unique_FirstTradeSessions_login_hash` (`loginHash`)
+  KEY `index_FirstTradeSessions_login_hash` (`loginHash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `plaiditems` (

@@ -411,7 +411,6 @@ namespace MyBook
                 if (!String.IsNullOrEmpty(session.Ftat) && !String.IsNullOrEmpty(session.Sid)) return;
                 token.ThrowIfCancellationRequested();
                 session.Ftat = session.Sid = null;
-                SaveSession();
                 await RequestAsync(Endpoint.Bootstrap, null, null, token).ConfigureAwait(false);
                 var login = await RequestAsync(Endpoint.Login, null, new()
                 {
@@ -443,7 +442,7 @@ namespace MyBook
             {
                 session.Ftat = RequiredText(json, "ftat");
                 session.Sid = RequiredText(json, "sid");
-                SaveSession();
+                SaveSession(newSession: true);
             }
 
             private void EnsureSessionLock()
@@ -452,14 +451,14 @@ namespace MyBook
                 catch { throw new FirstTradeException("database session lock lost; requests stopped"); }
             }
 
-            private void SaveSession()
+            private void SaveSession(bool newSession = false)
             {
                 if (cookies is not null)
                     session.Cookies = cookies.GetAllCookies().Cast<Cookie>().Where(c => !c.Expired)
                         .Select(c => new FirstTradeCookie(c.Name, c.Value, c.Path, c.Domain, c.Secure, c.HttpOnly, c.Expires)).ToList();
                 try
                 {
-                    sessionStore.Save(JsonSerializer.Serialize(session));
+                    sessionStore.Save(JsonSerializer.Serialize(session), newSession);
                 }
                 catch { throw new FirstTradeException("cannot persist database session; requests stopped"); }
             }
@@ -588,7 +587,8 @@ namespace MyBook
                         if (response.StatusCode == HttpStatusCode.Unauthorized)
                         {
                             session.Ftat = session.Sid = null;
-                            SaveSession();
+                            session.Cookies.Clear();
+                            sessionStore.Save("{\"Version\":1,\"Cookies\":[]}");
                             throw new FirstTradeSessionExpiredException();
                         }
                         if (!response.IsSuccessStatusCode) throw new FirstTradeException($"{label}: HTTP {(int)response.StatusCode}");
@@ -638,7 +638,8 @@ namespace MyBook
                     if (response.StatusCode == HttpStatusCode.Unauthorized && method == HttpMethod.Get && endpoint != Endpoint.Bootstrap)
                     {
                         session.Ftat = session.Sid = null;
-                        SaveSession();
+                        session.Cookies.Clear();
+                        sessionStore.Save("{\"Version\":1,\"Cookies\":[]}");
                         throw new FirstTradeSessionExpiredException();
                     }
                     if (!response.IsSuccessStatusCode)
