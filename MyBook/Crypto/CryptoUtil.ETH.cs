@@ -235,7 +235,7 @@ namespace MyBook
                         date,
                         transactionPriceImpact,
                         0,
-                        "交易价格影响",
+                        "持仓价格变动",
                         $"{sourcePrefix} valuation; asset={asset}; endingValue={endingValue}; repricedBeginning={repricedBeginningValue}; eventValue={eventValue}; close={currentPrice.CloseUsd}; closeDate={currentPrice.SourceCandleDate:yyyy-MM-dd}"));
                 }
             }

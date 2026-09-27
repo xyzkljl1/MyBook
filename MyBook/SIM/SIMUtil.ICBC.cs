@@ -203,7 +203,7 @@ namespace MyBook
                 ParseICBCSIMDecimal(match.Groups["balance"].Value),
                 CurrencyType.RMB);
             var summary = NormalizeICBCSIMText(match.Groups["summary"].Value);
-            var reason = InferICBCSIMReason(direction, summary);
+            var reason = InferICBCSIMReason(summary);
             var destAccount = BuildICBCSIMDestAccount(summary, reason);
             transaction = new ICBCSIMTransaction(
                 match.Groups["cardTail"].Value,
@@ -418,15 +418,15 @@ namespace MyBook
             return true;
         }
 
-        private static string InferICBCSIMReason(string direction, string summary)
+        private static string InferICBCSIMReason(string summary)
         {
-            foreach (var prefix in new[] { "消费", "缴费", "退款", "还款", "转账", "转帐", "利息", "费用", "工资" })
+            foreach (var prefix in new[] { "消费", "缴费", "退款", "还款", "转账", "转帐", "利息" })
             {
                 if (summary.StartsWith(prefix, StringComparison.Ordinal))
-                    return prefix == "转帐" ? "转账" : prefix;
+                    return prefix switch { "转帐" => "转账", "缴费" => "消费", _ => prefix };
             }
 
-            return direction == "收入" ? "收入" : "支出";
+            throw new MailParseException("Unsupported ICBC SMS transaction summary.");
         }
 
         private static string BuildICBCSIMDestAccount(string summary, string reason)
@@ -436,6 +436,8 @@ namespace MyBook
                 value = value[reason.Length..];
             else if (reason == "转账" && value.StartsWith("转帐", StringComparison.Ordinal))
                 value = value["转帐".Length..];
+            else if (reason == "消费" && value.StartsWith("缴费", StringComparison.Ordinal))
+                value = value["缴费".Length..];
 
             value = value.Trim(' ', '-', '—', '_', ':', '：');
             return String.IsNullOrWhiteSpace(value) ? summary : value;
