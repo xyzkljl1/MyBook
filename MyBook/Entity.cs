@@ -255,11 +255,10 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD','GBP','EUR')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','WiseMail','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','SchwabReportMail','PlaidSchwab','PlaidWise','WiseApi','AntMail','EleMail','PayPalCN')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','PlaidSchwab','WiseApi','AntMail','EleMail','PayPalCN')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
-        public const string OAuthTokenProvider = "enum('Nexus')";
         public const string PlaidEnvironment = "enum('Production','Sandbox')";
     }
 
@@ -282,44 +281,10 @@ namespace MyBook
         Undetermined
     }
 
-    public enum OAuthTokenProvider
-    {
-        Nexus
-    }
-
     public enum PlaidEnvironment
     {
         Production,
         Sandbox
-    }
-
-    [SugarIndex("unique_OAuthTokens_provider", nameof(provider), OrderByType.Asc, true)]
-    [SugarTable("OAuthTokens")]
-    public class OAuthToken
-    {
-        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
-        public int Id { get; set; }
-
-        [SugarColumn(DefaultValue = "Nexus", ColumnDataType = MySqlEnumColumnTypes.OAuthTokenProvider, SqlParameterDbType = typeof(EnumToStringConvert))]
-        public OAuthTokenProvider provider { get; set; } = OAuthTokenProvider.Nexus;
-
-        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(4096)")]
-        public string accessToken { get; set; } = "";
-
-        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(4096)")]
-        public string refreshToken { get; set; } = "";
-
-        [SugarColumn(DefaultValue = "Bearer", ColumnDataType = "varchar(32)")]
-        public string tokenType { get; set; } = "Bearer";
-
-        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(1024)")]
-        public string scope { get; set; } = "";
-
-        [SugarColumn(IsNullable = true, ColumnDataType = "datetime(6)")]
-        public DateTime? expiresAt { get; set; }
-
-        [SugarColumn(ColumnDataType = "datetime(6)")]
-        public DateTime updateTime { get; set; }
     }
 
     // A login can own multiple investment accounts; this is not an Account relationship.
@@ -728,8 +693,7 @@ namespace MyBook
         ICBCHistoryDetailMail,
         ICBCSIMSMS,
         BOCSIMSMS,
-        WiseMail,
-        NexusDpMonthlyReport,
+        NexusDpMonthlyReport = 7,
         KrakenApi,
         EthereumApi,
         PayPalUS,
@@ -737,10 +701,8 @@ namespace MyBook
         IFastMail,
         ZAMail,
         FirstTradeApi,
-        SchwabReportMail,
-        PlaidSchwab,
-        PlaidWise,
-        WiseApi,
+        PlaidSchwab = 16,
+        WiseApi = 18,
         AntMail,
         EleMail,
         PayPalCN,

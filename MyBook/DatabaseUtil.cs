@@ -27,7 +27,7 @@ namespace MyBook
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport), typeof(StatementImportSource)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport), typeof(StatementImportSource)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -274,36 +274,6 @@ namespace MyBook
                 catch { /* A broken connection cannot retain a usable session lock. */ }
                 finally { connection.Dispose(); }
             }
-        }
-
-        public OAuthToken? GetOAuthToken(OAuthTokenProvider provider)
-        {
-            return db.Queryable<OAuthToken>()
-                .Where(token => token.provider == provider)
-                .First();
-        }
-
-        public void SaveOAuthToken(OAuthToken token)
-        {
-            ExecuteLockedTransaction(() =>
-            {
-                var existing = db.Queryable<OAuthToken>()
-                    .Where(item => item.provider == token.provider)
-                    .First();
-                if (existing is null)
-                {
-                    token.Id = db.Insertable(token).ExecuteReturnIdentity();
-                    return;
-                }
-
-                existing.accessToken = token.accessToken;
-                existing.refreshToken = token.refreshToken;
-                existing.tokenType = token.tokenType;
-                existing.scope = token.scope;
-                existing.expiresAt = token.expiresAt;
-                existing.updateTime = token.updateTime;
-                db.Updateable(existing).ExecuteCommand();
-            });
         }
 
         public List<PlaidItem> GetPlaidItems(PlaidEnvironment environment)
@@ -5268,13 +5238,9 @@ namespace MyBook
             ExecuteLockedTransaction(() =>
             {
                 var wiseAccount = GetAccountByName("WISE");
-                ClearRecordMatchesForStatementProvider(StatementImportProvider.WiseMail);
-                ClearRecordMatchesForStatementProvider(StatementImportProvider.PlaidWise);
                 ClearRecordMatchesForStatementProvider(StatementImportProvider.WiseApi);
                 var wiseImportIds = db.Queryable<StatementImport>()
-                    .Where(import => (import.provider == StatementImportProvider.WiseMail
-                        || import.provider == StatementImportProvider.PlaidWise
-                        || import.provider == StatementImportProvider.WiseApi) && import.statementKey != "")
+                    .Where(import => import.provider == StatementImportProvider.WiseApi && import.statementKey != "")
                     .Select(import => import.Id)
                     .ToList();
                 var wiseRecords = wiseImportIds.Count == 0
@@ -5876,8 +5842,6 @@ namespace MyBook
                 return "AccountInternalIds";
             if (type == typeof(AccountBalance))
                 return "AccountBalances";
-            if (type == typeof(OAuthToken))
-                return "OAuthTokens";
             if (type == typeof(FirstTradeSession))
                 return "FirstTradeSessions";
             if (type == typeof(PlaidItem))

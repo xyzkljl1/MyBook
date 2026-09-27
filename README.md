@@ -89,7 +89,7 @@ Set `firsttrade_username`, `firsttrade_password` and `firsttrade_totp_secret` (t
 
 ## Database
 
-The application validates its MySQL schema on startup. Accounts, registered account identifiers, Plaid connections, fixed import starting points, initial rates for each source and currency, and start snapshots are fixed data preserved during cleanup. Imported records, holdings, other snapshots and OAuth tokens are runtime data.
+The application validates its MySQL schema on startup. Accounts, registered account identifiers, Plaid connections, fixed import starting points, initial rates for each source and currency, and start snapshots are fixed data preserved during cleanup. Imported records, holdings and other snapshots are runtime data.
 
 Rebuild an empty database using the tracked schema and local fixed-data file:
 

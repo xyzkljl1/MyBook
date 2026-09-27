@@ -16,7 +16,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Google.Apis.Drive.v3" Version="1.76.0.4252" />
     <PackageReference Include="HtmlAgilityPack" Version="1.12.1" />
     <PackageReference Include="IBApi" Version="1.0.0-preview-975" />
     <PackageReference Include="MailKit" Version="4.13.0" />
