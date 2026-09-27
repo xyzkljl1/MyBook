@@ -1789,7 +1789,7 @@ namespace MyBook
                         "IBKR interest detail components");
                     foreach (var (amount, component) in new[] { (securities, "证券"), (futures, "期货") })
                         if (amount != 0)
-                            details.Add((new Currency(amount, currency), date, "应计现金利息",
+                            details.Add((new Currency(amount, currency), date, "应计利息",
                                 $"InterestAccrualDetail/{FormatIBKRCsvRow(row)}/{component}"));
                 }
             foreach (var row in report.OptionalDataRows(IBKRStockYieldEnhancementLoanFeeSection))
@@ -1798,14 +1798,13 @@ namespace MyBook
                 if (row.Fields[0].StartsWith("总数", StringComparison.Ordinal))
                     continue;
                 details.Add((new Currency(ParseIBKRDecimalAt(row, 8, "stock loan interest"), ParseIBKRCurrencyType(row.Fields[0])),
-                    ParseIBKRDate(row.Fields[1]), "应计证券出借收益", $"InterestAccrualDetail/{FormatIBKRCsvRow(row)}"));
+                    ParseIBKRDate(row.Fields[1]), "应计利息", $"InterestAccrualDetail/{FormatIBKRCsvRow(row)}"));
             }
             // 证券出借收益结算的应计减少可能计入报表“应计利息”，而非“应计转回”。
             // 所有现金利息按实际结算明细分别转回；不从汇总栏推算差额。
             foreach (var row in ReadIBKRMoneyDetails(report, IBKRInterestSection))
                 details.Add((new Currency(-ParseIBKRDecimalAt(row, 3, "settled interest"), ParseIBKRCurrencyType(row.Fields[0])),
-                    ParseIBKRDate(row.Fields[1]), row.Fields[2].Contains("股票收益提升计划", StringComparison.Ordinal)
-                        ? "应计证券出借收益转回" : "应计现金利息转回", $"InterestAccrualReversal/{FormatIBKRCsvRow(row)}"));
+                    ParseIBKRDate(row.Fields[1]), "应计利息", $"InterestAccrualReversal/{FormatIBKRCsvRow(row)}"));
             return details;
         }
 
