@@ -296,7 +296,7 @@ partial class MailUtil
         }
         else if (description.StartsWith("Inbound domestic payment ") && record.v > 0 && reference.Length > 0)
         {
-            record.Reason = "转入";
+            record.Reason = "转账";
             code = $"IFast-receipt-{reference}";
         }
         else if (record.v < 0 && Regex.IsMatch(description, @"QR|Scan.*Pay", RegexOptions.IgnoreCase))

@@ -90,7 +90,7 @@ partial class MailUtil
             var amount = ParseIFastMoney(match);
             var date = DateTime.ParseExact(match.Groups["date"].Value, "dd MMM yyyy", CultureInfo.InvariantCulture);
             key = $"IFast-receipt-{match.Groups["ref"].Value}";
-            return (key, [BuildIFastRecord(amount, date, "转入", match.Groups["payer"].Value, key)]);
+            return (key, [BuildIFastRecord(amount, date, "转账", match.Groups["payer"].Value, key)]);
         }
         if (message.Subject == IFastConversionSubject)
         {
@@ -144,7 +144,7 @@ partial class MailUtil
 
     private void ResolveIFastTransferAccount(Record record, string counterparty, string? counterpartyName = null)
     {
-        if (record.Reason is not ("转入" or "转出")) return;
+        if (record.Reason != "转账") return;
         // 保留原有 IBAN 查找；只有明确的对方姓名字段才能参与本人别名识别。
         var ibans = Regex.Matches(counterparty, @"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)

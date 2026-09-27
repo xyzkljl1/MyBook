@@ -49,7 +49,7 @@ partial class MailUtil
             date = new DateTimeOffset(bankDate, TimeSpan.FromHours(8)).LocalDateTime;
             amount.v = -amount.v;
         }
-        var record = HKBankRecord("Ant", message, amount, date, receipt ? "转入" : "支付");
+        var record = HKBankRecord("Ant", message, amount, date, receipt ? "转账" : "消费");
         // Deposit notices contain neither a transaction time nor a counterparty.
         if (receipt) record.Source += "; timeSource=mail-date";
         return record;

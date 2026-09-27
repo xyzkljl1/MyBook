@@ -37,7 +37,7 @@ partial class MailUtil
             detail = MatchHKBankMail("ELE", text, @"来自(?<party>.+?)\s+" + HKBankMoneyPattern
                 + "的转账已于" + datePattern + @"存入你的账户（尾数(?<suffix>\d+)）。");
             amount = HKBankAmount(detail);
-            reason = "转入";
+            reason = "转账";
         }
         else
         {

@@ -104,7 +104,7 @@ partial class DatabaseUtil
     private static bool IsForeignFundedRmbPurchase(Record record) => record.v < 0 && record.t != CurrencyType.RMB
         && record.DescCurrency is { t: CurrencyType.RMB, v: < 0 }
         && record.HoldingQuantity == 0
-        && record.Reason is not ("换汇" or "转账" or "转入" or "转出" or "内部转账" or "手续费" or "交易");
+        && record.Reason is not ("换汇" or "转账" or "内部转账" or "手续费" or "交易");
 }
 
 internal sealed record MonthlyReferenceRate(decimal RmbPerUnit, DateTime SourceDateUtc);

@@ -2566,7 +2566,7 @@ namespace MyBook
             GetTransferInstitutionTypes(counterpartyNames) is [var type] && type is "IBKR" or "SCHWAB" or "FIRSTTRADE";
 
         private static bool IsTransferPrincipal(Record record) =>
-            record.Reason is "转入" or "转出" or "转账"
+            record.Reason == "转账"
             && !(record.Source.StartsWith("WiseApi/", StringComparison.Ordinal) && record.Source.EndsWith("/gross", StringComparison.Ordinal));
 
         internal static void ApplyAccountTransferRules(Record record, Account account)
@@ -2576,8 +2576,8 @@ namespace MyBook
                 || record.HoldingQuantity != 0 || record.Holding is not null && record.Holding.holdingType != HoldingType.Cash)
                 return;
             // 指定账户的入金和所有投资账户的出金均来自或流向本人其他账户。
-            if (account.incomingTransfersAreInternal && record.v > 0 && record.Reason is "转入" or "转账"
-                || account.usage == AccountUsage.Investment && record.v < 0 && record.Reason is "转出" or "转账")
+            if (account.incomingTransfersAreInternal && record.v > 0
+                || account.usage == AccountUsage.Investment && record.v < 0)
                 record.isInternal = true;
         }
 

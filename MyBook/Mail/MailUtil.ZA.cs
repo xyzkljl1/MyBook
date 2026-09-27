@@ -54,7 +54,7 @@ partial class MailUtil
             detail = MatchHKBankMail("ZA", text, @"^收到一笔转账\s+你好.*?你已于\s+" + ZADatePattern
                 + @"\s+收到以下转账。\s+金额：\s*" + ZAMoneyPattern
                 + @"\s+付款人：(?<party>.+?)\s+交易类型：转入\s+你可到 ZA Bank App");
-            reason = "转入";
+            reason = "转账";
             sign = 1;
         }
         else if (message.Subject.Contains("你已转出", StringComparison.Ordinal))
@@ -62,7 +62,7 @@ partial class MailUtil
             detail = MatchHKBankMail("ZA", text, @"^完成一笔转出\s+你好.*?你已于\s+" + ZADatePattern
                 + @"\s+完成以下交易。\s+转出金额：\s*" + ZAMoneyPattern
                 + @"\s+收款人：(?<party>.+?)\s+交易类型：(?:转出|手机号转出|Email转出)\s+你可到 ZA Bank App");
-            reason = "转出";
+            reason = "转账";
         }
         else
         {
