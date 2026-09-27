@@ -75,13 +75,6 @@ CREATE TABLE `statementimports` (
   UNIQUE KEY `unique_StatementImports_provider_time_key` (`provider`,`time`,`statementKey`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `statementimportsources` (
-  `_statementImport_Id` int NOT NULL,
-  `sourceDataJson` json NOT NULL,
-  PRIMARY KEY (`_statementImport_Id`),
-  CONSTRAINT `fk_StatementImportSources_statementImport` FOREIGN KEY (`_statementImport_Id`) REFERENCES `statementimports` (`Id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 CREATE TABLE `ratehistory` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `source` enum('GoogleFinance','IFastWebsite','IFastMail') NOT NULL DEFAULT 'GoogleFinance',

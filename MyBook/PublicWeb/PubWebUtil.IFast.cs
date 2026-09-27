@@ -6,20 +6,22 @@ partial class PubWebUtil
 {
     internal const string IFastInterestRateUrl = "https://www.ifastgb.com/api/current-account-setup/active-current-account-setup";
 
-    public async Task<Dictionary<CurrencyType, decimal>> FetchIFastInterestRates()
-        => (await FetchIFastRateQuotes().ConfigureAwait(false)).ToDictionary(pair => pair.Key, pair => pair.Value.Gross);
-
     internal sealed record IFastRateQuote(decimal Gross, decimal Aer);
 
-    internal async Task<Dictionary<CurrencyType, IFastRateQuote>> FetchIFastRateQuotes()
+    internal async Task<List<RateHistory>> ReadIFastInterestRates()
     {
         var json = await HttpGetString(IFastInterestRateUrl).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Cannot fetch IFast interest rates.");
-        return ParseIFastRateQuotes(json);
+        var quotes = ParseIFastRateQuotes(json);
+        var observedAt = DateTime.Now;
+        // The website does not provide an effective time. This is an observation, not a backdated rate.
+        return quotes.Select(pair => new RateHistory
+        {
+            source = RateSource.IFastWebsite, currency = pair.Key,
+            rateDate = observedAt, fetchedAt = observedAt,
+            grossRate = pair.Value.Gross, aer = pair.Value.Aer
+        }).ToList();
     }
-
-    internal static Dictionary<CurrencyType, decimal> ParseIFastInterestRates(string json)
-        => ParseIFastRateQuotes(json).ToDictionary(pair => pair.Key, pair => pair.Value.Gross);
 
     internal static Dictionary<CurrencyType, IFastRateQuote> ParseIFastRateQuotes(string json)
     {

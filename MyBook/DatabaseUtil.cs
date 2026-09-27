@@ -27,7 +27,7 @@ namespace MyBook
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport), typeof(StatementImportSource)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -38,7 +38,6 @@ namespace MyBook
             new("fk_Records_account", "Records", "_account_Id", "Accounts", "Id"),
             new("fk_Records_holding", "Records", "_holding_Id", "Holdings", "Id"),
             new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id"),
-            new("fk_StatementImportSources_statementImport", "StatementImportSources", "_statementImport_Id", "StatementImports", "Id"),
             new("fk_RateHistory_statementImport", "RateHistory", "_statementImport_Id", "StatementImports", "Id"),
             new("fk_Records_matchedRecord", "Records", "matchedRecordId", "Records", "Id"),
             new("fk_AllocatedExpenseItems_record", "AllocatedExpenseItems", "_record_Id", "Records", "Id"),
@@ -633,8 +632,7 @@ namespace MyBook
             StatementImportProvider provider,
             DateTime time,
             string statementKey,
-            IEnumerable<AccountInternalId>? internalCardNos = null,
-            string? sourceDataJson = null)
+            IEnumerable<AccountInternalId>? internalCardNos = null)
         {
             var internalCardNoList = internalCardNos?.ToList() ?? [];
             try
@@ -644,7 +642,7 @@ namespace MyBook
                     if (IsStatementImported(provider, time, statementKey))
                         return false;
 
-                    InsertStatementImport(provider, time, statementKey, sourceDataJson);
+                    InsertStatementImport(provider, time, statementKey);
                     if (internalCardNoList.Count > 0)
                         EnsureAccountInternalCardNos(internalCardNoList);
 
@@ -718,7 +716,6 @@ namespace MyBook
                             import.BeginningHoldings,
                             import.InternalCardNos,
                             recordDate: import.RecordDate,
-                            sourceDataJson: import.SourceDataJson,
                             sharedStatementImportId: statementImportId);
                         if (!statementImportId.HasValue)
                             break;
@@ -758,7 +755,6 @@ namespace MyBook
             bool preserveCurrentAccountBalances = false,
             DateTime? validateCurrentBalancesRolledBackTo = null,
             DateTime? recordDate = null,
-            string? sourceDataJson = null,
             int? sharedStatementImportId = null)
         {
             if (!sharedStatementImportId.HasValue && IsStatementImported(provider, time, statementKey))
@@ -805,7 +801,7 @@ namespace MyBook
                 beginningAccountBalances,
                 holdingAccount,
                 beginningHoldings);
-            var statementImportId = sharedStatementImportId ?? InsertStatementImport(provider, time, statementKey, sourceDataJson);
+            var statementImportId = sharedStatementImportId ?? InsertStatementImport(provider, time, statementKey);
 
             if (holdingAccount is not null && holdings is not null)
             {
@@ -2739,17 +2735,14 @@ namespace MyBook
             return primary;
         }
 
-        private int InsertStatementImport(StatementImportProvider provider, DateTime time, string statementKey, string? sourceDataJson = null)
+        private int InsertStatementImport(StatementImportProvider provider, DateTime time, string statementKey)
         {
-            var id = db.Insertable(new StatementImport
+            return db.Insertable(new StatementImport
             {
                 provider = provider,
                 time = NormalizeStatementImportTime(time),
                 statementKey = statementKey
             }).ExecuteReturnIdentity();
-            if (sourceDataJson is not null)
-                db.Insertable(new StatementImportSource { _statementImport_Id = id, sourceDataJson = sourceDataJson }).ExecuteCommand();
-            return id;
         }
 
         private void SaveRecordsCore(List<Record> recordList, int statementImportId)
@@ -5342,15 +5335,23 @@ namespace MyBook
                 .ToList().ToDictionary(r => r.Currency, r => r.Time);
         }
 
+        internal List<RateHistory> GetRateHistory(params RateSource[] sources)
+            => db.Queryable<RateHistory>().Where(rate => sources.Contains(rate.source))
+                .OrderBy(rate => rate.rateDate).ToList();
+
         internal void SaveRateHistory(IReadOnlyList<RateHistory> rates)
         {
             ExecuteLockedTransaction(() =>
             {
                 foreach (var rate in rates)
                 {
-                    if (!db.Queryable<RateHistory>().Any(r => r.source == rate.source
-                        && r.currency == rate.currency && r.rateDate == rate.rateDate))
+                    var existing = db.Queryable<RateHistory>().Where(r => r.source == rate.source
+                        && r.currency == rate.currency && r.rateDate == rate.rateDate).First();
+                    if (existing is null)
                         db.Insertable(rate).ExecuteCommand();
+                    else if (existing.exchangeRateToRmb != rate.exchangeRateToRmb
+                        || existing.grossRate != rate.grossRate || existing.aer != rate.aer)
+                        throw new InvalidOperationException($"Conflicting rate history: {rate.source}, {rate.currency}, {rate.rateDate:O}.");
                 }
             });
         }
@@ -5433,21 +5434,6 @@ namespace MyBook
             return db.Queryable<StatementImport>()
                 .Where(statementImport => statementImport.provider == provider)
                 .ToList();
-        }
-
-        public string? GetStatementSource(int statementImportId)
-        {
-            return db.Queryable<StatementImportSource>()
-                .Where(source => source._statementImport_Id == statementImportId)
-                .Select(source => source.sourceDataJson).First();
-        }
-
-        public Dictionary<int, string> GetStatementSources(IEnumerable<int> statementImportIds)
-        {
-            var ids = statementImportIds.Distinct().ToArray();
-            return ids.Length == 0 ? [] : db.Queryable<StatementImportSource>()
-                .Where(source => ids.Contains(source._statementImport_Id)).ToList()
-                .ToDictionary(source => source._statementImport_Id, source => source.sourceDataJson);
         }
 
         public StatementImport? GetLatestStatementImport(StatementImportProvider provider)
@@ -5860,8 +5846,6 @@ namespace MyBook
                 return "SnapshotItems";
             if (type == typeof(StatementImport))
                 return "StatementImports";
-            if (type == typeof(StatementImportSource))
-                return "StatementImportSources";
             return type.Name;
         }
 
@@ -6257,7 +6241,6 @@ namespace MyBook
             List<Holding>? beginningHoldings = null,
             List<AccountInternalId>? internalCardNos = null,
             DateTime? recordDate = null,
-            string? sourceDataJson = null,
             bool forceValidateBeginningBalances = false)
         {
             Provider = provider;
@@ -6271,7 +6254,6 @@ namespace MyBook
             BeginningHoldings = beginningHoldings ?? [];
             InternalCardNos = internalCardNos ?? [];
             RecordDate = recordDate;
-            SourceDataJson = sourceDataJson;
             ForceValidateBeginningBalances = forceValidateBeginningBalances;
         }
 
@@ -6286,7 +6268,6 @@ namespace MyBook
         public List<Holding> BeginningHoldings { get; }
         public List<AccountInternalId> InternalCardNos { get; }
         public DateTime? RecordDate { get; }
-        public string? SourceDataJson { get; }
         public bool ForceValidateBeginningBalances { get; }
     }
 }

@@ -227,7 +227,7 @@ namespace MyBook
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
         public CurrencyType currency { get; set; } = CurrencyType.RMB;
 
-        // Source quote/effective time converted to the runtime machine's local time, including time of day.
+        // Source quote/effective time in local time; website rates without an effective time use observation time.
         [SugarColumn(ColumnDataType = "datetime(6)")]
         public DateTime rateDate { get; set; }
 
@@ -724,17 +724,6 @@ namespace MyBook
         [SugarColumn(DefaultValue = "''")]
         public string statementKey { get; set; } = "";
 
-    }
-
-    [SugarTable("StatementImportSources")]
-    public class StatementImportSource
-    {
-        [SugarColumn(IsPrimaryKey = true)]
-        public int _statementImport_Id { get; set; }
-
-        // Loaded explicitly and saved in the same transaction as the import and its records.
-        [SugarColumn(ColumnDataType = "json")]
-        public string sourceDataJson { get; set; } = null!;
     }
 
     //币种

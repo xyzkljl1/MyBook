@@ -1,9 +1,5 @@
 using System.Globalization;
 using System.Net;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using HtmlAgilityPack;
 using MailKit.Search;
@@ -13,15 +9,8 @@ namespace MyBook;
 
 partial class MailUtil
 {
-    private const string IFastRateSnapshotPrefix = "IFast-rate-snapshot-";
-    private const string IFastRateMailPrefix = "IFast-rate-mail-";
-    private static readonly JsonSerializerOptions IFastRateJsonOptions = new()
-        { Converters = { new JsonStringEnumConverter() } };
+    // PreviousAer is used only to validate a received notice, never persisted.
     internal sealed record IFastRateNotice(CurrencyType Currency, DateTime Date, decimal PreviousAer, decimal Aer);
-    internal sealed record IFastRateSnapshot(DateTimeOffset RetrievedAt, Dictionary<CurrencyType, PubWebUtil.IFastRateQuote> Rates)
-    {
-        public DateTime Date => TimeZoneInfo.ConvertTime(RetrievedAt, IFastTimeZone).Date;
-    }
     internal sealed record IFastScheduledRate(DateTime Date, decimal? Gross);
 
     private async Task UpdateIFastInterestRates()
@@ -30,22 +19,26 @@ partial class MailUtil
         var messages = await SearchMessagesFromMailbox(CreateYahooMailbox() with { Proxy = null }, "IFast rate notices",
             SearchQuery.FromContains("@ifastgb.com").And(SearchQuery.SubjectContains("Interest rate update")),
             null, GetMailDateTime).ConfigureAwait(false);
-        foreach (var message in messages)
+        var notices = messages.SelectMany(ParseIFastRateNotice).ToList();
+        var history = database.GetRateHistory(RateSource.IFastWebsite, RateSource.IFastMail);
+        using var web = new PubWebUtil(config);
+        var observations = await web.ReadIFastInterestRates().ConfigureAwait(false);
+        // Keep at most one copy of each observed rate per bank day, preserving its first observation time.
+        var rates = observations.Where(rate => !history.Any(item => item.source == rate.source
+            && item.currency == rate.currency && IFastRateBankDate(item) == IFastRateBankDate(rate)
+            && item.grossRate == rate.grossRate && item.aer == rate.aer)).ToList();
+        ValidateIFastRateNotices(history.Concat(rates).ToList(), notices);
+        var fetchedAt = DateTime.Now;
+        rates.AddRange(notices.Select(notice => new RateHistory
         {
-            var key = IFastRateMailPrefix + IFastMessageKey(message.MessageId);
-            if (database.IsStatementKeyImported(IFastProvider, key)) continue;
-            var notices = ParseIFastRateNotice(message);
-            database.MarkStatementProcessedOnce(IFastProvider, GetMailDateTime(message), key,
-                sourceDataJson: JsonSerializer.Serialize(notices, IFastRateJsonOptions));
-        }
-        using var web = new PubWebUtil(config, database);
-        var rates = await web.FetchIFastRateQuotes().ConfigureAwait(false);
-        var snapshot = new IFastRateSnapshot(DateTimeOffset.UtcNow, rates);
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(rates, IFastRateJsonOptions))));
-        // At most one copy of each observed quote set per bank day; keep earlier observations intact.
-        database.MarkStatementProcessedOnce(IFastProvider, IFastLocalTime(snapshot.Date),
-            $"{IFastRateSnapshotPrefix}{snapshot.Date:yyyy-MM-dd}-{hash}",
-            sourceDataJson: JsonSerializer.Serialize(snapshot, IFastRateJsonOptions));
+            source = RateSource.IFastMail,
+            currency = notice.Currency,
+            rateDate = IFastLocalTime(notice.Date),
+            fetchedAt = fetchedAt,
+            aer = notice.Aer
+        }));
+        BuildIFastRateSchedule(history.Concat(rates).ToList());
+        database.SaveRateHistory(rates);
     }
 
     internal static List<IFastRateNotice> ParseIFastRateNotice(MimeMessage message)
@@ -73,58 +66,69 @@ partial class MailUtil
     }
 
     private Dictionary<CurrencyType, List<IFastScheduledRate>> ReadIFastRateSchedule()
+        => BuildIFastRateSchedule(database.GetRateHistory(RateSource.IFastWebsite, RateSource.IFastMail));
+
+    private static DateTime IFastRateBankDate(RateHistory rate)
+        => TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(rate.rateDate, DateTimeKind.Local), IFastTimeZone).Date;
+
+    // Published AER is displayed to two percentage decimal places (e.g. 1.8048% becomes 1.80%).
+    private static bool SameIFastAer(decimal left, decimal right)
+        => Decimal.Round(left * 100, 2, MidpointRounding.AwayFromZero)
+            == Decimal.Round(right * 100, 2, MidpointRounding.AwayFromZero);
+
+    internal static void ValidateIFastRateNotices(List<RateHistory> history, List<IFastRateNotice> notices)
     {
-        var imports = database.GetStatementImports(IFastProvider).Where(item =>
-            item.statementKey.StartsWith(IFastRateSnapshotPrefix, StringComparison.Ordinal)
-            || item.statementKey.StartsWith(IFastRateMailPrefix, StringComparison.Ordinal)).ToList();
-        var sources = database.GetStatementSources(imports.Select(item => item.Id));
-        T Read<T>(StatementImport item) => JsonSerializer.Deserialize<T>(sources.GetValueOrDefault(item.Id)
-            ?? throw new InvalidOperationException("Missing IFast rate source data."), IFastRateJsonOptions)
-            ?? throw new InvalidOperationException("Invalid IFast rate source data.");
-        return BuildIFastRateSchedule(imports.Where(item => item.statementKey.StartsWith(IFastRateSnapshotPrefix, StringComparison.Ordinal))
-                .Select(Read<IFastRateSnapshot>).ToList(),
-            imports.Where(item => item.statementKey.StartsWith(IFastRateMailPrefix, StringComparison.Ordinal))
-                .SelectMany(Read<List<IFastRateNotice>>).ToList());
+        foreach (var notice in notices)
+        {
+            var first = history.Where(item => item.source == RateSource.IFastWebsite && item.currency == notice.Currency)
+                .MinBy(item => item.rateDate)
+                ?? throw new InvalidOperationException($"Missing IFast rate baseline: {notice.Currency}.");
+            if (notice.Date < IFastRateBankDate(first)) continue;
+            var earlier = history.Where(item => item.source == RateSource.IFastMail && item.currency == notice.Currency)
+                .Select(item => (Date: IFastRateBankDate(item), Aer: item.aer!.Value))
+                .Concat(notices.Where(item => item.Currency == notice.Currency).Select(item => (item.Date, item.Aer)))
+                .Where(item => item.Date >= IFastRateBankDate(first) && item.Date < notice.Date)
+                .OrderBy(item => item.Date).ToList();
+            var previousAer = earlier.Count == 0 ? first.aer!.Value : earlier[^1].Aer;
+            if (!SameIFastAer(previousAer, notice.PreviousAer)
+                && !(notice.Date == IFastRateBankDate(first) && SameIFastAer(first.aer!.Value, notice.Aer)))
+                throw new InvalidOperationException($"Broken IFast rate notice chain: {notice.Currency}, {notice.Date:yyyy-MM-dd}.");
+        }
     }
 
-    internal static Dictionary<CurrencyType, List<IFastScheduledRate>> BuildIFastRateSchedule(
-        List<IFastRateSnapshot> snapshots, List<IFastRateNotice> notices)
+    internal static Dictionary<CurrencyType, List<IFastScheduledRate>> BuildIFastRateSchedule(List<RateHistory> history)
     {
-        var first = snapshots.OrderBy(item => item.RetrievedAt).FirstOrDefault()
-            ?? throw new InvalidOperationException("Missing IFast rate baseline.");
-        // Published AER is displayed to two percentage decimal places (e.g. 1.8048% becomes 1.80%).
-        static bool SameAer(decimal left, decimal right) => Decimal.Round(left * 100, 2, MidpointRounding.AwayFromZero)
-            == Decimal.Round(right * 100, 2, MidpointRounding.AwayFromZero);
         var result = new Dictionary<CurrencyType, List<IFastScheduledRate>>();
         foreach (var currency in IFastCurrencies)
         {
-            var changes = notices.Where(item => item.Currency == currency && item.Date >= first.Date)
-                .GroupBy(item => item.Date).OrderBy(group => group.Key).Select(group =>
+            var snapshots = history.Where(item => item.source == RateSource.IFastWebsite && item.currency == currency)
+                .OrderBy(item => item.rateDate).ToList();
+            var first = snapshots.FirstOrDefault()
+                ?? throw new InvalidOperationException($"Missing IFast rate baseline: {currency}.");
+            var firstDate = IFastRateBankDate(first);
+            var baseline = first.aer!.Value;
+            var changes = history.Where(item => item.source == RateSource.IFastMail && item.currency == currency
+                    && IFastRateBankDate(item) >= firstDate)
+                .GroupBy(IFastRateBankDate).OrderBy(group => group.Key).Select(group =>
                 {
-                    var distinct = group.Distinct().ToList();
-                    return distinct.Count == 1 ? distinct[0] : throw new InvalidOperationException($"Conflicting IFast rate notices: {currency}, {group.Key:yyyy-MM-dd}.");
+                    var distinct = group.Select(item => item.aer!.Value).Distinct().ToList();
+                    return distinct.Count == 1 ? (Date: group.Key, Aer: distinct[0])
+                        : throw new InvalidOperationException($"Conflicting IFast rate notices: {currency}, {group.Key:yyyy-MM-dd}.");
                 }).ToList();
-            var baseline = first.Rates[currency].Aer;
-            var previous = baseline;
-            foreach (var change in changes)
-            {
-                if (!SameAer(previous, change.PreviousAer) && !(change.Date == first.Date && SameAer(baseline, change.Aer)))
-                    throw new InvalidOperationException($"Broken IFast rate notice chain: {currency}, {change.Date:yyyy-MM-dd}.");
-                previous = change.Aer;
-            }
-            if (changes.Count == 0 || changes[0].Date > first.Date)
-                changes.Insert(0, new IFastRateNotice(currency, first.Date, baseline, baseline));
+            if (changes.Count == 0 || changes[0].Date > firstDate)
+                changes.Insert(0, (firstDate, baseline));
             var schedule = new List<IFastScheduledRate>();
             for (var index = 0; index < changes.Count; index++)
             {
                 var change = changes[index];
                 var until = index + 1 < changes.Count ? changes[index + 1].Date : DateTime.MaxValue;
-                var observations = snapshots.Where(item => item.Date >= change.Date && item.Date < until).ToList();
-                if (observations.Any(item => !SameAer(item.Rates[currency].Aer, change.Aer)
-                    && !(item.Date == change.Date && SameAer(item.Rates[currency].Aer, change.PreviousAer))))
+                var previousAer = index == 0 ? baseline : changes[index - 1].Aer;
+                var observations = snapshots.Where(item => IFastRateBankDate(item) >= change.Date && IFastRateBankDate(item) < until).ToList();
+                if (observations.Any(item => !SameIFastAer(item.aer!.Value, change.Aer)
+                    && !(IFastRateBankDate(item) == change.Date && SameIFastAer(item.aer!.Value, previousAer))))
                     throw new InvalidOperationException($"Unannounced IFast rate change: {currency}, {change.Date:yyyy-MM-dd}.");
-                var gross = observations.Where(item => SameAer(item.Rates[currency].Aer, change.Aer))
-                    .Select(item => item.Rates[currency].Gross).Distinct().ToList();
+                var gross = observations.Where(item => SameIFastAer(item.aer!.Value, change.Aer))
+                    .Select(item => item.grossRate).Distinct().ToList();
                 if (gross.Count > 1) throw new InvalidOperationException($"Ambiguous IFast Gross rate: {currency}, {change.Date:yyyy-MM-dd}.");
                 schedule.Add(new IFastScheduledRate(change.Date, gross.Count == 1 ? gross[0] : null));
             }
