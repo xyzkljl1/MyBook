@@ -1203,12 +1203,12 @@ namespace MyBook
                     ? previous.Add(currency, buyQuantity, sellQuantity, buyProceeds, sellProceeds, source)
                     : new IBKRTradeSummaryData(contract, currency, buyQuantity, sellQuantity, buyProceeds, sellProceeds, source);
                 impacts[key] = impacts.GetValueOrDefault(key) + impact;
-                var reason = quantity > 0 ? "买入" : "卖出";
                 DateTime? postingDate = builder.AllowLargeStatementResidual ? null : reportDate;
-                builder.Add(new Currency(value, currency), reason, source + "/asset", isInternal: true,
+                var asset = builder.Add(new Currency(value, currency), "交易", source + "/asset", isInternal: true,
                     date: date, destAccount: contract.Code, holdingQuantity: quantity, holding: contract, postingDate: postingDate);
-                builder.Add(new Currency(-value, currency), reason, source + "/cash", isInternal: true,
+                var cash = builder.Add(new Currency(-value, currency), "交易", source + "/cash", isInternal: true,
                     date: date, destAccount: contract.Code, postingDate: postingDate);
+                if (cash is not null) cash.MatchedRecord = asset;
                 builder.Add(new Currency(impact, currency), "持仓价格变动", source + "/valuation",
                     date: date, destAccount: contract.Code, holding: contract, postingDate: postingDate);
             }
@@ -4140,7 +4140,7 @@ namespace MyBook
                         .OrderBy(text => text, StringComparer.Ordinal));
             }
 
-            public void Add(
+            public Record? Add(
                 Currency amount,
                 string reason,
                 string source,
@@ -4153,7 +4153,7 @@ namespace MyBook
                 DateTime? postingDate = null)
             {
                 if (amount.v == 0)
-                    return;
+                    return null;
 
                 var record = new Record
                 {
@@ -4180,6 +4180,7 @@ namespace MyBook
 
                 if (affectsNetAsset)
                     NetAssetChangeTotal += BaseValue(amount);
+                return record;
             }
         }
     }

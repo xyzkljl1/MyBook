@@ -231,8 +231,8 @@ partial class PlaidUtil
                 if (tx.TradeDate > latestTradeDates.GetValueOrDefault(key)) latestTradeDates[key] = tx.TradeDate;
                 quantities[key] = quantities.GetValueOrDefault(key) + tx.Quantity;
                 values[key] = values.GetValueOrDefault(key) + principal;
-                Add(principal, tx.Type == "buy" ? "买入" : "卖出", source + "/asset", tx.TradeDate, tx.Date, true, holding, tx.Quantity);
-                Add(-principal, tx.Type == "buy" ? "买入" : "卖出", source + "/cash", tx.TradeDate, tx.Date, true, null, 0);
+                var asset = Add(principal, "交易", source + "/asset", tx.TradeDate, tx.Date, true, holding, tx.Quantity);
+                Add(-principal, "交易", source + "/cash", tx.TradeDate, tx.Date, true, null, 0).MatchedRecord = asset;
                 if (tx.Fees != 0) Add(-tx.Fees, "手续费", source + "/fee", tx.TradeDate, tx.Date, false, null, 0);
                 // This interest is already paid/received in cash, not an outstanding accrued holding.
                 if (settledAccruedInterest != 0)
@@ -284,9 +284,13 @@ partial class PlaidUtil
             account, records, ending, [new(account, new(report.Total, CurrencyType.USD))],
             [new(account, new(beginningValue, CurrencyType.USD))], beginning, recordDate: report.AsOf.Date);
 
-        void Add(decimal value, string reason, string source, DateTime date, DateTime posted, bool internalTrade, Holding? holding, decimal quantity) =>
-            records.Add(new Record { Account = account, v = value, t = CurrencyType.USD, date = date, postingDate = posted,
-                updateTime = DateTime.Now, Reason = reason, Source = source, isInternal = internalTrade, Holding = holding, HoldingQuantity = quantity });
+        Record Add(decimal value, string reason, string source, DateTime date, DateTime posted, bool internalTrade, Holding? holding, decimal quantity)
+        {
+            var record = new Record { Account = account, v = value, t = CurrencyType.USD, date = date, postingDate = posted,
+                updateTime = DateTime.Now, Reason = reason, Source = source, isInternal = internalTrade, Holding = holding, HoldingQuantity = quantity };
+            records.Add(record);
+            return record;
+        }
     }
 
     private static Holding BuildRawHolding(SchwabRawPosition position, Account account, Func<string, HoldingType> resolveEquity)

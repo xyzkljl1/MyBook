@@ -762,7 +762,7 @@ namespace MyBook
         {
             return type switch
             {
-                "trade" or "spend" or "receive" => "\u8d44\u4ea7\u5151\u6362",
+                "trade" or "spend" or "receive" => "\u4ea4\u6613",
                 "deposit" or "withdrawal" or "transfer" => "\u8f6c\u8d26",
                 "staking" => "\u5229\u606f",
                 "dividend" => "\u80a1\u606f",

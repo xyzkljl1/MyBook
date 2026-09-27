@@ -2785,8 +2785,20 @@ namespace MyBook
                 record._statementImport_Id = statementImportId;
             }
 
-            if (recordList.Count > 0)
-                db.Insertable(recordList).ExecuteCommand();
+            var paired = recordList.Where(record => record.MatchedRecord is not null).ToList();
+            if (paired.Count == 0)
+            {
+                if (recordList.Count > 0)
+                    db.Insertable(recordList).ExecuteCommand();
+                return;
+            }
+
+            // Modules retain the known counterpart object; only database IDs remain to be filled in.
+            var ids = db.Insertable(recordList).ExecuteReturnPkList<int>();
+            for (var i = 0; i < recordList.Count; i++)
+                recordList[i].Id = ids[i];
+            foreach (var record in paired)
+                MatchInternalTransferPair(record, record.MatchedRecord!, "SameTradeSource");
         }
 
         private void ResolveRecordHolding(Record record, Account account)

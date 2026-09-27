@@ -200,16 +200,15 @@ namespace MyBook
                     var gross = Decimal.Round(Math.Abs(tx.Quantity) * tx.Price, 2, MidpointRounding.AwayFromZero);
                     var principal = tx.Type == "BOUGHT" ? -gross : gross;
                     FirstTradeEqual(principal - tx.Commission - tx.Fees, tx.Amount, "trade principal minus charges equals actual cash");
-                    reason = tx.Type == "BOUGHT" ? "买入" : "卖出";
                     var quantity = tx.Type == "BOUGHT" ? Math.Abs(tx.Quantity) : -Math.Abs(tx.Quantity);
                     var security = equities.GetValueOrDefault(tx.Symbol)
                         ?? new Holding(tx.Symbol, resolveEquity(tx.Symbol)) { Account = account, currentPrice = new Currency(0, CurrencyType.USD) };
                     quantities[tx.Symbol] = quantities.GetValueOrDefault(tx.Symbol) + quantity;
                     values[tx.Symbol] = values.GetValueOrDefault(tx.Symbol) - principal;
-                    AddRecord(-principal, reason, source + "|asset|" + tx.Description,
+                    var asset = AddRecord(-principal, "交易", source + "|asset|" + tx.Description,
                         tx.Date, true, security, quantity, postingDate);
-                    AddRecord(principal, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
-                        tx.Date, true, null, 0, postingDate);
+                    AddRecord(principal, "交易", source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
+                        tx.Date, true, null, 0, postingDate).MatchedRecord = asset;
                     if (tx.Commission != 0) AddRecord(-tx.Commission, "手续费", source + "|commission|" + tx.Description,
                         tx.Date, false, null, 0, postingDate);
                     if (tx.Fees != 0) AddRecord(-tx.Fees, "手续费", source + "|fee|" + tx.Description,
@@ -254,15 +253,17 @@ namespace MyBook
                 [new AccountBalance(account, new Currency(beginningTotal, CurrencyType.USD))], beginning,
                 recordDate: time.Date);
 
-            void AddRecord(decimal amount, string reason, string source, DateTime date, bool isInternal, Holding? holding, decimal quantity,
+            Record AddRecord(decimal amount, string reason, string source, DateTime date, bool isInternal, Holding? holding, decimal quantity,
                 DateTime? postingDate = null, string counterparty = "")
             {
-                records.Add(new Record
+                var record = new Record
                 {
                     Account = account, v = amount, t = CurrencyType.USD, date = date, postingDate = postingDate ?? date, DestAccount = counterparty,
                     updateTime = DateTime.Now, Reason = reason, Source = source[..Math.Min(1024, source.Length)],
                     isInternal = isInternal, Holding = holding, HoldingQuantity = quantity
-                });
+                };
+                records.Add(record);
+                return record;
             }
         }
 
