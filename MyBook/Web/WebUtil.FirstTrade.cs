@@ -188,7 +188,7 @@ namespace MyBook
                     var counterparty = evidence.Counterparty;
                     quantities[tx.Symbol] = quantities.GetValueOrDefault(tx.Symbol) + quantity;
                     values[tx.Symbol] = values.GetValueOrDefault(tx.Symbol) + transferValue;
-                    AddRecord(transferValue, "内部转账", source + "|asset|/ACATSTransfer/" + tx.Description,
+                    AddRecord(transferValue, "转账", source + "|asset|/ACATSTransfer/" + tx.Description,
                         tx.Date, true, security, quantity, postingDate, counterparty);
                     continue;
                 }
@@ -223,8 +223,8 @@ namespace MyBook
                         throw new FirstTradeException("non-trade transaction changes security quantity or price");
                     reason = tx.Type switch
                     {
-                        "DEPOSIT" when tx.Amount > 0 => "转入",
-                        "WITHDRAWAL" when tx.Amount < 0 => "转出",
+                        "DEPOSIT" when tx.Amount > 0 => "转账",
+                        "WITHDRAWAL" when tx.Amount < 0 => "转账",
                         "INTEREST" when tx.Description.StartsWith("FULLYPAID LENDING REBATE", StringComparison.Ordinal) => "证券出借收益",
                         "INTEREST" => "现金利息",
                         "DIVIDEND" => "股息",

@@ -244,7 +244,7 @@ partial class PlaidUtil
                 if (tx.Quantity != 0 || tx.Price != 0 || tx.Fees != 0) throw SchwabRawError("non-trade has security movement or unsplit fees");
                 var reason = (tx.Type, tx.Subtype) switch
                 {
-                    ("transfer", "transfer" or "contribution" or "deposit" or "withdrawal" or "distribution") => tx.Amount < 0 ? "转入" : "转出",
+                    ("transfer", "transfer" or "contribution" or "deposit" or "withdrawal" or "distribution") => "转账",
                     ("cash", "dividend" or "qualified dividend" or "non-qualified dividend") when tx.Amount < 0 => "股息",
                     ("cash", "interest") when tx.Amount < 0 => securities.TryGetValue(tx.SecurityId, out var p) && p.Type == "fixed income" ? "债券利息" : "现金利息",
                     ("fee", "margin expense") when tx.Amount > 0 => "现金利息",
