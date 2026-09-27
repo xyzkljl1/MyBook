@@ -210,9 +210,9 @@ namespace MyBook
                         tx.Date, true, security, quantity, postingDate);
                     AddRecord(principal, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
                         tx.Date, true, null, 0, postingDate);
-                    if (tx.Commission != 0) AddRecord(-tx.Commission, "交易佣金", source + "|commission|" + tx.Description,
+                    if (tx.Commission != 0) AddRecord(-tx.Commission, "手续费", source + "|commission|" + tx.Description,
                         tx.Date, false, null, 0, postingDate);
-                    if (tx.Fees != 0) AddRecord(-tx.Fees, tx.AssumedFee ? "SEC交易监管费" : "交易费用", source + "|fee|" + tx.Description,
+                    if (tx.Fees != 0) AddRecord(-tx.Fees, "手续费", source + "|fee|" + tx.Description,
                         tx.Date, false, null, 0, postingDate);
                     cash += tx.Amount;
                     continue;
@@ -274,7 +274,6 @@ namespace MyBook
             public DateTime? SettlementDate { get; init; }
             public decimal Commission { get; init; }
             public decimal Fees { get; init; }
-            public bool AssumedFee { get; init; }
         }
 
         internal sealed record FirstTradeTransferEvidence(DateTime Date, string Symbol, decimal Quantity,

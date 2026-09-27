@@ -75,7 +75,7 @@ partial class WebUtil
             var identity = hash + ":" + occurrence;
             result.Add(tx with { Key = ofxRow?.FitId is string id ? "ofx:" + id : "v2:" + identity,
                 Identity = identity, SettlementDate = csvRow?.Settlement ?? ofxRow?.Settlement,
-                Commission = commission, Fees = fees ?? 0, AssumedFee = assumed });
+                Commission = commission, Fees = fees ?? 0 });
         }
         if (csv.Any(InRange) || ofx.Any(InRange)) throw new FirstTradeException("export contains transactions missing from API history");
         return result;

@@ -1660,7 +1660,7 @@ namespace MyBook
                 commissionTotal += commission;
                 builder.Add(
                     new Currency(commission, currency),
-                    "佣金",
+                    "手续费",
                     $"Commission/{FormatIBKRCsvRow(row)}",
                     date: ParseIBKRDateTime(row.Fields[3]),
                     destAccount: contract?.Code ?? row.Fields[2],
