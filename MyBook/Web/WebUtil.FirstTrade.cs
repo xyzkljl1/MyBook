@@ -225,8 +225,7 @@ namespace MyBook
                     {
                         "DEPOSIT" when tx.Amount > 0 => "转账",
                         "WITHDRAWAL" when tx.Amount < 0 => "转账",
-                        "INTEREST" when tx.Description.StartsWith("FULLYPAID LENDING REBATE", StringComparison.Ordinal) => "证券出借收益",
-                        "INTEREST" => "现金利息",
+                        "INTEREST" => "利息",
                         "DIVIDEND" => "股息",
                         "FEE" when tx.Amount < 0 => "手续费",
                         "TAX" when tx.Amount < 0 => "税费",

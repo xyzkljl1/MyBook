@@ -246,8 +246,8 @@ partial class PlaidUtil
                 {
                     ("transfer", "transfer" or "contribution" or "deposit" or "withdrawal" or "distribution") => "转账",
                     ("cash", "dividend" or "qualified dividend" or "non-qualified dividend") when tx.Amount < 0 => "股息",
-                    ("cash", "interest") when tx.Amount < 0 => securities.TryGetValue(tx.SecurityId, out var p) && p.Type == "fixed income" ? "债券利息" : "现金利息",
-                    ("fee", "margin expense") when tx.Amount > 0 => "现金利息",
+                    ("cash", "interest") when tx.Amount < 0 => securities.TryGetValue(tx.SecurityId, out var p) && p.Type == "fixed income" ? "债券利息" : "利息",
+                    ("fee", "margin expense") when tx.Amount > 0 => "利息",
                     ("fee", "tax" or "tax withheld" or "non-resident tax") when tx.Amount > 0 => "税费",
                     ("fee", "account fee" or "management fee" or "transfer fee" or "miscellaneous fee") when tx.Amount > 0 => "手续费",
                     _ => throw SchwabRawError("unsupported investment transaction type/subtype")

@@ -990,7 +990,7 @@ namespace MyBook
             }
             foreach (var (section, label, reason) in new[]
             {
-                (IBKRInterestSection, "支付和收到的经纪商利息", "现金利息"),
+                (IBKRInterestSection, "支付和收到的经纪商利息", "利息"),
                 (IBKRBondInterestReceivedSection, "支付和收到的债券利息", "债券利息"),
                 (IBKRBondInterestPaidSection, "支付和收到的债券利息", "债券利息"),
                 (IBKRDividendSection, "股息", "股息"),
@@ -1209,7 +1209,7 @@ namespace MyBook
                     date: date, destAccount: contract.Code, holdingQuantity: quantity, holding: contract, postingDate: postingDate);
                 builder.Add(new Currency(-value, currency), reason, source + "/cash", isInternal: true,
                     date: date, destAccount: contract.Code, postingDate: postingDate);
-                builder.Add(new Currency(impact, currency), "交易价格影响", source + "/valuation",
+                builder.Add(new Currency(impact, currency), "持仓价格变动", source + "/valuation",
                     date: date, destAccount: contract.Code, holding: contract, postingDate: postingDate);
             }
             if (matchedCommissions.Values.Sum() != commissions.Count)
