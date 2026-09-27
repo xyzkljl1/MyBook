@@ -42,7 +42,6 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **Ethereum:** transactions and balances for configured addresses through blockchain query endpoints; prices through public market-data endpoints.
 - **Nexus:** monthly Donation Points income through GraphQL.
 - **Exchange rates:** daily historical foreign-currency quotes against CNY from Google Finance; current quotes are fetched separately for valuation.
-- **Google Drive:** read-only report access restricted to the shared `Reports` folder.
 
 Configure the corresponding accounts and fixed import starting points before importing.
 
@@ -63,7 +62,6 @@ Copy-Item MyBook\config.json.example MyBook\config.json
 - `nexus_api_key`: Nexus personal API key used by current imports.
 - `kraken_api_key` / `kraken_api_secret`, `etherscan_api_key`: credentials for read-only Kraken and Ethereum queries.
 - `sim_imsi`: expected SIM IMSI; leave empty to disable polling. `sim_poll_interval_minutes` defaults to 5 when unset or below 1.
-- `GoogleCloudServeAccountKey`: Google service-account JSON key. Share the `Reports` folder with its `client_email` as Viewer; no additional Google Cloud/IAM roles are required.
 
 ### Plaid / Schwab
 
@@ -88,16 +86,6 @@ Bind each PayPal account to its Plaid connection and configure its mailbox to fe
 ### FirstTrade
 
 Set `firsttrade_username`, `firsttrade_password` and `firsttrade_totp_secret` (the original Base32 authenticator key, not a six-digit code). The read-only integration references `MaxxRK/firstrade-api` and uses `mail_proxy` when configured.
-
-### Nexus OAuth (deprecated)
-
-Nexus OAuth is deprecated. Imports use `nexus_api_key`. The legacy authorization command is retained:
-
-```powershell
-dotnet run --project MyBook\MyBook.csproj -- --debug-authorize-nexus-oauth
-```
-
-This opens the Nexus authorization page in the browser and receives the callback at `http://127.0.0.1:4700/callback`.
 
 ## Database
 

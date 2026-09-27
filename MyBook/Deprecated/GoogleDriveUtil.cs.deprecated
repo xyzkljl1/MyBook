@@ -1,3 +1,4 @@
+// 废弃：嘉信已改为直连 Plaid，Drive 报表下载模块不再使用；仅保留参考，不参与编译。
 using Google;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Download;

@@ -81,28 +81,6 @@ namespace MyBook
                 return;
             }
 
-            if (e.Args.Any(arg => arg.Equals("--debug-authorize-nexus-oauth", StringComparison.OrdinalIgnoreCase)))
-            {
-                var exitCode = 0;
-                try
-                {
-                    var config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
-                    var database = new DatabaseUtil(config);
-                    var graphQL = new GraphQLUtil(config, database);
-                    Task.Run(graphQL.AuthorizeNexusOAuthAsync).GetAwaiter().GetResult();
-                    Console.WriteLine("Authorized Nexus OAuth token.");
-                }
-                catch (Exception exception)
-                {
-                    exitCode = 1;
-                    Console.WriteLine($"Authorize Nexus OAuth failed: {exception.Message}");
-                }
-
-                Shutdown(exitCode);
-                Environment.Exit(exitCode);
-                return;
-            }
-
             MainWindow = new MainWindow();
             MainWindow.Show();
         }
