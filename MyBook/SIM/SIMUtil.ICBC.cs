@@ -420,6 +420,11 @@ namespace MyBook
 
         private static string InferICBCSIMReason(string summary)
         {
+            if (summary == "跨行汇款")
+                return "转账";
+            if (summary is "人民币自动转账还款" or "自动购汇还款")
+                return "还款";
+
             foreach (var prefix in new[] { "消费", "缴费", "退款", "还款", "转账", "转帐", "利息" })
             {
                 if (summary.StartsWith(prefix, StringComparison.Ordinal))
