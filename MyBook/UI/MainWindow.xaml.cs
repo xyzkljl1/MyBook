@@ -1724,6 +1724,7 @@ namespace MyBook
 
     public class CurrencySummaryViewModel
     {
+        public bool IsVisible { get; set; }
         public string Currency { get; set; } = "";
         public string NetText { get; set; } = "";
         public string NetLineText { get; set; } = "";
@@ -1739,6 +1740,7 @@ namespace MyBook
             var net = FormatSummaryMoney(summary.Net, summary.Currency);
             return new CurrencySummaryViewModel
             {
+                IsVisible = !summary.NetRmb.HasValue || Math.Abs(summary.NetRmb.Value) >= 1000m,
                 Currency = summary.Currency.ToString(),
                 NetText = net.DisplayText,
                 NetLineText = net.DisplayText,

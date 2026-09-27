@@ -37,6 +37,7 @@ namespace MyBook
         public decimal Assets { get; set; }
         public decimal Liabilities { get; set; }
         public decimal Net { get; set; }
+        public decimal? NetRmb { get; set; }
         public decimal TotalIncome { get; set; }
         public decimal TotalExpense { get; set; }
         public int AccountCount { get; set; }

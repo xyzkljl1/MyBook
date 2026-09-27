@@ -4037,6 +4037,7 @@ namespace MyBook
                         Assets = assets,
                         Liabilities = liabilities,
                         Net = Currency.RoundMoney(assets + liabilities),
+                        NetRmb = TryConvertToRmb(Currency.RoundMoney(assets + liabilities), group.Key, exchangeRates),
                         TotalIncome = Currency.RoundMoney(currencyRecords.Where(record => record.v > 0).Sum(record => record.v)),
                         TotalExpense = Currency.RoundMoney(-currencyRecords.Where(record => record.v < 0).Sum(record => record.v)),
                         AccountCount = group.Select(balance => balance._account_Id).Distinct().Count()
