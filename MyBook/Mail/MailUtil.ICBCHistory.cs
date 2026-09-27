@@ -330,7 +330,7 @@ namespace MyBook
                 updateTime = DateTime.Now,
                 Source = BuildICBCHistoryDetailSource(row, rowCode, statementKey),
                 DestAccount = BuildICBCHistoryDetailDestAccount(row),
-                Reason = row.Summary
+                Reason = row.Summary is "网转" or "单笔付款" ? "转账" : row.Summary
             };
             record.CopyFrom(row.Amount);
             record.DescCurrency = row.DescCurrency;

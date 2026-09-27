@@ -183,9 +183,9 @@ partial class CombinedUtil
                         if (notice.Nexus && (origin is null || !origin.name.StartsWith("NEXUS", StringComparison.OrdinalIgnoreCase)))
                             throw PayPalError("Donation Points payout requires a registered Nexus source account");
                         if (origin is not null && origin.Id == account.Id) throw PayPalError("receipt source resolves to itself");
-                        var principal = Add(account, amount, "principal", counterparty.Item1 ? "转账" : "收款", origin);
+                        var principal = Add(account, amount, "principal", "转账", origin);
                         DatabaseUtil.ApplyTransferCounterparty(principal, counterparty);
-                        if (notice.Fee != 0) Add(account, -notice.Fee, "fee", "收款手续费", party: "PayPal");
+                        if (notice.Fee != 0) Add(account, -notice.Fee, "fee", "手续费", party: "PayPal");
                         if (origin is not null && !linked.Contains(origin.Id))
                         {
                             // Only the explicit Donation Points payout receipt supports a Nexus debit.
