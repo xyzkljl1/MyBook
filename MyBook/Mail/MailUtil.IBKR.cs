@@ -991,11 +991,11 @@ namespace MyBook
             foreach (var (section, label, reason) in new[]
             {
                 (IBKRInterestSection, "支付和收到的经纪商利息", "利息"),
-                (IBKRBondInterestReceivedSection, "支付和收到的债券利息", "债券利息"),
-                (IBKRBondInterestPaidSection, "支付和收到的债券利息", "债券利息"),
+                (IBKRBondInterestReceivedSection, "支付和收到的债券利息", "债息"),
+                (IBKRBondInterestPaidSection, "支付和收到的债券利息", "债息"),
                 (IBKRDividendSection, "股息", "股息"),
-                (IBKRDividendPaymentInLieuSection, "代替股息的支付", "代替股息的支付"),
-                (IBKRWithholdingTaxSection, "代扣税款", "代扣税款")
+                (IBKRDividendPaymentInLieuSection, "代替股息的支付", "股息"),
+                (IBKRWithholdingTaxSection, "代扣税款", "税费")
             })
                 foreach (var row in ReadIBKRMoneyDetails(report, section)) Add(row, label, reason);
 
