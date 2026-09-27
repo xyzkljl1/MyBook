@@ -41,6 +41,7 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **Kraken:** balances and ledger entries through a read-only API; prices through public market-data endpoints.
 - **Ethereum:** transactions and balances for configured addresses through blockchain query endpoints; prices through public market-data endpoints.
 - **Nexus:** monthly Donation Points income through GraphQL.
+- **Bilibili:** shell wallet balance through the website API, authenticated with `bilibili_cookie`.
 - **Exchange rates:** daily historical quotes against CNY from Google Finance and Kylc bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR). Current valuation quotes are fetched separately from Google Finance.
 
 Configure the corresponding accounts and fixed import starting points before importing.
