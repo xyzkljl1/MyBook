@@ -13,12 +13,14 @@ namespace MyBook
         private static readonly TimeSpan HttpRequestTimeout = TimeSpan.FromSeconds(20);
         private readonly DatabaseUtil? database;
         private readonly HttpClient httpClient;
+        private readonly HttpClient googleHttpClient;
 
         public PubWebUtil(IConfigurationRoot config, DatabaseUtil? database = null)
         {
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             this.database = database;
             httpClient = CreateHttpClient(ParsePubWebProxyConfig(config["pubweb_proxy"]));
+            googleHttpClient = CreateHttpClient(ParsePubWebProxyConfig(config["pubweb_google_proxy"], "pubweb_google_proxy"));
         }
 
         public Task<Currency?> Fetch(Holding holding)
@@ -69,9 +71,11 @@ namespace MyBook
             return ret;
         }
 
-        public async Task FetchExchangeRates()
+        internal async Task FetchScheduledExchangeRates()
         {
-            await FetchExchangeRates(Enum.GetValues<CurrencyType>()).ConfigureAwait(false);
+            var db = database ?? throw new InvalidOperationException("Scheduled rates require a database.");
+            var rates = await ReadGoogleFinanceRates(db.GetLatestRateTimes(RateSource.GoogleFinance)).ConfigureAwait(false);
+            db.SaveRateHistory(rates);
         }
 
         public async Task FetchExchangeRates(IEnumerable<CurrencyType> currencyTypes)
@@ -103,6 +107,7 @@ namespace MyBook
         public void Dispose()
         {
             httpClient.Dispose();
+            googleHttpClient.Dispose();
         }
 
         public async Task<JObject?> HttpGetJson(string url)
@@ -125,11 +130,11 @@ namespace MyBook
             return null;
         }
 
-        public async Task<string?> HttpGetString(string url)
+        public async Task<string?> HttpGetString(string url, HttpClient? client = null)
         {
             try
             {
-                using HttpResponseMessage response = await httpClient.GetAsync(url).ConfigureAwait(false);
+                using HttpResponseMessage response = await (client ?? httpClient).GetAsync(url).ConfigureAwait(false);
                 if (response.StatusCode != HttpStatusCode.OK)
                     return null;
 
@@ -159,7 +164,7 @@ namespace MyBook
             return client;
         }
 
-        private static IWebProxy? ParsePubWebProxyConfig(string? value)
+        private static IWebProxy? ParsePubWebProxyConfig(string? value, string configKey = "pubweb_proxy")
         {
             if (String.IsNullOrWhiteSpace(value))
                 return null;
@@ -169,7 +174,7 @@ namespace MyBook
                 || String.IsNullOrWhiteSpace(uri.Host)
                 || uri.IsDefaultPort)
             {
-                throw new InvalidOperationException("Invalid pubweb_proxy config. Expected http://host:port.");
+                throw new InvalidOperationException($"Invalid {configKey} config. Expected http://host:port.");
             }
 
             if (!String.IsNullOrEmpty(uri.UserInfo)
@@ -177,7 +182,7 @@ namespace MyBook
                 || !String.IsNullOrEmpty(uri.Fragment)
                 || uri.AbsolutePath != "/")
             {
-                throw new InvalidOperationException("Invalid pubweb_proxy config. Proxy credentials, path, query, and fragment are not supported.");
+                throw new InvalidOperationException($"Invalid {configKey} config. Proxy credentials, path, query, and fragment are not supported.");
             }
 
             return new WebProxy(uri);

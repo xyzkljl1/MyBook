@@ -23,6 +23,7 @@
     "database_connection":  "",
     "mail_proxy":  "",
     "pubweb_proxy":  "",
+    "pubweb_google_proxy":  "",
     "nexus_api_key":  "",
     "kraken_api_key":  "",
     "kraken_api_secret":  "",

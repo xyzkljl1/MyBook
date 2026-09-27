@@ -27,7 +27,7 @@ namespace MyBook
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport), typeof(StatementImportSource)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(OAuthToken), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport), typeof(StatementImportSource)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -39,6 +39,7 @@ namespace MyBook
             new("fk_Records_holding", "Records", "_holding_Id", "Holdings", "Id"),
             new("fk_Records_statementImport", "Records", "_statementImport_Id", "StatementImports", "Id"),
             new("fk_StatementImportSources_statementImport", "StatementImportSources", "_statementImport_Id", "StatementImports", "Id"),
+            new("fk_RateHistory_statementImport", "RateHistory", "_statementImport_Id", "StatementImports", "Id"),
             new("fk_Records_matchedRecord", "Records", "matchedRecordId", "Records", "Id"),
             new("fk_AllocatedExpenseItems_record", "AllocatedExpenseItems", "_record_Id", "Records", "Id"),
             new("fk_SnapshotItems_snapshot", "SnapshotItems", "_snapshot_Id", "Snapshots", "Id"),
@@ -5000,6 +5001,8 @@ namespace MyBook
 
         private void CleanToStartSnapshotCore()
         {
+            var fixedRateIds = GetFixedRateHistoryIds();
+            db.Deleteable<RateHistory>().Where(r => !fixedRateIds.Contains(r.Id)).ExecuteCommand();
             var startSnapshot = GetStartSnapshot();
             CleanSnapshotsAfterStartSnapshot(startSnapshot);
             ClearAllRecordMatches();
@@ -5358,6 +5361,32 @@ namespace MyBook
         public void SaveFinance(Finance finance)
         {
             ExecuteLockedTransaction(() => SaveFinanceCore(finance));
+        }
+
+        // The first inserted quote for each source and currency is fixed data.
+        private List<int> GetFixedRateHistoryIds() => db.Queryable<RateHistory>()
+            .GroupBy(r => new { r.source, r.currency })
+            .Select(r => SqlFunc.AggregateMin(r.Id)).ToList();
+
+        internal Dictionary<CurrencyType, DateTime> GetLatestRateTimes(RateSource source)
+        {
+            return db.Queryable<RateHistory>().Where(r => r.source == source)
+                .GroupBy(r => r.currency)
+                .Select(r => new { Currency = r.currency, Time = SqlFunc.AggregateMax(r.rateDate) })
+                .ToList().ToDictionary(r => r.Currency, r => r.Time);
+        }
+
+        internal void SaveRateHistory(IReadOnlyList<RateHistory> rates)
+        {
+            ExecuteLockedTransaction(() =>
+            {
+                foreach (var rate in rates)
+                {
+                    if (!db.Queryable<RateHistory>().Any(r => r.source == rate.source
+                        && r.currency == rate.currency && r.rateDate == rate.rateDate))
+                        db.Insertable(rate).ExecuteCommand();
+                }
+            });
         }
 
         private void SaveFinanceCore(Finance finance)

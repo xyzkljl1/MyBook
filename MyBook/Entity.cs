@@ -212,6 +212,44 @@ namespace MyBook
         public CurrencyType _currentPrice_t { get; set; } = CurrencyType.RMB;
     }
 
+    public enum RateSource { GoogleFinance, IFastWebsite, IFastMail }
+
+    [SugarTable("RateHistory")]
+    [SugarIndex("idx_RateHistory_source_currency_date", nameof(source), OrderByType.Asc, nameof(currency), OrderByType.Asc, nameof(rateDate), OrderByType.Asc)]
+    public class RateHistory
+    {
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+        public int Id { get; set; }
+
+        [SugarColumn(DefaultValue = "GoogleFinance", ColumnDataType = "enum('GoogleFinance','IFastWebsite','IFastMail')", SqlParameterDbType = typeof(EnumToStringConvert))]
+        public RateSource source { get; set; } = RateSource.GoogleFinance;
+
+        [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
+        public CurrencyType currency { get; set; } = CurrencyType.RMB;
+
+        // Source quote/effective time converted to the runtime machine's local time, including time of day.
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime rateDate { get; set; }
+
+        [SugarColumn(ColumnDataType = "datetime(6)")]
+        public DateTime fetchedAt { get; set; } // Local observation time; not the source's publication time.
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? exchangeRateToRmb { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? grossRate { get; set; } // Fraction, e.g. 0.03 means 3%.
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? aer { get; set; }
+
+        [SugarColumn(IsNullable = true)]
+        public int? _statementImport_Id { get; set; }
+
+        [Navigate(NavigateType.ManyToOne, nameof(_statementImport_Id), nameof(MyBook.StatementImport.Id))]
+        public StatementImport? StatementImport { get; set; }
+    }
+
     // 数据库中的枚举列尽量使用 MySQL ENUM 类型。
     static class MySqlEnumColumnTypes
     {

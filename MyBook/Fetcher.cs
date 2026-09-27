@@ -72,18 +72,13 @@ namespace MyBook
             sim = new(database);
             dailyTimer?.Dispose();
             simTimer?.Dispose();
-            var nextDailyRun = GetNextDailyRunTime();
-            UpdateRuntimeStatus(status =>
-            {
-                status.IsScheduledFetchEnabled = true;
-                status.NextFetchTime = nextDailyRun;
-            });
-            RunDailyFetchInBackground();
+            UpdateRuntimeStatus(status => status.IsScheduledFetchEnabled = true);
             dailyTimer = new Timer(
                 _ => RunDailyFetchInBackground(),
                 null,
-                GetDueTime(nextDailyRun),
-                TimeSpan.FromDays(1));
+                Timeout.InfiniteTimeSpan,
+                Timeout.InfiniteTimeSpan);
+            ScheduleNextDailyFetch();
             StartSIMPolling();
             //pubWeb.Fetch(new Finance("QQQ", HoldingType.NASDAQ));
             //pubWeb.Fetch(new Finance("021282", HoldingType.CNFUND));
@@ -100,11 +95,7 @@ namespace MyBook
 
         private void RunDailyFetchInBackground()
         {
-            UpdateRuntimeStatus(status =>
-            {
-                if (status.IsScheduledFetchEnabled)
-                    status.NextFetchTime = GetNextDailyRunTime();
-            });
+            UpdateRuntimeStatus(status => status.NextFetchTime = null);
 
             _ = Task.Run(async () =>
             {
@@ -117,7 +108,22 @@ namespace MyBook
                     CreateImportFailureMarker("scheduled fetch", e);
                     Console.WriteLine($"scheduled fetch fail: {e.Message}");
                 }
+                finally
+                {
+                    ScheduleNextDailyFetch();
+                }
             });
+        }
+
+        private void ScheduleNextDailyFetch()
+        {
+            lock (runtimeStatusLock)
+            {
+                if (dailyTimer is null) return;
+                var nextRun = GetNextDailyRunTime(DateTime.Now);
+                dailyTimer.Change(GetDueTime(nextRun), Timeout.InfiniteTimeSpan);
+                runtimeStatus.NextFetchTime = nextRun;
+            }
         }
 
         private async Task RunDailyFetchAsync()
@@ -130,6 +136,8 @@ namespace MyBook
             SetCurrentTask("每日导入");
             try
             {
+                if (pubWeb is not null)
+                    await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates).ConfigureAwait(false);
                 await mail.RunWithMailSessionScope(async () =>
                 {
                     await RunScheduledImportTaskAsync("ICBC", StatementImportProvider.ICBCBillMail,
@@ -181,8 +189,6 @@ namespace MyBook
                 if (crypto is not null)
                     await RunScheduledImportTaskAsync("Crypto ETH", StatementImportProvider.EthereumApi,
                         (since, _) => crypto.FetchDailyReportsAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
-                if (pubWeb is not null)
-                    await RunImportTaskAsync("exchange rate", pubWeb.FetchExchangeRates).ConfigureAwait(false);
                 if (database is not null)
                 {
                     await RunImportTaskAsync(
@@ -395,10 +401,9 @@ namespace MyBook
             }
         }
 
-        private static DateTime GetNextDailyRunTime()
+        private static DateTime GetNextDailyRunTime(DateTime now)
         {
-            var now = DateTime.Now;
-            var nextRun = DateTime.Today.AddDays(1).AddMinutes(5);
+            var nextRun = now.Date.AddMinutes(5);
             if (now >= nextRun)
                 nextRun = nextRun.AddDays(1);
             return nextRun;
@@ -412,7 +417,13 @@ namespace MyBook
 
         public void Dispose()
         {
-            dailyTimer?.Dispose();
+            lock (runtimeStatusLock)
+            {
+                dailyTimer?.Dispose();
+                dailyTimer = null;
+                runtimeStatus.IsScheduledFetchEnabled = false;
+                runtimeStatus.NextFetchTime = null;
+            }
             simTimer?.Dispose();
             pubWeb?.Dispose();
             fetchLock.Dispose();

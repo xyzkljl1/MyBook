@@ -95,6 +95,22 @@ CREATE TABLE `statementimportsources` (
   CONSTRAINT `fk_StatementImportSources_statementImport` FOREIGN KEY (`_statementImport_Id`) REFERENCES `statementimports` (`Id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `ratehistory` (
+  `Id` int NOT NULL AUTO_INCREMENT,
+  `source` enum('GoogleFinance','IFastWebsite','IFastMail') NOT NULL DEFAULT 'GoogleFinance',
+  `currency` enum('RMB','USD','JPY','SGD','HKD','GBP','EUR') NOT NULL DEFAULT 'RMB',
+  `rateDate` datetime(6) NOT NULL,
+  `fetchedAt` datetime(6) NOT NULL,
+  `exchangeRateToRmb` decimal(30,18) DEFAULT NULL,
+  `grossRate` decimal(30,18) DEFAULT NULL,
+  `aer` decimal(30,18) DEFAULT NULL,
+  `_statementImport_Id` int DEFAULT NULL,
+  PRIMARY KEY (`Id`),
+  KEY `idx_RateHistory_source_currency_date` (`source`,`currency`,`rateDate`),
+  KEY `fk_RateHistory_statementImport` (`_statementImport_Id`),
+  CONSTRAINT `fk_RateHistory_statementImport` FOREIGN KEY (`_statementImport_Id`) REFERENCES `statementimports` (`Id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE `holdings` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `code` varchar(255) NOT NULL DEFAULT '',

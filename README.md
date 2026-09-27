@@ -41,6 +41,7 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **Kraken:** balances and ledger entries through a read-only API; prices through public market-data endpoints.
 - **Ethereum:** transactions and balances for configured addresses through blockchain query endpoints; prices through public market-data endpoints.
 - **Nexus:** monthly Donation Points income through GraphQL.
+- **Exchange rates:** daily historical foreign-currency quotes against CNY from Google Finance; current quotes are fetched separately for valuation.
 - **Google Drive:** read-only report access restricted to the shared `Reports` folder.
 
 Configure the corresponding accounts and fixed import starting points before importing.
@@ -57,7 +58,7 @@ Copy-Item MyBook\config.json.example MyBook\config.json
 
 - `database_connection`: MySQL connection string; an empty value uses the built-in local default.
 - `yahoo_user` / `yahoo_pass`, `gmail_user` / `gmail_app_pwd`: statement-mail credentials.
-- `mail_proxy`: optional proxy for PayPal mail and FirstTrade. Other modules fetch mail and attachments directly, ignoring system proxies. `pubweb_proxy`: optional public market-data proxy. Empty proxy settings use direct connections.
+- `mail_proxy`: optional proxy for PayPal mail and FirstTrade. Other modules fetch mail and attachments directly, ignoring system proxies. `pubweb_google_proxy`: optional HTTP proxy for Google Finance stock prices and exchange rates; `pubweb_proxy`: optional proxy for other public web requests. Empty proxy settings use direct connections.
 - `alphavantage_key`: market-data key; `ib_gateway_port`: Interactive Brokers gateway port.
 - `nexus_api_key`: Nexus personal API key used by current imports.
 - `kraken_api_key` / `kraken_api_secret`, `etherscan_api_key`: credentials for read-only Kraken and Ethereum queries.
@@ -100,7 +101,7 @@ This opens the Nexus authorization page in the browser and receives the callback
 
 ## Database
 
-The application validates its MySQL schema on startup. Accounts, registered account identifiers, Plaid connections, fixed import starting points and start snapshots are fixed data preserved during cleanup. Imported records, holdings, other snapshots and OAuth tokens are runtime data.
+The application validates its MySQL schema on startup. Accounts, registered account identifiers, Plaid connections, fixed import starting points, initial rates for each source and currency, and start snapshots are fixed data preserved during cleanup. Imported records, holdings, other snapshots and OAuth tokens are runtime data.
 
 Rebuild an empty database using the tracked schema and local fixed-data file:
 
@@ -128,8 +129,10 @@ dotnet build MyBook\MyBook.csproj -v minimal /p:UseSharedCompilation=false
 
 Import progress and scheduling use dates in the runtime machine's local time zone. Source timestamps are converted before taking their dates. Statement periods and transaction dates retain their financial meaning; integrations handle UTC days, US Eastern dates and other source-specific query ranges. Changing the runtime time zone changes calendar-day scheduling boundaries.
 
-Release builds run an import cycle on startup and daily afterward; Debug builds do not schedule imports. Each cycle runs configured, enabled integrations whose query intervals have elapsed. Intervals must be positive and become due on the specified day. Failed queries do not restart the interval. A zero missing-report deadline disables only overdue errors, not network, parsing or financial validation errors.
+Historical rate timestamps are stored as full local date-times converted from the source, separately from the local time of retrieval.
+
+Release builds wait until the next 00:05 local time to start daily imports, fetching exchange rates first; startup does not trigger an immediate cycle. Debug builds do not schedule imports. Each cycle runs configured, enabled integrations whose query intervals have elapsed. Intervals must be positive and become due on the specified day. Failed queries do not restart the interval. A zero missing-report deadline disables only overdue errors, not network, parsing or financial validation errors.
 
 SMS polling uses its own configured interval. Mail imports share IMAP sessions and download matching attachments.
 
-Each cycle also refreshes exchange rates and creates a snapshot. The UI shows the active task, last run and next run. Failures create `MyBook.import-failed.tmp` in the application directory; the clear-marker button removes the warning without retrying. Successful imports do not clear it automatically.
+Each cycle also creates a snapshot. The UI shows the active task, last run and next run. Failures create `MyBook.import-failed.tmp` in the application directory; the clear-marker button removes the warning without retrying. Successful imports do not clear it automatically.
