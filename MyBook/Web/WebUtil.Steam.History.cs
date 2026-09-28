@@ -80,12 +80,15 @@ partial class WebUtil
                 using var request = new HttpRequestMessage(form is null ? HttpMethod.Get : HttpMethod.Post, uri);
                 if (form is not null) request.Content = new FormUrlEncodedContent(form);
                 using var response = await http.SendAsync(request, token).ConfigureAwait(false);
-                if (form is null && (int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
                 {
                     var next = response.Headers.Location is { } location ? new Uri(uri, location) : null;
-                    if (redirect >= 3 || next is null || next.Scheme != "https" || next.Host != "help.steampowered.com"
+                    if (redirect >= 3 || next is null || next.Scheme != "https"
                         || !next.IsDefaultPort || next.UserInfo.Length > 0
-                        || next.AbsolutePath is not ("/en/wizard/HelpWithTransaction" or "/en/wizard/HelpWithMyPurchase"))
+                        || (form is null
+                            ? next.Host != "help.steampowered.com" || next.AbsolutePath is not ("/en/wizard/HelpWithTransaction" or "/en/wizard/HelpWithMyPurchase")
+                            : (int)response.StatusCode is not (302 or 307 or 308) || next.Host != uri.Host
+                                || next.AbsolutePath != uri.AbsolutePath || next.AbsolutePath != "/account/AjaxLoadMoreHistory/"))
                         throw new InvalidOperationException($"{label}: unexpected redirect; HTTP {(int)response.StatusCode}.");
                     uri = next;
                     redirect++;
@@ -144,7 +147,12 @@ partial class WebUtil
                 using var response = JsonDocument.Parse(await RequestSteamHistoryAsync(http,
                     "/account/AjaxLoadMoreHistory/", form, token).ConfigureAwait(false));
                 html = response.RootElement.GetProperty("html").GetString() ?? "";
-                cursor = response.RootElement.GetProperty("cursor").GetRawText();
+                if (response.RootElement.TryGetProperty("cursor", out var nextCursor))
+                    cursor = nextCursor.GetRawText();
+                else if (ParseSteamHistoryPage(html, since).Oldest is DateTime oldestDate && oldestDate < searchSince)
+                    cursor = "null"; // The returned rows already cover the requested range.
+                else
+                    throw new InvalidOperationException("Steam history: pagination cursor missing before search start.");
                 if (String.IsNullOrWhiteSpace(html) && cursor != "null")
                     throw new InvalidOperationException("Steam history: empty page before end of history.");
             }

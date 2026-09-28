@@ -83,7 +83,7 @@ partial class WebUtil
             var record = match.Banks[0].Record;
             // Preserve the bank's full source, including identifiers used by its own importer.
             if (record.Source.Length + 2 + append.Length > 1024) continue;
-            result.Add(new(record.Id, code, append));
+            result.Add(new(record.Id, code, append, new RecordFieldSupplement(Reason: "游戏")));
         }
         return result;
     }

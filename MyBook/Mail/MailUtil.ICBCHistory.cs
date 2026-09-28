@@ -1234,7 +1234,9 @@ namespace MyBook
                 || record.v != candidate.Row.Amount.v
                 || record.t != candidate.Row.Amount.t
                 || record.DescCurrency != candidate.Row.DescCurrency
-                || !String.Equals(record.Reason, candidate.Record.Reason, StringComparison.Ordinal)
+                || !(String.Equals(record.Reason, candidate.Record.Reason, StringComparison.Ordinal)
+                    || candidate.Record.Reason == "消费" && record.Reason == "游戏" && record.v < 0
+                        && WebUtil.HasSteamOrderCode(record.Source))
                 || !String.Equals(record.DestAccount, candidate.Record.DestAccount, StringComparison.Ordinal))
                 return false;
 
