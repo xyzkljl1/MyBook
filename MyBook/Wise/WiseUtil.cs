@@ -267,7 +267,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
         {
             if (secondary is null || primary.Money.t == secondary.Money.t || primary.Sign != "" || secondary.Sign != "")
                 throw Error("unsupported conversion amounts");
-            Add(new(-secondary.Money.v, secondary.Money.t), "换汇", "debit");
+            Add(new(-secondary.Money.v, secondary.Money.t), "换汇", "debit", new(-primary.Money.v, primary.Money.t));
             Add(primary.Money, "换汇", "credit");
             foreach (var record in result)
             {

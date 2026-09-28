@@ -549,6 +549,7 @@ namespace MyBook
         public DateTime updateTime { get; set; }
         // 原始交易币种和数量，带有正负号，区别于最终入账币种和数量。
         // 例如在 Steam 国区用 visa 外币卡购买 100 RMB 的游戏，实际会换算成外币支出；这里保存 -100 RMB。
+        // 换汇及购汇还款配对后，扣款侧保存另一币种金额（负值），入账侧留空。
         [SugarColumn(IsIgnore = true)]
         public Currency? DescCurrency
         {

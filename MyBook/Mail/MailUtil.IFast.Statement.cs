@@ -291,6 +291,7 @@ partial class MailUtil
         else if (description.StartsWith("Currency Conversion ") && reference.Length > 0)
         {
             record.Reason = "换汇";
+            record.DescCurrency = null;
             record.isInternal = true;
             code = $"BALANCE-IFAST-{reference}";
         }

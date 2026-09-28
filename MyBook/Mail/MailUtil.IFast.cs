@@ -134,7 +134,7 @@ partial class MailUtil
             Account = account, _account_Id = account.Id,
             date = time, postingDate = time, updateTime = DateTime.Now,
             Reason = reason, DestAccount = counterparty,
-            DescCurrency = new Currency(amount.v, amount.t),
+            DescCurrency = reason == "换汇" ? null : new Currency(amount.v, amount.t),
             Source = $"code={code}; IFast mail", isInternal = isInternal
         };
         record.CopyFrom(amount);

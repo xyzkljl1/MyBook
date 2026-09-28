@@ -1529,10 +1529,14 @@ namespace MyBook
 
         private static bool IsICBCHistoryMonthlyRecordMatch(ICBCHistoryDetailCandidate historyRecord, Record monthlyRecord)
         {
+            // 购汇还款配对后入账侧不再重复保存本币金额，仍须核对明细中的原币金额。
+            var originalAmount = monthlyRecord.DescCurrency
+                ?? (monthlyRecord.matchedRecordReason == "FullPreviousStatementRepayment"
+                    ? new Currency(monthlyRecord.v, monthlyRecord.t) : null);
             if (historyRecord.PostingDate.Date != GetICBCMonthlyHistoryMatchDate(monthlyRecord)
                 || historyRecord.Amount.v != monthlyRecord.v
                 || historyRecord.Amount.t != monthlyRecord.t
-                || historyRecord.DescCurrency != monthlyRecord.DescCurrency)
+                || historyRecord.DescCurrency != originalAmount)
                 return false;
 
             var historyDest = NormalizeICBCHistoryComparableText(historyRecord.DestAccount);

@@ -2268,6 +2268,15 @@ namespace MyBook
             if (left.matchedRecordId is not null || right.matchedRecordId is not null)
                 return;
 
+            if (left.t != right.t && (left.Reason == "换汇" && right.Reason == "换汇"
+                || reason == "FullPreviousStatementRepayment"))
+            {
+                var debit = left.v < 0 ? left : right;
+                var credit = left.v > 0 ? left : right;
+                debit.DescCurrency = new Currency(-credit.v, credit.t);
+                credit.DescCurrency = null;
+            }
+
             var updateTime = DateTime.Now;
             left.matchedRecordId = right.Id;
             left.matchedRecordReason = reason;
@@ -2277,10 +2286,12 @@ namespace MyBook
             right.updateTime = updateTime;
 
             db.Updateable(left)
-                .UpdateColumns(record => new { record.isInternal, record.matchedRecordId, record.matchedRecordReason, record.updateTime })
+                .UpdateColumns(record => new { record.isInternal, record.matchedRecordId, record.matchedRecordReason, record.updateTime,
+                    record._descCurrency_v, record._descCurrency_t })
                 .ExecuteCommand();
             db.Updateable(right)
-                .UpdateColumns(record => new { record.isInternal, record.matchedRecordId, record.matchedRecordReason, record.updateTime })
+                .UpdateColumns(record => new { record.isInternal, record.matchedRecordId, record.matchedRecordReason, record.updateTime,
+                    record._descCurrency_v, record._descCurrency_t })
                 .ExecuteCommand();
         }
 

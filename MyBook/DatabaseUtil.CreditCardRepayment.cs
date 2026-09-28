@@ -51,10 +51,6 @@ partial class DatabaseUtil
 
                 debit.isInternal = credit.isInternal = true;
                 MatchInternalTransferPair(debit, credit, "FullPreviousStatementRepayment");
-                debit.DescCurrency = new Currency(-credit.v, credit.t);
-                db.Updateable(debit)
-                    .UpdateColumns(record => new { record._descCurrency_v, record._descCurrency_t })
-                    .ExecuteCommand();
             }
         }
     }
