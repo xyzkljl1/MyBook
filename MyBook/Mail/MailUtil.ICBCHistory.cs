@@ -1036,6 +1036,7 @@ namespace MyBook
                 updateTime = DateTime.Now,
                 DestAccount = simRecord.DestAccount,
                 isInternal = simRecord.isInternal,
+                Fake = simRecord.Fake,
                 Reason = simRecord.Reason,
                 Source = BuildICBCHistoryDetailSIMReversalSource(parsed, simRecord, candidates, replacementCode)
             };

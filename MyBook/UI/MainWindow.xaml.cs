@@ -2975,14 +2975,18 @@ namespace MyBook
             var chartRight = left + chartWidth;
             var useExpense = String.Equals(FlowKind, "Expense", StringComparison.OrdinalIgnoreCase);
             var placements = BuildPointPlacements(points, left, chartWidth);
-            var maxValue = Math.Max(1, points.Max(point => GetFlowSegments(point, useExpense).Sum(segment => segment.Value)));
-            var axisStep = CalculateAxisStep(maxValue);
-            var axisMax = axisStep * Math.Max(1, (int)Math.Ceiling(maxValue / axisStep));
+            var maxValue = points.Max(point => GetFlowSegments(point, useExpense).Where(segment => segment.Value > 0).Sum(segment => segment.Value));
+            var minValue = points.Min(point => GetFlowSegments(point, useExpense).Where(segment => segment.Value < 0).Sum(segment => segment.Value));
+            var axisStep = CalculateAxisStep(Math.Max(1, maxValue - minValue));
+            var axisMin = axisStep * Math.Floor(minValue / axisStep);
+            var axisMax = axisStep * Math.Ceiling(maxValue / axisStep);
+            if (axisMin == axisMax)
+                axisMax = axisMin + axisStep;
             var gridPen = new Pen(new SolidColorBrush(Color.FromRgb(226, 232, 240)), 1);
 
-            for (decimal value = 0; value <= axisMax; value += axisStep)
+            for (var value = axisMin; value <= axisMax; value += axisStep)
             {
-                var y = top + chartHeight - chartHeight * (double)(value / axisMax);
+                var y = GetValueY(value, axisMin, axisMax, top, chartHeight);
                 dc.DrawLine(gridPen, new Point(left, y), new Point(chartRight, y));
                 dc.DrawLine(gridPen, new Point(left - 4, y), new Point(left, y));
                 dc.DrawLine(gridPen, new Point(chartRight, y), new Point(chartRight + 4, y));
@@ -2994,7 +2998,9 @@ namespace MyBook
             dc.DrawLine(gridPen, new Point(left, top), new Point(left, top + chartHeight));
             dc.DrawLine(gridPen, new Point(chartRight, top), new Point(chartRight, top + chartHeight));
             dc.DrawLine(gridPen, new Point(left, top + chartHeight), new Point(chartRight, top + chartHeight));
-            DrawBars(dc, placements, axisMax, left, top, chartWidth, chartHeight, useExpense);
+            var zeroY = GetValueY(0, axisMin, axisMax, top, chartHeight);
+            dc.DrawLine(new Pen(ParseBrush("#94A3B8"), 1), new Point(left, zeroY), new Point(chartRight, zeroY));
+            DrawBars(dc, placements, axisMin, axisMax, left, top, chartWidth, chartHeight, useExpense);
             DrawLegend(dc, width);
             DrawLabels(dc, placements, left, top + chartHeight, chartWidth, hoveredPoint);
         }
@@ -3002,6 +3008,7 @@ namespace MyBook
         private static void DrawBars(
             DrawingContext dc,
             List<MonthlyFlowPointPlacement> placements,
+            decimal axisMin,
             decimal axisMax,
             double left,
             double top,
@@ -3018,9 +3025,13 @@ namespace MyBook
             {
                 var segments = GetFlowSegments(placement.Point, useExpense);
                 var total = segments.Sum(segment => segment.Value);
-                DrawStackedBar(dc, segments, placement.CenterX - barWidth / 2, top, chartHeight, barWidth, axisMax);
-                if (IsInViewport(placement, left, chartWidth))
-                    DrawBarValueLabel(dc, placement.CenterX, top, chartHeight, total, axisMax, useExpense);
+                DrawStackedBar(dc, segments, placement.CenterX - barWidth / 2, top, chartHeight, barWidth, axisMin, axisMax);
+                if (segments.Count != 0 && IsInViewport(placement, left, chartWidth))
+                {
+                    var stackEnd = segments.Where(segment => total < 0 ? segment.Value < 0 : segment.Value > 0).Sum(segment => segment.Value);
+                    var edgeY = GetValueY(stackEnd, axisMin, axisMax, top, chartHeight);
+                    DrawBarValueLabel(dc, placement.CenterX, top, chartHeight, total, edgeY, useExpense);
+                }
             }
         }
 
@@ -3137,6 +3148,11 @@ namespace MyBook
             return useExpense ? point.ExpenseSegments : point.IncomeSegments;
         }
 
+        private static double GetValueY(decimal value, decimal axisMin, decimal axisMax, double top, double chartHeight)
+        {
+            return top + chartHeight * (double)((axisMax - value) / (axisMax - axisMin));
+        }
+
         private static void DrawStackedBar(
             DrawingContext dc,
             List<MonthlyFlowSegmentViewModel> segments,
@@ -3144,17 +3160,24 @@ namespace MyBook
             double top,
             double chartHeight,
             double width,
+            decimal axisMin,
             decimal axisMax)
         {
-            var y = top + chartHeight;
-            foreach (var segment in segments.Where(segment => segment.Value > 0))
+            decimal positive = 0, negative = 0;
+            foreach (var segment in segments.Where(segment => segment.Value != 0))
             {
-                var height = Math.Max(1, chartHeight * (double)(segment.Value / axisMax));
-                y -= height;
+                var start = segment.Value > 0 ? positive : negative;
+                var end = start + segment.Value;
+                if (segment.Value > 0)
+                    positive = end;
+                else
+                    negative = end;
+                var startY = GetValueY(start, axisMin, axisMax, top, chartHeight);
+                var endY = GetValueY(end, axisMin, axisMax, top, chartHeight);
                 dc.DrawRoundedRectangle(
                     GetCurrencyBrush(segment.Currency),
                     null,
-                    new Rect(x, y, width, height),
+                    new Rect(x, Math.Min(startY, endY), width, Math.Max(1, Math.Abs(endY - startY))),
                     2,
                     2);
             }
@@ -3166,16 +3189,14 @@ namespace MyBook
             double top,
             double chartHeight,
             decimal total,
-            decimal axisMax,
+            double edgeY,
             bool useExpense)
         {
-            if (total <= 0)
-                return;
-
             var color = useExpense ? "#BE123C" : "#047857";
             var text = CreateText(total.ToString("N0", CultureInfo.InvariantCulture), 10, ParseBrush(color));
-            var barTop = top + chartHeight - chartHeight * (double)(total / axisMax);
-            var textTop = Math.Max(2, barTop - text.Height - 4);
+            var textTop = total < 0
+                ? Math.Min(top + chartHeight - text.Height, edgeY + 4)
+                : Math.Max(2, edgeY - text.Height - 4);
             var textLeft = centerX - text.Width / 2;
             var background = new SolidColorBrush(Color.FromArgb(230, 255, 255, 255));
             dc.DrawRoundedRectangle(

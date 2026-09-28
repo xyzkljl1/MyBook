@@ -10,7 +10,7 @@ partial class DatabaseUtil
         var end = firstMonth.AddMonths(months);
         var lifeIds = db.Queryable<Account>().Where(a => a.usage == AccountUsage.Life).Select(a => a.Id).ToList();
         var records = db.Queryable<Record>().Where(r => lifeIds.Contains(r._account_Id)
-            && !r.isInternal && r.matchedRecordId == null && !r.isRefundMatched
+            && !r.Fake && !r.isInternal && r.matchedRecordId == null && !r.isRefundMatched
             && r.date >= firstMonth && r.date < end).ToList();
         return CalculateMonthlyRmbExpenses(records, GetRateHistory(RateSource.GoogleFinance), firstMonth, months, DateTime.Now);
     }
@@ -25,7 +25,7 @@ partial class DatabaseUtil
         var ratesByCurrency = history.Where(r => r.source == RateSource.GoogleFinance && r.exchangeRateToRmb > 0)
             .GroupBy(r => r.currency).ToDictionary(g => g.Key,
                 g => g.OrderBy(r => r.rateDate).ToList());
-        var recordsByMonth = records.Where(r => !r.isInternal && r.matchedRecordId == null && !r.isRefundMatched && r.date <= now)
+        var recordsByMonth = records.Where(r => !r.Fake && !r.isInternal && r.matchedRecordId == null && !r.isRefundMatched && r.date <= now)
             .ToLookup(r => new DateTime(r.date.Year, r.date.Month, 1));
         var result = new List<MonthlyRmbExpenseCalculation>();
         for (var i = 0; i < months; i++)

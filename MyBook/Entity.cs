@@ -490,6 +490,9 @@ namespace MyBook
         [SugarColumn(DefaultValue = "0")]
         public bool isInternal { get; set; } = false; // 原始账单/解析逻辑直接确认的内部交易。
 
+        [SugarColumn(DefaultValue = "0")]
+        public bool Fake { get; set; } = false; // 初始化或缺失明细的余额补偿（含冲回）；计入余额，不计入收支或交易匹配。
+
         [SugarColumn(IsNullable = true)]
         public int? matchedRecordId { get; set; } = null; // 跨账单一对一匹配到的另一侧内部交易记录。
 

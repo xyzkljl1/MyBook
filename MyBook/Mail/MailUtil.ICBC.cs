@@ -269,7 +269,7 @@ namespace MyBook
         private int OffsetMatchedICBCRefundRecords(int targetStatementImportId)
         {
             var refunds = database.GetRecordsByStatementImport(targetStatementImportId)
-                .Where(record => !record.isRefundMatched)
+                .Where(record => !record.Fake && !record.isRefundMatched)
                 .Where(IsICBCRefundRecord)
                 .OrderBy(record => record.date)
                 .ThenBy(record => record.Id)
@@ -280,7 +280,7 @@ namespace MyBook
             var minDate = refunds.Min(record => record.date.Date.AddMonths(-2));
             var maxDate = refunds.Max(record => record.date);
             var expenses = database.GetStatementRecords(ICBCProvider, minDate, maxDate)
-                .Where(record => !DatabaseUtil.IsInitializationRecord(record)
+                .Where(record => !record.Fake
                     && !record.isRefundMatched
                     && record.v < 0)
                 .Where(IsICBCExpenseRecord)

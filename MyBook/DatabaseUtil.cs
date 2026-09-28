@@ -51,6 +51,7 @@ namespace MyBook
             "_Currency_t",
             "DestAccount",
             "isInternal",
+            "Fake",
             "matchedRecordId",
             "matchedRecordReason",
             "isRefundMatched",
@@ -1105,7 +1106,7 @@ namespace MyBook
                 date = recordDate,
                 postingDate = postingDate,
                 updateTime = DateTime.Now,
-                isInternal = true,
+                Fake = true,
                 HoldingQuantity = Holding.IsSingleValueAsset(holding.holdingType) ? 0 : holding.quantity,
                 DestAccount = holding.displayText,
                 Source = LimitRecordText(
@@ -1130,7 +1131,7 @@ namespace MyBook
                 date = recordDate,
                 postingDate = postingDate,
                 updateTime = DateTime.Now,
-                isInternal = true,
+                Fake = true,
                 DestAccount = balance.t.ToString(),
                 Source = LimitRecordText(
                     $"{InitializationRecordSourcePrefix}{provider}; statementKey={statementKey}; account={account.name}; currency={balance.t}"),
@@ -1299,7 +1300,8 @@ namespace MyBook
                 edit.IsInternal,
                 null,
                 edit.IsRefundMatched,
-                edit.Amount);
+                edit.Amount,
+                false);
             var record = new Record
             {
                 v = edit.Amount,
@@ -1362,7 +1364,8 @@ namespace MyBook
                 edit.IsInternal,
                 existing.matchedRecordId,
                 edit.IsRefundMatched,
-                edit.Amount);
+                edit.Amount,
+                existing.Fake);
 
             var changed = existing._account_Id != account.Id
                 || existing.v != edit.Amount
@@ -1423,7 +1426,8 @@ namespace MyBook
             bool isInternal,
             int? matchedRecordId,
             bool isRefundMatched,
-            decimal amount)
+            decimal amount,
+            bool fake)
         {
             if (!expenseAllocationDays.HasValue)
             {
@@ -1433,11 +1437,11 @@ namespace MyBook
             }
 
             ValidateExpenseAllocationRelativeRange(expenseAllocationDays.Value, expenseAllocationSkipDays);
-            if (CanRecordHaveExpenseAllocation(accountUsage, isInternal, matchedRecordId, isRefundMatched, amount))
+            if (CanRecordHaveExpenseAllocation(accountUsage, isInternal, matchedRecordId, isRefundMatched, amount, fake))
                 return;
 
             var recordText = recordId.HasValue ? $"Record {recordId.Value}" : "New record";
-            throw new InvalidOperationException($"{recordText} cannot have expense allocation days unless it belongs to a Life or Transit account and is a non-internal, non-refund-matched expense record.");
+            throw new InvalidOperationException($"{recordText} cannot have expense allocation days unless it belongs to a Life or Transit account and is a non-fake, non-internal, non-refund-matched expense record.");
         }
 
         private static void ValidateExpenseAllocationRelativeRange(int expenseAllocationDays, int? expenseAllocationSkipDays)
@@ -1515,7 +1519,7 @@ namespace MyBook
 
             var allocatedExpenseAccountIds = GetAllocatedExpenseAccountIds();
             return db.Queryable<Record>()
-                .Where(record => !record.isInternal
+                .Where(record => !record.Fake && !record.isInternal
                     && record.matchedRecordId == null
                     && !record.isRefundMatched
                     && record.v < 0
@@ -1706,7 +1710,7 @@ namespace MyBook
             HashSet<int> allocatedExpenseAccountIds)
         {
             var records = db.Queryable<Record>()
-                .Where(record => !record.isInternal
+                .Where(record => !record.Fake && !record.isInternal
                     && record.matchedRecordId == null
                     && !record.isRefundMatched
                     && record.v < 0
@@ -1806,7 +1810,8 @@ namespace MyBook
                     record.isInternal,
                     record.matchedRecordId,
                     record.isRefundMatched,
-                    record.v);
+                    record.v,
+                    record.Fake);
         }
 
         private HashSet<int> GetAllocatedExpenseAccountIds()
@@ -1823,19 +1828,21 @@ namespace MyBook
             bool isInternal,
             int? matchedRecordId,
             bool isRefundMatched,
-            decimal amount)
+            decimal amount,
+            bool fake)
         {
             return IsAllocatedExpenseAccountUsage(accountUsage)
-                && CanRecordHaveExpenseAllocationCore(isInternal, matchedRecordId, isRefundMatched, amount);
+                && CanRecordHaveExpenseAllocationCore(isInternal, matchedRecordId, isRefundMatched, amount, fake);
         }
 
         private static bool CanRecordHaveExpenseAllocationCore(
             bool isInternal,
             int? matchedRecordId,
             bool isRefundMatched,
-            decimal amount)
+            decimal amount,
+            bool fake)
         {
-            return !isInternal
+            return !fake && !isInternal
                 && matchedRecordId is null
                 && !isRefundMatched
                 && amount < 0;
@@ -1957,6 +1964,7 @@ namespace MyBook
 
             var records = db.Queryable<Record>()
                 .Where(record => statementImportIds.Contains(record._statementImport_Id)
+                    && !record.Fake
                     && record.matchedRecordId == null
                     && !record.isRefundMatched)
                 .ToList();
@@ -1964,7 +1972,7 @@ namespace MyBook
             {
                 // Include matched originals to detect conflicts before ordinary transfer matching.
                 var candidates = db.Queryable<Record>()
-                    .Where(record => record._account_Id == cancellation._account_Id
+                    .Where(record => !record.Fake && record._account_Id == cancellation._account_Id
                         && record._holding_Id == cancellation._holding_Id && record.date == cancellation.date)
                     .ToList();
                 var original = FindAcatsCancellationOriginal(cancellation, candidates);
@@ -1988,6 +1996,7 @@ namespace MyBook
 
             var imported = db.Queryable<Record>()
                 .Where(record => statementImportIds.Contains(record._statementImport_Id)
+                    && !record.Fake
                     && record.matchedRecordId == null
                     && record.blockchainTransactionHash != "")
                 .ToList();
@@ -1997,6 +2006,7 @@ namespace MyBook
 
             var records = db.Queryable<Record>()
                 .Where(record => hashes.Contains(record.blockchainTransactionHash)
+                    && !record.Fake
                     && record.matchedRecordId == null)
                 .ToList();
             var holdingIds = records.Select(record => record._holding_Id).Distinct().ToList();
@@ -2045,8 +2055,7 @@ namespace MyBook
             Dictionary<string, Account> accountsByName,
             bool requireKnownCounterparty)
         {
-            // 初始化记录沿用内部标记排除收支，但不是一笔可匹配的转账。
-            records = records.Where(record => !IsInitializationRecord(record)).ToList();
+            records = records.Where(record => !record.Fake).ToList();
             if (records.Any(IsAcatsTransfer))
             {
                 var holdingIds = records.Select(record => record._holding_Id).Distinct().ToList();
@@ -2128,7 +2137,7 @@ namespace MyBook
         private static Record? FindInternalTransferCandidate(
             Record anchor, List<Record> records, Func<Record, Account?> resolveTarget, bool requireKnownCounterparty)
         {
-            if (anchor.v == 0)
+            if (anchor.Fake || anchor.v == 0)
                 return null;
 
             var targetAccount = resolveTarget(anchor);
@@ -2139,7 +2148,7 @@ namespace MyBook
             // 不推断消费、费用、持仓转移，也不覆盖对侧已知的不同目标账户。
             bool CanInfer(Record known, Record other, Account? target) =>
                 known.isInternal && known.matchedRecordId is null && !known.isRefundMatched
-                && !IsInitializationRecord(known) && !IsInitializationRecord(other)
+                && !known.Fake && !other.Fake
                 && target is not null && target.Id != known._account_Id && target.Id == other._account_Id
                 && IsTransferPrincipal(known) && IsTransferPrincipal(other)
                 && known.HoldingQuantity == 0 && other.HoldingQuantity == 0
@@ -2153,6 +2162,7 @@ namespace MyBook
             var end = anchor.date.AddDays(InternalTransferMatchWindowDays);
             var candidates = records
                 .Where(record => record.Id != anchor.Id
+                    && !record.Fake
                     && record.matchedRecordId is null
                     && !record.isRefundMatched
                     && (record.isInternal || CanInfer(anchor, record, targetAccount))
@@ -2347,6 +2357,7 @@ namespace MyBook
                     record.updateTime,
                     record.DestAccount,
                     record.isInternal,
+                    record.Fake,
                     record.matchedRecordId,
                     record.matchedRecordReason,
                     record.isRefundMatched,
@@ -2584,7 +2595,7 @@ namespace MyBook
         internal static void ApplyAccountTransferRules(Record record, Account account)
         {
             // 仅处理已明确分类的现金转账本金，不用金额正负推断交易类型，也不虚构对方账户。
-            if (!IsTransferPrincipal(record) || record.isRefundMatched || IsInitializationRecord(record) || IsAcatsTransfer(record)
+            if (!IsTransferPrincipal(record) || record.isRefundMatched || record.Fake || IsAcatsTransfer(record)
                 || record.HoldingQuantity != 0 || record.Holding is not null && record.Holding.holdingType != HoldingType.Cash)
                 return;
             // 指定账户的入金和所有投资账户的出金均来自或流向本人其他账户。
@@ -2975,7 +2986,8 @@ namespace MyBook
                     record.isInternal,
                     record.matchedRecordId,
                     record.isRefundMatched,
-                    record.v);
+                    record.v,
+                    record.Fake);
 
                 record.expenseAllocationDays = expenseAllocationDays;
                 record.expenseAllocationSkipDays = expenseAllocationSkipDays;
@@ -3637,7 +3649,7 @@ namespace MyBook
                 .Select(reasonFirstMonth.AddMonths)
                 .ToList();
             var records = db.Queryable<Record>()
-                .Where(record => !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.date >= recordStart && record.date < recordEnd)
+                .Where(record => !record.Fake && !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.date >= recordStart && record.date < recordEnd)
                 .ToList();
             var accountList = db.Queryable<Account>().ToList();
             var lifeAccountIds = accountList
@@ -3663,7 +3675,7 @@ namespace MyBook
                 .Select(holding => holding.Id)
                 .ToHashSet();
             var accountNetFlowRecords = db.Queryable<Record>()
-                .Where(record => !record.isRefundMatched && record.date < today.Date.AddDays(1))
+                .Where(record => !record.Fake && !record.isRefundMatched && record.date < today.Date.AddDays(1))
                 .ToList()
                 .Where(record => cashHoldingIds.Contains(record._holding_Id))
                 .ToList();
@@ -3672,7 +3684,7 @@ namespace MyBook
                 .Select(account => account.Id)
                 .ToHashSet();
             var investmentRecords = db.Queryable<Record>()
-                .Where(record => !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.v != 0 && record.date < today.Date.AddDays(1))
+                .Where(record => !record.Fake && !record.isInternal && record.matchedRecordId == null && !record.isRefundMatched && record.v != 0 && record.date < today.Date.AddDays(1))
                 .ToList()
                 .Where(record => investmentAccountIds.Contains(record._account_Id))
                 .ToList();
@@ -4088,20 +4100,23 @@ namespace MyBook
                     var points = months
                         .Select(month =>
                         {
-                            var monthRecords = records
+                            var contributions = records
                                 .Where(record => record.t == currency
                                     && record.date >= month
                                     && record.date < month.AddMonths(1))
+                                .Select(IncomeExpenseUtil.GetContribution)
                                 .ToList();
+                            var income = Currency.RoundMoney(contributions.Sum(flow => flow.Income.v));
+                            var expense = Currency.RoundMoney(contributions.Sum(flow => flow.Expense.v));
                             return new MonthlyFlowPoint
                             {
                                 Month = month,
                                 MonthLabel = month.ToString("MM月"),
-                                Income = Currency.RoundMoney(monthRecords.Where(record => record.v > 0).Sum(record => record.v)),
-                                Expense = Currency.RoundMoney(-monthRecords.Where(record => record.v < 0).Sum(record => record.v)),
-                                NetChange = Currency.RoundMoney(monthRecords.Sum(record => record.v)),
-                                IncomeSegments = BuildSingleCurrencySegments(currency, monthRecords.Where(record => record.v > 0).Sum(record => record.v)),
-                                ExpenseSegments = BuildSingleCurrencySegments(currency, -monthRecords.Where(record => record.v < 0).Sum(record => record.v))
+                                Income = income,
+                                Expense = expense,
+                                NetChange = income - expense,
+                                IncomeSegments = BuildSingleCurrencySegments(currency, income),
+                                ExpenseSegments = BuildSingleCurrencySegments(currency, expense)
                             };
                         })
                         .ToList();
@@ -4129,26 +4144,25 @@ namespace MyBook
             var points = months
                 .Select(month =>
                 {
-                    var convertedRecords = records
+                    var contributions = records
                         .Where(record => record.date >= month && record.date < month.AddMonths(1))
-                        .Select(record => TryConvertToRmb(record.v, record.t, exchangeRates))
-                        .Where(value => value.HasValue)
-                        .Select(value => value!.Value)
+                        .Select(IncomeExpenseUtil.GetContribution)
+                        .Select(flow => (
+                            Currency: flow.Income.t,
+                            Income: TryConvertToRmb(flow.Income.v, flow.Income.t, exchangeRates) ?? 0,
+                            Expense: TryConvertToRmb(flow.Expense.v, flow.Expense.t, exchangeRates) ?? 0))
                         .ToList();
+                    var income = Currency.RoundMoney(contributions.Sum(flow => flow.Income));
+                    var expense = Currency.RoundMoney(contributions.Sum(flow => flow.Expense));
                     return new MonthlyFlowPoint
                     {
                         Month = month,
                         MonthLabel = month.ToString("MM月"),
-                        Income = Currency.RoundMoney(convertedRecords.Where(value => value > 0).Sum()),
-                        Expense = Currency.RoundMoney(-convertedRecords.Where(value => value < 0).Sum()),
-                        NetChange = Currency.RoundMoney(convertedRecords.Sum()),
-                        IncomeSegments = BuildRmbMonthlySegments(
-                            records.Where(record => record.date >= month && record.date < month.AddMonths(1) && record.v > 0),
-                            exchangeRates),
-                        ExpenseSegments = BuildRmbMonthlySegments(
-                            records.Where(record => record.date >= month && record.date < month.AddMonths(1) && record.v < 0),
-                            exchangeRates,
-                            invertSign: true)
+                        Income = income,
+                        Expense = expense,
+                        NetChange = income - expense,
+                        IncomeSegments = BuildRmbMonthlySegments(contributions, useExpense: false),
+                        ExpenseSegments = BuildRmbMonthlySegments(contributions, useExpense: true)
                     };
                 })
                 .ToList();
@@ -4553,25 +4567,17 @@ namespace MyBook
         }
 
         private static List<MonthlyFlowSegment> BuildRmbMonthlySegments(
-            IEnumerable<Record> records,
-            Dictionary<CurrencyType, decimal> exchangeRates,
-            bool invertSign = false)
+            IEnumerable<(CurrencyType Currency, decimal Income, decimal Expense)> contributions,
+            bool useExpense)
         {
-            return records
-                .GroupBy(record => record.t)
+            return contributions
+                .GroupBy(flow => flow.Currency)
                 .OrderBy(group => group.Key)
-                .Select(group =>
+                .Select(group => new MonthlyFlowSegment
                 {
-                    var original = group.Sum(record => record.v);
-                    if (invertSign)
-                        original = -original;
-                    var converted = TryConvertToRmb(original, group.Key, exchangeRates) ?? 0;
-                    return new MonthlyFlowSegment
-                    {
-                        Currency = group.Key,
-                        Value = converted,
-                        Label = group.Key.ToString()
-                    };
+                    Currency = group.Key,
+                    Value = group.Sum(flow => useExpense ? flow.Expense : flow.Income),
+                    Label = group.Key.ToString()
                 })
                 .Where(segment => segment.Value != 0)
                 .ToList();
@@ -6123,6 +6129,7 @@ namespace MyBook
             DateTime UpdateTime,
             string DestAccount,
             bool IsInternal,
+            bool Fake,
             int? MatchedRecordId,
             string MatchedRecordReason,
             bool IsRefundMatched,

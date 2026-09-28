@@ -314,6 +314,7 @@ namespace MyBook
                 postingDate = transaction.TransactionTime.AddSeconds(-1),
                 updateTime = DateTime.Now,
                 DestAccount = "Inferred from SMS balance",
+                Fake = true,
                 Source = BuildICBCSIMCompensationSource(
                     transaction,
                     statementKey,
