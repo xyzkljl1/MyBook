@@ -118,6 +118,7 @@ CREATE TABLE `records` (
   `blockchainEventIndex` int DEFAULT NULL,
   `blockchainAssetContract` varchar(42) NOT NULL DEFAULT '',
   `isRefundMatched` tinyint(1) NOT NULL DEFAULT '0',
+  `exchangeLossCache` decimal(30,18) DEFAULT NULL,
   `expenseAllocationDays` int DEFAULT NULL,
   `expenseAllocationSkipDays` int DEFAULT NULL,
   `allocatedExpenseCacheDirty` tinyint(1) NOT NULL DEFAULT '1',

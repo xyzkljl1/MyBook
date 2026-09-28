@@ -539,6 +539,10 @@ namespace MyBook
         [SugarColumn(IsNullable = true, ColumnDataType = "datetime(6)")]
         public DateTime? postingDate { get; set; } = null; // 记账日，表示交易实际体现在账单上的日期。
 
+        // RMB exchange loss cached once by the scheduled rate fetch; null means not calculated.
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? exchangeLossCache { get; set; } = null;
+
         public DateTime updateTime { get; set; }
         // 原始交易币种和数量，带有正负号，区别于最终入账币种和数量。
         // 例如在 Steam 国区用 visa 外币卡购买 100 RMB 的游戏，实际会换算成外币支出；这里保存 -100 RMB。

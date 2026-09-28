@@ -76,6 +76,7 @@ namespace MyBook
             var db = database ?? throw new InvalidOperationException("Scheduled rates require a database.");
             var rates = await ReadGoogleFinanceRates(db.GetLatestRateTimes(RateSource.GoogleFinance)).ConfigureAwait(false);
             db.SaveRateHistory(rates);
+            db.CacheExchangeLosses();
         }
 
         public async Task FetchExchangeRates(IEnumerable<CurrencyType> currencyTypes)
