@@ -10,14 +10,16 @@ namespace MyBook;
 partial class MailUtil
 {
     // PreviousAer is used only to validate a received notice, never persisted.
-    internal sealed record IFastRateNotice(CurrencyType Currency, DateTime Date, decimal PreviousAer, decimal Aer);
+    internal sealed record IFastRateNotice(CurrencyType Currency, DateTime Date, decimal PreviousAer, decimal Aer, decimal? Gross = null);
     internal sealed record IFastScheduledRate(DateTime Date, decimal? Gross);
+    private const string IFastRateIncreaseSubject = "Your Multi-Currency Current Account interest rate has increased";
 
     private async Task UpdateIFastInterestRates()
     {
         // Independent of transaction-mail progress: notices can arrive before their effective dates.
         var messages = await SearchMessagesFromMailbox(CreateYahooMailbox() with { Proxy = null }, "IFast rate notices",
-            SearchQuery.FromContains("@ifastgb.com").And(SearchQuery.SubjectContains("Interest rate update")),
+            SearchQuery.FromContains("@ifastgb.com").And(SearchQuery.SubjectContains("Interest rate update")
+                .Or(SearchQuery.SubjectContains(IFastRateIncreaseSubject))),
             null, GetMailDateTime).ConfigureAwait(false);
         var notices = messages.SelectMany(ParseIFastRateNotice).ToList();
         var history = database.GetRateHistory(RateSource.IFastWebsite, RateSource.IFastMail);
@@ -35,31 +37,37 @@ partial class MailUtil
             currency = notice.Currency,
             rateDate = IFastLocalTime(notice.Date),
             fetchedAt = fetchedAt,
-            aer = notice.Aer
+            aer = notice.Aer,
+            grossRate = notice.Gross
         }));
         BuildIFastRateSchedule(history.Concat(rates).ToList());
-        database.SaveRateHistory(rates);
+        database.SaveRateHistory(rates, completeMissingGross: true);
     }
 
     internal static List<IFastRateNotice> ParseIFastRateNotice(MimeMessage message)
     {
         var senders = message.From.Mailboxes.ToList();
+        var isAdvanceNotice = message.Subject.Contains("Interest rate update", StringComparison.OrdinalIgnoreCase);
         if (senders.Count != 1 || !senders[0].Address.EndsWith("@ifastgb.com", StringComparison.OrdinalIgnoreCase)
-            || !message.Subject.Contains("Interest rate update", StringComparison.OrdinalIgnoreCase))
+            || !isAdvanceNotice && !message.Subject.Contains(IFastRateIncreaseSubject, StringComparison.OrdinalIgnoreCase))
             throw new MailParseException("Invalid IFast rate notice sender or subject.");
         var doc = new HtmlDocument();
         doc.LoadHtml(message.HtmlBody ?? "");
         var text = NormalizeMailText(WebUtility.HtmlDecode(message.TextBody ?? doc.DocumentNode.InnerText));
-        var matches = Regex.Matches(text,
-            @"interest rate for (?<currency>[A-Z]{3}) Multi-Currency Current Account will change from (?<old>\d+(?:\.\d+)?)% AER to (?<new>\d+(?:\.\d+)?)% AER\.\s*This change will take effect on (?<date>\d{1,2} [A-Za-z]{3} \d{4})\.",
+        var matches = Regex.Matches(text, isAdvanceNotice
+            ? @"interest rate for (?<currency>[A-Z]{3}) Multi-Currency Current Account will change from (?<old>\d+(?:\.\d+)?)% AER to (?<new>\d+(?:\.\d+)?)% AER\.\s*This change will take effect on (?<date>\d{1,2} [A-Za-z]{3} \d{4})\."
+            : @"Currency:\s*(?<currency>[A-Z]{3})\s*Interest Rate:\s*(?<old>\d+(?:\.\d+)?)% AER\s*\(\d+(?:\.\d+)?% gross\) variable\s*New Interest Rate:\s*(?<new>\d+(?:\.\d+)?)% AER\s*\((?<gross>\d+(?:\.\d+)?)% gross\) variable\s*Effective Date:\s*(?<date>\d{1,2} [A-Za-z]{3} \d{4})",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        if (matches.Count == 0 || matches.Count != Regex.Matches(text, "will change from", RegexOptions.IgnoreCase).Count)
+        if (matches.Count == 0 || matches.Count != Regex.Matches(text,
+            isAdvanceNotice ? "will change from" : "Currency:", RegexOptions.IgnoreCase).Count)
             throw new MailParseException("Unsupported or incomplete IFast rate notice.");
         var result = matches.Select(match => new IFastRateNotice(new Currency(0, match.Groups["currency"].Value.ToUpperInvariant()).t,
             DateTime.ParseExact(match.Groups["date"].Value, "d MMM yyyy", CultureInfo.InvariantCulture),
             Decimal.Parse(match.Groups["old"].Value, CultureInfo.InvariantCulture) / 100m,
-            Decimal.Parse(match.Groups["new"].Value, CultureInfo.InvariantCulture) / 100m)).ToList();
-        if (result.Any(item => !IFastCurrencies.Contains(item.Currency) || item.PreviousAer < 0 || item.PreviousAer >= 1 || item.Aer < 0 || item.Aer >= 1)
+            Decimal.Parse(match.Groups["new"].Value, CultureInfo.InvariantCulture) / 100m,
+            match.Groups["gross"].Success ? Decimal.Parse(match.Groups["gross"].Value, CultureInfo.InvariantCulture) / 100m : null)).ToList();
+        if (result.Any(item => !IFastCurrencies.Contains(item.Currency) || item.PreviousAer < 0 || item.PreviousAer >= 1 || item.Aer < 0 || item.Aer >= 1
+                || item.Gross < 0 || item.Gross > item.Aer)
             || result.GroupBy(item => item.Currency).Any(group => group.Count() != 1))
             throw new MailParseException("Invalid or duplicate IFast rate notice currency/rate.");
         return result;
@@ -112,11 +120,12 @@ partial class MailUtil
                 .GroupBy(IFastRateBankDate).OrderBy(group => group.Key).Select(group =>
                 {
                     var distinct = group.Select(item => item.aer!.Value).Distinct().ToList();
-                    return distinct.Count == 1 ? (Date: group.Key, Aer: distinct[0])
+                    var gross = group.Select(item => item.grossRate).Where(rate => rate.HasValue).Distinct().ToList();
+                    return distinct.Count == 1 && gross.Count <= 1 ? (Date: group.Key, Aer: distinct[0], Gross: gross.SingleOrDefault())
                         : throw new InvalidOperationException($"Conflicting IFast rate notices: {currency}, {group.Key:yyyy-MM-dd}.");
                 }).ToList();
             if (changes.Count == 0 || changes[0].Date > firstDate)
-                changes.Insert(0, (firstDate, baseline));
+                changes.Insert(0, (firstDate, baseline, null));
             var schedule = new List<IFastScheduledRate>();
             for (var index = 0; index < changes.Count; index++)
             {
@@ -128,7 +137,7 @@ partial class MailUtil
                     && !(IFastRateBankDate(item) == change.Date && SameIFastAer(item.aer!.Value, previousAer))))
                     throw new InvalidOperationException($"Unannounced IFast rate change: {currency}, {change.Date:yyyy-MM-dd}.");
                 var gross = observations.Where(item => SameIFastAer(item.aer!.Value, change.Aer))
-                    .Select(item => item.grossRate).Distinct().ToList();
+                    .Select(item => item.grossRate).Append(change.Gross).Where(rate => rate.HasValue).Distinct().ToList();
                 if (gross.Count > 1) throw new InvalidOperationException($"Ambiguous IFast Gross rate: {currency}, {change.Date:yyyy-MM-dd}.");
                 schedule.Add(new IFastScheduledRate(change.Date, gross.Count == 1 ? gross[0] : null));
             }

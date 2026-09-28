@@ -5382,7 +5382,7 @@ namespace MyBook
             => db.Queryable<RateHistory>().Where(rate => sources.Contains(rate.source))
                 .OrderBy(rate => rate.rateDate).ToList();
 
-        internal void SaveRateHistory(IReadOnlyList<RateHistory> rates)
+        internal void SaveRateHistory(IReadOnlyList<RateHistory> rates, bool completeMissingGross = false)
         {
             ExecuteLockedTransaction(() =>
             {
@@ -5392,9 +5392,17 @@ namespace MyBook
                         && r.currency == rate.currency && r.rateDate == rate.rateDate).First();
                     if (existing is null)
                         db.Insertable(rate).ExecuteCommand();
-                    else if (existing.exchangeRateToRmb != rate.exchangeRateToRmb
-                        || existing.grossRate != rate.grossRate || existing.aer != rate.aer)
-                        throw new InvalidOperationException($"Conflicting rate history: {rate.source}, {rate.currency}, {rate.rateDate:O}.");
+                    else
+                    {
+                        if (existing.exchangeRateToRmb != rate.exchangeRateToRmb || existing.aer != rate.aer
+                            || existing.grossRate != rate.grossRate
+                                && (!completeMissingGross || existing.grossRate.HasValue && rate.grossRate.HasValue))
+                            throw new InvalidOperationException($"Conflicting rate history: {rate.source}, {rate.currency}, {rate.rateDate:O}.");
+                        // A later notice may supply Gross; never erase or replace an already known rate.
+                        if (completeMissingGross && existing.grossRate is null && rate.grossRate.HasValue)
+                            db.Updateable<RateHistory>().SetColumns(item => item.grossRate == rate.grossRate)
+                                .Where(item => item.Id == existing.Id).ExecuteCommand();
+                    }
                 }
             });
         }

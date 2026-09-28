@@ -81,7 +81,7 @@ partial class MailUtil
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(inputs.ToString())));
             var appliedRates = String.Join(",", schedule.Where(item => item.Date < end)
                 .Select(item => FormattableString.Invariant($"{item.Date:yyyy-MM-dd}:{item.Gross}")));
-            record.Source = FormattableString.Invariant($"code={code}; calculation=IFast-interest-{month:yyyy-MM}; bankDate={end:yyyy-MM-dd}; grossSchedule={appliedRates}; calculatedAt={calculatedAt:O}; rateSource={PubWebUtil.IFastInterestRateUrl}; Gross/365; monthly AwayFromZero(2); no carry; inputs={hash}");
+            record.Source = FormattableString.Invariant($"code={code}; calculation=IFast-interest-{month:yyyy-MM}; bankDate={end:yyyy-MM-dd}; grossSchedule={appliedRates}; calculatedAt={calculatedAt:O}; rateSource=RateHistory/IFastMail,IFastWebsite; Gross/365; monthly AwayFromZero(2); no carry; inputs={hash}");
             result.Add(record);
         }
         return result;
