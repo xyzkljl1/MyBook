@@ -34,7 +34,7 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **iFAST:** transaction emails and local monthly statements; interest rates from update emails and the official website.
 - **ZA:** transaction notification emails.
 - **Ant / Ele:** one configured account per bank, with transaction notifications fetched from Yahoo Mail.
-- **FirstTrade:** balances, holdings and history through the account API, plus CSV/OFX downloads using the same login session and kept in memory. Automatic imports are temporarily paused; manual imports remain available.
+- **FirstTrade:** balances, holdings and history through the account API, plus CSV/OFX downloads using the same login session and kept in memory.
 - **Wise:** multi-currency balances, activities, transfer details and payment receipts through a read-only personal-token API.
 - **Schwab:** investment account data through Plaid.
 - **PayPal:** transaction information from each account's linked Plaid connection and mailbox.

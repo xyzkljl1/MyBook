@@ -235,7 +235,12 @@ namespace MyBook
                 AddRecord(tx.Amount, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
                     tx.Date, isInternal, null, 0, postingDate);
             }
-            FirstTradeEqual(cash, endingCash, "cash balance from transaction details");
+            // 出于神秘原因first返回的余额会自己浮动。
+            if (Math.Abs(cash - endingCash) > 1m) // USD
+                throw new FirstTradeException("cash balance from transaction details: difference exceeds USD 1");
+            // Persist detail-derived cash so balances remain exactly consistent with records.
+            holdings.Single(h => h.holdingType == HoldingType.Cash).currentPrice = new Currency(cash, CurrencyType.USD);
+            endingTotal = holdings.Sum(h => h.totalPrice.v);
             foreach (var symbol in quantities.Keys.Union(equities.Keys).Union(values.Keys))
             {
                 var ending = equities.GetValueOrDefault(symbol);

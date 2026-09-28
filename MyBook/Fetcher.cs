@@ -145,11 +145,10 @@ namespace MyBook
                         (since, _) => mail.FetchEleMessages(since),
                         intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
                 }).ConfigureAwait(false);
-                // FirstTrade 定时导入暂时停用；恢复时启用以下调用。
-                // if (web.IsFirstTradeConfigured)
-                //     await RunScheduledImportTaskAsync("FirstTrade", StatementImportProvider.FirstTradeApi,
-                //         (_, _) => web.FetchFirstTradeAsync(),
-                //         intervalDays: 7, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
+                if (web.IsFirstTradeConfigured)
+                    await RunScheduledImportTaskAsync("FirstTrade", StatementImportProvider.FirstTradeApi,
+                        (_, _) => web.FetchFirstTradeAsync(),
+                        intervalDays: 7, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
                 await RunScheduledImportTaskAsync("Plaid Schwab", StatementImportProvider.PlaidSchwab,
                     (since, _) => plaid.FetchSchwabAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
                 if (wise.IsConfigured)
