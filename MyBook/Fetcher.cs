@@ -160,6 +160,9 @@ namespace MyBook
                     (_, _) => graphQL.FetchNexusDpMonthlyReports(), intervalDays: 27, missingAfterDays: 40).ConfigureAwait(false);
                 await RunScheduledImportTaskAsync("Bilibili", StatementImportProvider.BilibiliWeb,
                     (_, _) => web.FetchBilibiliAsync(), intervalDays: 30, missingAfterDays: 35).ConfigureAwait(false);
+                await RunScheduledImportTaskAsync("Steam", StatementImportProvider.SteamWeb,
+                    (since, _) => web.FetchSteamAsync(since), intervalDays: 3, missingAfterDays: 0,
+                    advanceOnEmptyQuery: true).ConfigureAwait(false);
                 await RunScheduledImportTaskAsync("PayPal", CombinedUtil.PayPalProviders,
                     since => new CombinedUtil(database, plaid, mail).FetchPayPalAsync(since),
                     intervalDays: 1, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);

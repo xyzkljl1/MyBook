@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -255,7 +255,7 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD','GBP','EUR')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','PlaidSchwab','WiseApi','AntMail','EleMail','PayPalCN','BilibiliWeb')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','PlaidSchwab','WiseApi','AntMail','EleMail','PayPalCN','BilibiliWeb','SteamWeb')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
@@ -287,25 +287,34 @@ namespace MyBook
         Sandbox
     }
 
-    // A login can own multiple investment accounts; this is not an Account relationship.
-    [SugarIndex("index_FirstTradeSessions_login_hash", nameof(loginHash), OrderByType.Asc, false)]
-    [SugarTable("FirstTradeSessions")]
-    public class FirstTradeSession
+    public enum LoginProvider
+    {
+        FirstTrade,
+        Steam
+    }
+
+    // Login identity is independent of financial accounts; one login can own several accounts.
+    [SugarIndex("index_LoginSessions_provider_login_id", nameof(provider), OrderByType.Asc, nameof(loginHash), OrderByType.Asc, nameof(Id), OrderByType.Asc, false)]
+    [SugarTable("LoginSessions")]
+    public class LoginSession
     {
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
 
-        [SugarColumn(ColumnDataType = "varchar(64)")]
+        [SugarColumn(ColumnDataType = "enum('FirstTrade','Steam')", SqlParameterDbType = typeof(EnumToStringConvert))]
+        public required LoginProvider provider { get; set; }
+
+        [SugarColumn(ColumnDataType = "char(64)")]
         public required string loginHash { get; set; }
 
+        // JSON is explicitly permitted only for FirstTrade/Steam login state in this column.
         [SugarColumn(ColumnDataType = "json")]
-        public required string stateJson { get; set; }
+        public required string sessionJson { get; set; }
 
-        // Temporary debug: login creation time; legacy rows retain their original last-update time.
+        // Local time of session creation; token renewal does not change this value.
         [SugarColumn(ColumnDataType = "datetime(6)")]
-        public DateTime updateTimeUtc { get; set; }
+        public DateTime createdAt { get; set; }
     }
-
     [SugarIndex("unique_PlaidItems_environment_item_id", nameof(environment), OrderByType.Asc, nameof(itemId), OrderByType.Asc, true)]
     [SugarTable("PlaidItems")]
     public class PlaidItem
@@ -708,6 +717,7 @@ namespace MyBook
         EleMail,
         PayPalCN,
         BilibiliWeb,
+        SteamWeb,
     }
 
     [SugarIndex("unique_StatementImports_provider_time_key", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.time), OrderByType.Asc, nameof(StatementImport.statementKey), OrderByType.Asc, true)]

@@ -27,6 +27,14 @@ namespace MyBook
                 return;
             }
 
+            if (e.Args.Any(arg => arg.Equals("--steam-login", StringComparison.OrdinalIgnoreCase)))
+            {
+                var exitCode = SteamLogin.Run(e.Args);
+                Shutdown(exitCode);
+                Environment.Exit(exitCode);
+                return;
+            }
+
             if (e.Args.Any(arg => arg.Equals("--plaid-link", StringComparison.OrdinalIgnoreCase)))
             {
                 var exitCode = 0;

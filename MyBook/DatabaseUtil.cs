@@ -27,7 +27,7 @@ namespace MyBook
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(FirstTradeSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(LoginSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -196,27 +196,38 @@ namespace MyBook
             return ExecuteLockedTransaction(() => db.Ado.ExecuteCommand(sql));
         }
 
-        public FirstTradeSessionLease OpenFirstTradeSession(string username) =>
-            new(db.CurrentConnectionConfig.ConnectionString, username);
+        public LoginSessionLease OpenLoginSession(LoginProvider provider, string? username = null) =>
+            new(db.CurrentConnectionConfig.ConnectionString, provider, username);
 
-        internal sealed class FirstTradeSessionLease : IDisposable
+        internal sealed class LoginSessionLease : IDisposable
         {
             private readonly SqlSugarClient connection;
+            private readonly LoginProvider provider;
             private readonly string loginHash;
             private readonly string lockName;
             private readonly int connectionId;
             private bool disposed;
 
-            internal FirstTradeSessionLease(string connectionString, string username)
+            internal LoginSessionLease(string connectionString, LoginProvider provider, string? username)
             {
-                loginHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username)));
-                lockName = "MyBook.FirstTrade:" + loginHash[..40];
+                this.provider = provider;
                 connection = CreateDatabaseClient(connectionString);
                 connection.CurrentConnectionConfig.IsAutoCloseConnection = false;
                 connection.Ado.CommandTimeOut = 30;
                 try
                 {
                     connection.Ado.Open();
+                    if (username is null)
+                    {
+                        var identities = connection.Queryable<LoginSession>().Where(row => row.provider == provider)
+                            .Select(row => row.loginHash).Distinct().ToList();
+                        if (identities.Count != 1)
+                            throw new InvalidOperationException();
+                        loginHash = identities[0];
+                    }
+                    else loginHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username)));
+                    // Keep FirstTrade's lock name to exclude older processes during the transition.
+                    lockName = $"MyBook.{provider}:" + loginHash[..40];
                     connectionId = connection.Ado.GetInt("select connection_id()");
                     if (connection.Ado.GetInt("select get_lock(@name, 0)", new SugarParameter("@name", lockName)) != 1)
                         throw new InvalidOperationException();
@@ -224,7 +235,7 @@ namespace MyBook
                 catch
                 {
                     connection.Dispose();
-                    throw new InvalidOperationException("FirstTrade session database unavailable or in use; login was not attempted.");
+                    throw new InvalidOperationException($"{provider} session database unavailable, login identity missing/ambiguous, or session in use; login was not attempted.");
                 }
             }
 
@@ -237,14 +248,14 @@ namespace MyBook
                             new SugarParameter("@id", connectionId), new SugarParameter("@name", lockName)) != 1)
                         throw new InvalidOperationException();
                 }
-                catch { throw new InvalidOperationException("FirstTrade session lock lost; requests stopped."); }
+                catch { throw new InvalidOperationException($"{provider} session lock lost; requests stopped."); }
             }
 
             public string? Read()
             {
                 EnsureLock();
-                try { return connection.Queryable<FirstTradeSession>().Where(row => row.loginHash == loginHash).OrderByDescending(row => row.Id).First()?.stateJson; }
-                catch { throw new InvalidOperationException("FirstTrade session database read failed."); }
+                try { return connection.Queryable<LoginSession>().Where(row => row.provider == provider && row.loginHash == loginHash).OrderByDescending(row => row.Id).First()?.sessionJson; }
+                catch { throw new InvalidOperationException($"{provider} session database read failed."); }
             }
 
             public void Save(string stateJson, bool newSession = false)
@@ -255,24 +266,25 @@ namespace MyBook
                     // Session writes commit independently of financial import validation.
                     var result = connection.Ado.UseTran(() =>
                     {
-                        var latest = connection.Queryable<FirstTradeSession>().Where(row => row.loginHash == loginHash)
+                        var latest = connection.Queryable<LoginSession>().Where(row => row.provider == provider && row.loginHash == loginHash)
                             .OrderByDescending(row => row.Id).First();
-                        // Temporary debug: retain login history; updateTimeUtc is fixed at login, not ordinary session saves.
+                        // Retain login history, but clear credentials from the superseded session.
                         if (newSession || latest is null)
                         {
                             if (latest is not null)
-                                connection.Ado.ExecuteCommand("UPDATE FirstTradeSessions SET stateJson=JSON_OBJECT('Version',1,'Cookies',JSON_ARRAY()) WHERE Id=@id",
+                                connection.Ado.ExecuteCommand("UPDATE LoginSessions SET sessionJson=JSON_OBJECT() WHERE Id=@id",
                                     new SugarParameter("@id", latest.Id));
-                            connection.Ado.ExecuteCommand("INSERT INTO FirstTradeSessions (loginHash,stateJson,updateTimeUtc) VALUES (@hash,@state,UTC_TIMESTAMP(6))",
-                                new SugarParameter("@hash", loginHash), new SugarParameter("@state", stateJson));
+                            connection.Ado.ExecuteCommand("INSERT INTO LoginSessions (provider,loginHash,sessionJson,createdAt) VALUES (@provider,@hash,@state,@created)",
+                                new SugarParameter("@provider", provider.ToString()), new SugarParameter("@hash", loginHash),
+                                new SugarParameter("@state", stateJson), new SugarParameter("@created", DateTime.Now));
                         }
                         else
-                            connection.Ado.ExecuteCommand("UPDATE FirstTradeSessions SET stateJson=@state WHERE Id=@id",
+                            connection.Ado.ExecuteCommand("UPDATE LoginSessions SET sessionJson=@state WHERE Id=@id",
                                 new SugarParameter("@state", stateJson), new SugarParameter("@id", latest.Id));
                     });
                     if (!result.IsSuccess) throw new InvalidOperationException();
                 }
-                catch { throw new InvalidOperationException("FirstTrade session database write failed; requests stopped."); }
+                catch { throw new InvalidOperationException($"{provider} session database write failed; requests stopped."); }
             }
 
             public void Dispose()
@@ -5618,13 +5630,13 @@ namespace MyBook
             return updated;
         }
 
-        public void MarkRecordsAsRefundMatched(IEnumerable<Record> records)
+        public void MarkRecordsAsRefundMatched(IEnumerable<Record> records, bool withinImportTransaction = false)
         {
             var updates = records.ToList();
             if (updates.Count == 0)
                 return;
 
-            ExecuteLockedTransaction(() =>
+            void Mark()
             {
                 var now = DateTime.Now;
                 foreach (var record in updates)
@@ -5637,7 +5649,9 @@ namespace MyBook
                     .UpdateColumns(record => new { record.isRefundMatched, record.updateTime })
                     .ExecuteCommand();
                 ProcessAllocatedExpenseDirtyRecordsCore();
-            });
+            }
+            if (withinImportTransaction) Mark();
+            else ExecuteLockedTransaction(Mark);
         }
 
         public static DateTime NormalizeStatementImportTime(DateTime time)
@@ -5853,8 +5867,8 @@ namespace MyBook
                 return "AccountInternalIds";
             if (type == typeof(AccountBalance))
                 return "AccountBalances";
-            if (type == typeof(FirstTradeSession))
-                return "FirstTradeSessions";
+            if (type == typeof(LoginSession))
+                return "LoginSessions";
             if (type == typeof(PlaidItem))
                 return "PlaidItems";
             if (type == typeof(Record))

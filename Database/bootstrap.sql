@@ -30,15 +30,15 @@ CREATE TABLE `accountinternalids` (
   CONSTRAINT `fk_AccountInternalIds_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `firsttradesessions` (
+CREATE TABLE `loginsessions` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `loginHash` varchar(64) NOT NULL,
-  `stateJson` json NOT NULL,
-  `updateTimeUtc` datetime(6) NOT NULL,
+  `provider` enum('FirstTrade','Steam') NOT NULL,
+  `loginHash` char(64) NOT NULL,
+  `sessionJson` json NOT NULL,
+  `createdAt` datetime(6) NOT NULL,
   PRIMARY KEY (`Id`),
-  KEY `index_FirstTradeSessions_login_hash` (`loginHash`)
+  KEY `index_LoginSessions_provider_login_id` (`provider`,`loginHash`,`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 CREATE TABLE `plaiditems` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `_account_Id` int DEFAULT NULL,
@@ -68,7 +68,7 @@ CREATE TABLE `finance` (
 
 CREATE TABLE `statementimports` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','PlaidSchwab','WiseApi','AntMail','EleMail','PayPalCN','BilibiliWeb') NOT NULL DEFAULT 'Manual',
+  `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','PlaidSchwab','WiseApi','AntMail','EleMail','PayPalCN','BilibiliWeb','SteamWeb') NOT NULL DEFAULT 'Manual',
   `time` datetime(6) NOT NULL,
   `statementKey` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`Id`),

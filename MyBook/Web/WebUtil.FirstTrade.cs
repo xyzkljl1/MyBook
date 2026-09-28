@@ -34,7 +34,7 @@ namespace MyBook
                 var checkpoint = database.GetStatementImportCheckpointTime(StatementImportProvider.FirstTradeApi)
                     ?? throw new FirstTradeException("initial database checkpoint is missing");
                 stage = "acquire database session";
-                using var sessionStore = database.OpenFirstTradeSession(username);
+                using var sessionStore = database.OpenLoginSession(LoginProvider.FirstTrade, username);
                 using var client = new FirstTradeClient(username, password, totpSecret, sessionStore, proxy: config["mail_proxy"]);
                 stage = "login";
                 await client.LoginAsync(timeout.Token).ConfigureAwait(false);
@@ -340,11 +340,11 @@ namespace MyBook
             private bool sessionRefreshAttempted;
             private long responseBytes;
             private readonly Func<DateTimeOffset> utcNow;
-            private readonly DatabaseUtil.FirstTradeSessionLease sessionStore;
+            private readonly DatabaseUtil.LoginSessionLease sessionStore;
             private readonly CookieContainer? cookies;
             private FirstTradeSessionState session = new();
 
-            internal FirstTradeClient(string username, string password, string totpSecret, DatabaseUtil.FirstTradeSessionLease sessionStore,
+            internal FirstTradeClient(string username, string password, string totpSecret, DatabaseUtil.LoginSessionLease sessionStore,
                 HttpMessageHandler? handler = null, string? proxy = null,
                 Func<DateTimeOffset>? utcNow = null)
             {
