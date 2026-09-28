@@ -330,7 +330,12 @@ namespace MyBook
                 updateTime = DateTime.Now,
                 Source = BuildICBCHistoryDetailSource(row, rowCode, statementKey),
                 DestAccount = BuildICBCHistoryDetailDestAccount(row),
-                Reason = row.Summary is "网转" or "单笔付款" or "柜面提取" ? "转账" : row.Summary
+                Reason = row.Summary switch
+                {
+                    "网转" or "单笔付款" or "柜面提取" => "转账",
+                    "消费" => "消费",
+                    _ => throw new MailParseException($"Unsupported ICBC history detail summary: {row.Summary}; postingDate={row.PostingDate:yyyy-MM-dd HH:mm:ss}")
+                }
             };
             record.CopyFrom(row.Amount);
             record.DescCurrency = row.DescCurrency;
