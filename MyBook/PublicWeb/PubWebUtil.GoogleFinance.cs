@@ -11,21 +11,18 @@ namespace MyBook
     // Google Finance source for US stocks, ETFs, and FX rates to CNY.
     partial class PubWebUtil
     {
-        internal async Task<List<RateHistory>> ReadGoogleFinanceRates(IReadOnlyDictionary<CurrencyType, DateTime> latestTimes)
+        private async Task<List<RateHistory>> ReadGoogleCurrencyRates(CurrencyType currency, DateTime sinceUtc, DateTime throughExclusiveUtc)
         {
-            var utcToday = DateTime.UtcNow.Date;
-            var starts = Enum.GetValues<CurrencyType>().Where(c => c != CurrencyType.RMB).ToDictionary(c => c,
-                c => latestTimes.TryGetValue(c, out var last) ? GetGoogleHistoryStart(last, utcToday)
-                    : throw new InvalidOperationException($"Missing initial Google Finance history quote for {c}/CNY."));
-            var batches = await Task.WhenAll(starts.Select(async item =>
+            async Task<List<RateHistory>> Read(bool reverse)
             {
-                if (item.Value >= utcToday) return new List<RateHistory>();
-                var html = await ReadGoogleFinancePage(item.Key, history: true).ConfigureAwait(false);
-                try { return ParseGoogleFinanceHistory(html, item.Key, item.Value, utcToday, DateTime.Now); }
+                var pair = reverse ? $"CNY-{currency}" : $"{currency}-CNY";
+                var html = await ReadGoogleFinancePage(currency, history: true, reverse).ConfigureAwait(false);
+                try { return ParseGoogleFinanceHistory(html, currency, sinceUtc, throughExclusiveUtc, DateTime.Now, reverse); }
                 catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException or OverflowException)
-                { throw new InvalidOperationException($"Google Finance GET www.google.com/finance/quote/{item.Key}-CNY: HTTP 200; invalid daily history ({e.GetType().Name})."); }
-            })).ConfigureAwait(false);
-            return batches.SelectMany(r => r).ToList();
+                { throw new InvalidOperationException($"Google Finance GET www.google.com/finance/quote/{pair}: HTTP 200; invalid daily history ({e.GetType().Name})."); }
+            }
+            var sides = await Task.WhenAll(Read(false), Read(true)).ConfigureAwait(false);
+            return PairExchangeRates(sides[0], sides[1]);
         }
 
         private static DateTime GetGoogleHistoryStart(DateTime lastLocalTime, DateTime utcToday)
@@ -39,7 +36,7 @@ namespace MyBook
         }
 
         private static List<RateHistory> ParseGoogleFinanceHistory(string html, CurrencyType currency,
-            DateTime sinceUtc, DateTime utcToday, DateTime fetchedAt)
+            DateTime sinceUtc, DateTime utcToday, DateTime fetchedAt, bool reverse = false)
         {
             var quotes = new Dictionary<DateTime, decimal>();
             var found = false;
@@ -48,7 +45,7 @@ namespace MyBook
                 using var reader = new JsonTextReader(new StringReader(match.Groups["data"].Value)) { FloatParseHandling = FloatParseHandling.Decimal };
                 var data = JToken.ReadFrom(reader);
                 if (data.SelectToken("[0][0]") is not JArray chart
-                    || !chart.Descendants().OfType<JValue>().Any(v => v.Type == JTokenType.String && (string?)v == $"{currency} / CNY")
+                    || !chart.Descendants().OfType<JValue>().Any(v => v.Type == JTokenType.String && (string?)v == (reverse ? $"CNY / {currency}" : $"{currency} / CNY"))
                     || chart.SelectToken("[3][0][0]") is not JArray period || period.Count != 1 || (int?)period[0] != 1
                     || chart.SelectToken("[3][0][1]") is not JArray points) continue;
                 found = true;
@@ -74,7 +71,8 @@ namespace MyBook
             return quotes.OrderBy(p => p.Key).Select(p => new RateHistory
             {
                 source = RateSource.GoogleFinance, currency = currency, rateDate = p.Key.ToLocalTime(),
-                fetchedAt = fetchedAt, exchangeRateToRmb = p.Value
+                fetchedAt = fetchedAt, exchangeRateToRmb = reverse ? null : p.Value,
+                exchangeRateFromRmb = reverse ? p.Value : null
             }).ToList();
         }
 
@@ -104,12 +102,13 @@ namespace MyBook
             return new Currency(rate.Value, CurrencyType.RMB);
         }
 
-        private async Task<string> ReadGoogleFinancePage(CurrencyType currency, bool history)
+        private async Task<string> ReadGoogleFinancePage(CurrencyType currency, bool history, bool reverse = false)
         {
-            var request = $"Google Finance GET www.google.com/finance/quote/{currency}-CNY";
+            var pair = reverse ? $"CNY-{currency}" : $"{currency}-CNY";
+            var request = $"Google Finance GET www.google.com/finance/quote/{pair}";
             try
             {
-                using var response = await googleHttpClient.GetAsync($"https://www.google.com/finance/quote/{currency}-CNY?hl=en" + (history ? "&window=1M" : "")).ConfigureAwait(false);
+                using var response = await googleHttpClient.GetAsync($"https://www.google.com/finance/quote/{pair}?" + (history ? "window=1M" : "hl=en")).ConfigureAwait(false);
                 if (response.StatusCode != HttpStatusCode.OK)
                     throw new InvalidOperationException($"{request}: HTTP {(int)response.StatusCode}.");
                 return await response.Content.ReadAsStringAsync().ConfigureAwait(false);

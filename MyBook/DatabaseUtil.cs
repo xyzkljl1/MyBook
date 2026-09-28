@@ -5387,13 +5387,20 @@ namespace MyBook
             {
                 foreach (var rate in rates)
                 {
+                    if (rate.exchangeRateToRmb.HasValue || rate.exchangeRateFromRmb.HasValue)
+                    {
+                        if (rate.exchangeRateToRmb is not > 0 || rate.exchangeRateFromRmb is not > 0)
+                            throw new InvalidOperationException($"Incomplete exchange rate pair: {rate.source}/{rate.currency} {rate.rateDate:O}.");
+                        MySqlDecimalColumnTypes.ValidateCurrencyValue(rate.exchangeRateToRmb.Value, nameof(rate.exchangeRateToRmb));
+                        MySqlDecimalColumnTypes.ValidateCurrencyValue(rate.exchangeRateFromRmb.Value, nameof(rate.exchangeRateFromRmb));
+                    }
                     var existing = db.Queryable<RateHistory>().Where(r => r.source == rate.source
                         && r.currency == rate.currency && r.rateDate == rate.rateDate).First();
                     if (existing is null)
                         db.Insertable(rate).ExecuteCommand();
                     else
                     {
-                        if (existing.exchangeRateToRmb != rate.exchangeRateToRmb || existing.aer != rate.aer
+                        if (existing.exchangeRateToRmb != rate.exchangeRateToRmb || existing.exchangeRateFromRmb != rate.exchangeRateFromRmb || existing.aer != rate.aer
                             || existing.grossRate != rate.grossRate
                                 && (!completeMissingGross || existing.grossRate.HasValue && rate.grossRate.HasValue))
                             throw new InvalidOperationException($"Conflicting rate history: {rate.source}, {rate.currency}, {rate.rateDate:O}.");

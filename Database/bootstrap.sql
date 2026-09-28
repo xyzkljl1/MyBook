@@ -82,6 +82,7 @@ CREATE TABLE `ratehistory` (
   `rateDate` datetime(6) NOT NULL,
   `fetchedAt` datetime(6) NOT NULL,
   `exchangeRateToRmb` decimal(30,18) DEFAULT NULL,
+  `exchangeRateFromRmb` decimal(30,18) DEFAULT NULL,
   `grossRate` decimal(30,18) DEFAULT NULL,
   `aer` decimal(30,18) DEFAULT NULL,
   `_statementImport_Id` int DEFAULT NULL,

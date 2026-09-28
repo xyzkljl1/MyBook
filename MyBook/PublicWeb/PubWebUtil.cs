@@ -74,9 +74,49 @@ namespace MyBook
         internal async Task FetchScheduledExchangeRates()
         {
             var db = database ?? throw new InvalidOperationException("Scheduled rates require a database.");
-            var rates = await ReadGoogleFinanceRates(db.GetLatestRateTimes(RateSource.GoogleFinance)).ConfigureAwait(false);
-            db.SaveRateHistory(rates);
+            await FetchScheduledRatePairs(RateSource.GoogleFinance,
+                Enum.GetValues<CurrencyType>().Where(c => c != CurrencyType.RMB),
+                (currency, last) => ReadGoogleCurrencyRates(currency, GetGoogleHistoryStart(last, DateTime.UtcNow.Date), DateTime.UtcNow.Date)).ConfigureAwait(false);
             db.CacheExchangeLosses();
+        }
+
+        private async Task FetchScheduledRatePairs(RateSource source, IEnumerable<CurrencyType> currencies,
+            Func<CurrencyType, DateTime, Task<List<RateHistory>>> fetch)
+        {
+            var db = database ?? throw new InvalidOperationException("Scheduled rates require a database.");
+            var progress = db.GetLatestRateTimes(source);
+            var pending = new List<RateHistory>();
+            foreach (var currency in currencies)
+            {
+                DateTime? latest = progress.TryGetValue(currency, out var last) ? last : null;
+                await ImportSchedule.RunAsync($"{source}/{currency}", 1, 5, () => latest, async since =>
+                {
+                    var batch = await fetch(currency, since).ConfigureAwait(false);
+                    pending.AddRange(batch);
+                    if (batch.Count > 0) latest = batch.Max(r => r.rateDate);
+                }).ConfigureAwait(false);
+            }
+            db.SaveRateHistory(pending);
+        }
+
+        private static List<RateHistory> PairExchangeRates(List<RateHistory> forward, List<RateHistory> reverse)
+        {
+            DateOnly QuoteDate(RateHistory rate) => rate.source == RateSource.GoogleFinance
+                ? DateOnly.FromDateTime(DateTime.SpecifyKind(rate.rateDate, DateTimeKind.Local).ToUniversalTime())
+                : KylcDate(rate.rateDate);
+            var reverseByDate = reverse.ToDictionary(QuoteDate);
+            var result = new List<RateHistory>();
+            foreach (var rate in forward)
+            {
+                // A one-sided date is not an observation of a complete exchange-rate pair.
+                if (!reverseByDate.TryGetValue(QuoteDate(rate), out var other)) continue;
+                if (rate.rateDate != other.rateDate || rate.currency != other.currency || rate.source != other.source)
+                    throw new InvalidOperationException($"Exchange rate pair timestamp mismatch: {rate.source}/{rate.currency} {rate.rateDate:O} / {other.rateDate:O}.");
+                rate.exchangeRateFromRmb = other.exchangeRateFromRmb;
+                rate.fetchedAt = rate.fetchedAt > other.fetchedAt ? rate.fetchedAt : other.fetchedAt;
+                result.Add(rate);
+            }
+            return result;
         }
 
         public async Task FetchExchangeRates(IEnumerable<CurrencyType> currencyTypes)

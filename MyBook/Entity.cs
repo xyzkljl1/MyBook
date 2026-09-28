@@ -238,6 +238,9 @@ namespace MyBook
         public decimal? exchangeRateToRmb { get; set; }
 
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
+        public decimal? exchangeRateFromRmb { get; set; }
+
+        [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
         public decimal? grossRate { get; set; } // Fraction, e.g. 0.03 means 3%.
 
         [SugarColumn(IsNullable = true, ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
