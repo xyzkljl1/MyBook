@@ -57,9 +57,11 @@ partial class WebUtil
         Dictionary<string, string>? form, CancellationToken token)
     {
         var uri = new Uri(http.BaseAddress!, path);
-        for (var redirect = 0; ; redirect++)
+        for (int redirect = 0, attempt = 1; ; attempt++)
         {
+            token.ThrowIfCancellationRequested();
             var label = $"Steam {(form is null ? "GET" : "POST")} {uri.Host}{uri.AbsolutePath}";
+            string failure;
             try
             {
                 using var request = new HttpRequestMessage(form is null ? HttpMethod.Get : HttpMethod.Post, uri);
@@ -73,14 +75,23 @@ partial class WebUtil
                         || next.AbsolutePath is not ("/en/wizard/HelpWithTransaction" or "/en/wizard/HelpWithMyPurchase"))
                         throw new InvalidOperationException($"{label}: unexpected redirect; HTTP {(int)response.StatusCode}.");
                     uri = next;
+                    redirect++;
+                    attempt = 0;
                     continue;
                 }
+                if ((int)response.StatusCode is 408 or 429 or >= 500 and <= 599)
+                    throw new HttpRequestException(null, null, response.StatusCode);
                 if (!response.IsSuccessStatusCode)
                     throw new InvalidOperationException($"{label}: HTTP {(int)response.StatusCode}.");
                 return await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
             }
-            catch (HttpRequestException error) { throw new InvalidOperationException($"{label}: {error.HttpRequestError}."); }
-            catch (OperationCanceledException) { throw new InvalidOperationException($"{label}: cancelled or timed out."); }
+            catch (HttpRequestException error)
+            { failure = error.StatusCode is { } status ? $"HTTP {(int)status}" : error.HttpRequestError.ToString(); }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            { failure = "request timed out"; }
+            if (attempt == 3) throw new InvalidOperationException($"{label}: {failure}; failed after {attempt} attempts.");
+            Console.WriteLine($"{label}: {failure}; attempt {attempt}/3 failed, retrying in 2 seconds.");
+            await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         }
     }
 
@@ -201,9 +212,9 @@ partial class WebUtil
             throw new InvalidOperationException("Steam detail: item names or total disagree with history.");
         if (items.Count == 1)
             return [items[0] with { Amount = entry.Change }];
-        // Steam exposes the wallet contribution for the whole order, not each mixed-payment item.
+        // Mixed payments are explicitly kept as one wallet record because per-item funding is unavailable.
         if (Math.Abs(entry.Change) != entry.Total)
-            throw new InvalidOperationException("Steam detail: multiple items with mixed payment cannot be allocated exactly.");
+            return [new("", String.Join(" / ", entry.ItemNames), entry.Change)];
         var transactionId = entry.Source.Split('|')[1];
         var links = document.DocumentNode.SelectNodes("//a[contains(concat(' ',normalize-space(@class),' '),' help_purchase_button ')][.//*[@class='help_purchase_price']]")
             ?? throw new InvalidOperationException("Steam detail: item identifiers missing.");
