@@ -6,11 +6,8 @@ partial class DatabaseUtil
     {
         return ExecuteLockedTransaction(() =>
         {
-            var last = db.Queryable<Record>().Where(r => r.exchangeLossCache != null)
-                .OrderByDescending(r => r.Id).First();
-            var lastId = last?.Id ?? 0;
-            var records = db.Queryable<Record>().Where(r => r.Id > lastId && r.exchangeLossCache == null
-                && !r.Fake && !r.isInternal && r.matchedRecordId == null && !r.isRefundMatched)
+            var records = db.Queryable<Record>().Where(r => r.exchangeLossCache == null
+                && !r.Fake && !r.isRefundMatched)
                 .ToList();
             var updates = BuildExchangeLossCache(records, GetRateHistory(RateSource.GoogleFinance));
             foreach (var update in updates)
@@ -22,17 +19,27 @@ partial class DatabaseUtil
 
     internal static Dictionary<int, decimal> BuildExchangeLossCache(IEnumerable<Record> records, IEnumerable<RateHistory> history)
     {
-        var rates = history.Where(r => r.source == RateSource.GoogleFinance && r.exchangeRateToRmb > 0)
+        var rates = history.Where(r => r.source == RateSource.GoogleFinance)
             .OrderBy(r => r.rateDate)
             .GroupBy(r => (r.currency, DateTime.SpecifyKind(r.rateDate, DateTimeKind.Local).ToUniversalTime().Date))
-            .ToDictionary(g => g.Key, g => g.Last().exchangeRateToRmb!.Value);
+            .ToDictionary(g => g.Key, g => g.Last());
         var result = new Dictionary<int, decimal>();
-        foreach (var record in records.Where(r => r.exchangeLossCache is null && !r.Fake && !r.isInternal
-                     && r.matchedRecordId is null && !r.isRefundMatched && IsForeignFundedRmbPurchase(r)))
+        foreach (var record in records.Where(r => r.exchangeLossCache is null && !r.Fake && !r.isRefundMatched))
         {
             // Exact transaction-day quote only; no previous-date fallback and no recalculation.
-            if (rates.TryGetValue((record.t, record.date.Date), out var rate))
-                result.Add(record.Id, -record.v * rate + record.DescCurrency!.v);
+            var currency = record.t == CurrencyType.RMB ? record.DescCurrency?.t : record.t;
+            if (currency is null || !rates.TryGetValue((currency.Value, record.date.Date), out var rate)) continue;
+            if (!record.isInternal && record.matchedRecordId is null && IsForeignFundedRmbPurchase(record)
+                && rate.exchangeRateToRmb is > 0)
+                result.Add(record.Id, -record.v * rate.exchangeRateToRmb.Value + record.DescCurrency!.v);
+            // Conversion/repayment principal may be internal and matched; only this record's amounts are used.
+            else if (IsRmbConversion(record))
+            {
+                if (record.t == CurrencyType.RMB && rate.exchangeRateFromRmb is > 0)
+                    result.Add(record.Id, -record.v - Math.Abs(record.DescCurrency!.v) / rate.exchangeRateFromRmb.Value);
+                else if (record.t != CurrencyType.RMB && rate.exchangeRateToRmb is > 0)
+                    result.Add(record.Id, -record.v * rate.exchangeRateToRmb.Value - Math.Abs(record.DescCurrency!.v));
+            }
         }
         return result;
     }
@@ -45,7 +52,7 @@ partial class DatabaseUtil
         var end = firstMonth.AddMonths(months);
         var lifeIds = db.Queryable<Account>().Where(a => a.usage == AccountUsage.Life).Select(a => a.Id).ToList();
         var records = db.Queryable<Record>().Where(r => lifeIds.Contains(r._account_Id)
-            && !r.Fake && !r.isInternal && r.matchedRecordId == null && !r.isRefundMatched
+            && !r.Fake && !r.isRefundMatched
             && r.date >= firstMonth && r.date < end).ToList();
         return CalculateMonthlyRmbExpenses(records, GetRateHistory(RateSource.GoogleFinance), firstMonth, months, DateTime.Now);
     }
@@ -62,6 +69,10 @@ partial class DatabaseUtil
                 g => g.OrderBy(r => r.rateDate).ToList());
         var recordsByMonth = records.Where(r => !r.Fake && !r.isInternal && r.matchedRecordId == null && !r.isRefundMatched && r.date <= now)
             .ToLookup(r => new DateTime(r.date.Year, r.date.Month, 1));
+        // Internal/matched conversion principal stays excluded; only its cached loss is an expense.
+        var conversionsByMonth = records.Where(r => !r.Fake && !r.isRefundMatched && r.date <= now
+            && r.exchangeLossCache.HasValue && IsRmbConversion(r))
+            .ToLookup(r => new DateTime(r.date.Year, r.date.Month, 1));
         var result = new List<MonthlyRmbExpenseCalculation>();
         for (var i = 0; i < months; i++)
         {
@@ -71,7 +82,8 @@ partial class DatabaseUtil
             var monthlyRecords = recordsByMonth[month].ToList();
             // Pending RMB purchases follow ordinary expense conversion until the scheduler fills their cache.
             var cachedPurchases = monthlyRecords.Where(r => IsForeignFundedRmbPurchase(r) && r.exchangeLossCache.HasValue).ToList();
-            var ordinaryRecords = monthlyRecords.Where(r => !IsForeignFundedRmbPurchase(r) || !r.exchangeLossCache.HasValue).ToList();
+            var ordinaryRecords = monthlyRecords.Where(r => !r.exchangeLossCache.HasValue
+                || (!IsForeignFundedRmbPurchase(r) && !IsRmbConversion(r))).ToList();
             var rates = new Dictionary<CurrencyType, decimal> { [CurrencyType.RMB] = 1m };
             var selectedRates = new Dictionary<CurrencyType, MonthlyReferenceRate>();
             var missing = new List<string>();
@@ -120,7 +132,10 @@ partial class DatabaseUtil
                 AddItem(String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason, false, principal);
             }
             // Net gains reduce the same expense item; a net gain remains a negative exchange loss.
-            AddItem("汇损", false, lossTotal);
+            var conversions = conversionsByMonth[month].ToList();
+            AddLossItem("消费汇损", lossTotal, debitTotal);
+            AddLossItem("换汇汇损", conversions.Sum(r => r.exchangeLossCache!.Value),
+                conversions.Sum(r => r.t == CurrencyType.RMB ? -r.v : Math.Abs(r.DescCurrency!.v) + r.exchangeLossCache!.Value));
             series.Items = series.Items.OrderBy(item => item.IsIncome).ThenByDescending(item => item.Total)
                 .ThenBy(item => item.Reason).ToList();
             series.TotalExpense = Currency.RoundMoney(series.Items.Where(item => !item.IsIncome).Sum(item => item.Total));
@@ -128,9 +143,15 @@ partial class DatabaseUtil
             series.RateDescription = selectedRates.Count == 0 ? "未使用月末历史报价；汇损直接使用缓存。"
                 : "Google 基准（RMB / 单位外币，报价日期 UTC）：" + String.Join("；", selectedRates.OrderBy(p => p.Key)
                     .Select(p => $"{p.Key} {p.Value.RmbPerUnit:0.########}（{p.Value.SourceDateUtc:yyyy-MM-dd}）"));
-            foreach (var item in series.Items.Where(item => item.Reason == "汇损"))
-                item.CurrencyDetails = debitTotal == 0 ? "" : $"汇损{item.Total / debitTotal * 100:0.00}%";
             result.Add(new(series, selectedRates));
+
+            void AddLossItem(string reason, decimal loss, decimal debit)
+            {
+                AddItem(reason, false, loss);
+                var item = series.Items.FirstOrDefault(item => item.Reason == reason && !item.IsIncome);
+                if (item is not null)
+                    item.CurrencyDetails = debit == 0 ? "" : $"汇损{loss / debit * 100:0.00}%";
+            }
 
             void AddItem(string reason, bool income, decimal amount)
             {
@@ -143,10 +164,17 @@ partial class DatabaseUtil
         return result;
     }
 
+    // Paired conversions keep the other currency on the debit record; never count the credit again.
+    private static bool IsRmbConversion(Record record) => record.Reason is "换汇" or "还款"
+        && record.v < 0 && record.HoldingQuantity == 0
+        && record.DescCurrency is { v: not 0 } description
+        && ((record.t == CurrencyType.RMB && description.t != CurrencyType.RMB)
+            || (record.t != CurrencyType.RMB && description.t == CurrencyType.RMB));
+
     private static bool IsForeignFundedRmbPurchase(Record record) => record.v < 0 && record.t != CurrencyType.RMB
         && record.DescCurrency is { t: CurrencyType.RMB, v: < 0 }
         && record.HoldingQuantity == 0
-        && record.Reason is not ("换汇" or "转账" or "内部转账" or "手续费" or "交易");
+        && record.Reason is not ("换汇" or "还款" or "转账" or "内部转账" or "手续费" or "交易");
 }
 
 internal sealed record MonthlyReferenceRate(decimal RmbPerUnit, DateTime SourceDateUtc);
