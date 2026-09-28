@@ -211,7 +211,7 @@ namespace MyBook
                     if ((transactionType is "转账" or "转帐") && record.v <= 0)
                         throw new MailParseException("Parse ICBC Bill Fail, Invalid Transfer");
                     record.isInternal = true;
-                    record.Reason = "信用卡还款";
+                    record.Reason = "还款";
                     records.Add(record);
                 }
                 else if (transactionType == "年费减免")

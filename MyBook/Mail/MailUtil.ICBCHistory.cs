@@ -330,7 +330,7 @@ namespace MyBook
                 updateTime = DateTime.Now,
                 Source = BuildICBCHistoryDetailSource(row, rowCode, statementKey),
                 DestAccount = BuildICBCHistoryDetailDestAccount(row),
-                Reason = row.Summary is "网转" or "单笔付款" ? "转账" : row.Summary
+                Reason = row.Summary is "网转" or "单笔付款" or "柜面提取" ? "转账" : row.Summary
             };
             record.CopyFrom(row.Amount);
             record.DescCurrency = row.DescCurrency;
@@ -2028,7 +2028,7 @@ namespace MyBook
         }
 
         internal static bool IsICBCHistoryTransferPrincipal(string summary) =>
-            summary is "网转" or "转账" or "转帐" or "单笔付款";
+            summary is "网转" or "转账" or "转帐" or "单笔付款" or "柜面提取";
 
         private static string[] GetICBCHistoryCreditSummaries()
         {

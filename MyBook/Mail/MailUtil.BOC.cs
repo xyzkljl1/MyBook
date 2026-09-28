@@ -515,10 +515,10 @@ namespace MyBook
             }
 
             if (ContainsBOCDescription(description, "还款", "PAYMENT"))
-                return new BOCTransactionClassification("信用卡还款", true);
+                return new BOCTransactionClassification("还款", true);
             if (ContainsBOCDescription(description, "退款", "退货", "冲正", "REFUND", "REVERSAL"))
                 return new BOCTransactionClassification("退款", false);
-            return new BOCTransactionClassification("存入", false);
+            return new BOCTransactionClassification("其它", false);
         }
 
         private static bool ContainsBOCDescription(string description, params string[] values)
