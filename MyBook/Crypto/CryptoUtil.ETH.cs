@@ -284,7 +284,7 @@ namespace MyBook
                 var time = DateTime.Parse(RequiredText(item, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal);
                 result.Add(new EthereumAssetEvent(hash, index, time, "ETH", "", EthDecimals,
                     AddressEquals(from, address) ? -value : value,
-                    "\u94fe\u4e0a\u5185\u90e8\u8f6c\u8d26", $"Ethereum internal transaction {hash}; index={index}; from={from}; to={to}; valueWei={value}"));
+                    "\u94fe\u4e0a\u8f6c\u8d26", $"Ethereum internal transaction {hash}; index={index}; from={from}; to={to}; valueWei={value}"));
             }
 
             foreach (var item in await tokenTask.ConfigureAwait(false))

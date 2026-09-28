@@ -767,11 +767,6 @@ namespace MyBook
                 "staking" => "\u5229\u606f",
                 "dividend" => "\u80a1\u606f",
                 "rollover" => "\u5229\u606f",
-                "margin" => "\u4fdd\u8bc1\u91d1",
-                "adjustment" => "\u8d26\u52a1\u8c03\u6574",
-                "credit" => "\u4fe1\u7528",
-                "settled" => "\u7ed3\u7b97",
-                "sale" => "\u51fa\u552e",
                 _ => throw new InvalidOperationException($"Unsupported Kraken ledger type: type={type}; subtype={subtype}.")
             };
         }

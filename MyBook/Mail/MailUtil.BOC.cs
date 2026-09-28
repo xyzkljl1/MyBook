@@ -518,7 +518,7 @@ namespace MyBook
                 return new BOCTransactionClassification("还款", true);
             if (ContainsBOCDescription(description, "退款", "退货", "冲正", "REFUND", "REVERSAL"))
                 return new BOCTransactionClassification("退款", false);
-            return new BOCTransactionClassification("其它", false);
+            throw new MailParseException("Unsupported BOC credit transaction: not a repayment or refund.");
         }
 
         private static bool ContainsBOCDescription(string description, params string[] values)
