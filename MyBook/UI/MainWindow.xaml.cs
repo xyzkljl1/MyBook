@@ -2179,7 +2179,9 @@ namespace MyBook
                 RateDescription = series.RateDescription,
                 TotalIncomeText = $"+¥{series.TotalIncome:N2}",
                 TotalExpenseText = $"-¥{series.TotalExpense:N2}",
-                TotalFlowText = $"支出 ¥{series.TotalExpense:N2}　收入 ¥{series.TotalIncome:N2}　净支出 ¥{series.TotalExpense - series.TotalIncome:N2}",
+                TotalFlowText = series.IsAvailable
+                    ? $"支出 ¥{series.TotalExpense:N2}　收入 ¥{series.TotalIncome:N2}　净支出 ¥{series.TotalExpense - series.TotalIncome:N2}"
+                    : series.RateDescription,
                 Items = items
             };
         }

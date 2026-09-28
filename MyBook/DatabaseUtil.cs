@@ -3724,9 +3724,8 @@ namespace MyBook
                     accountNetFlowRecords,
                     exchangeRates),
                 RmbReasonFlowSeriesByMonth = CalculateMonthlyRmbExpenses(lifeRecords, GetRateHistory(RateSource.GoogleFinance),
-                    reasonFirstMonth, reasonMonths.Count, DateTime.Now, allowUnavailableMonths: true)
-                    .Select(result => result.Series.IsAvailable ? result.Series
-                        : BuildRmbReasonFlowSeries(lifeRecords, result.Series.Month, result.Series.Month.AddMonths(1), exchangeRates))
+                    reasonFirstMonth, reasonMonths.Count, DateTime.Now, allowUnavailableMonths: true, fallbackRates: exchangeRates)
+                    .Select(result => result.Series)
                     .ToList(),
                 DefaultReasonMonthIndex = Math.Max(0, reasonMonths.FindIndex(month => month == lastMonthStart)),
                 InvestmentByReason = BuildInvestmentStatistics(

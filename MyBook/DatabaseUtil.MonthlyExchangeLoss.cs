@@ -16,7 +16,7 @@ partial class DatabaseUtil
     }
 
     internal static List<MonthlyRmbExpenseCalculation> CalculateMonthlyRmbExpenses(
-        IReadOnlyList<Record> records, IReadOnlyList<RateHistory> history, DateTime firstMonth, int months, DateTime now, bool allowUnavailableMonths = false)
+        IReadOnlyList<Record> records, IReadOnlyList<RateHistory> history, DateTime firstMonth, int months, DateTime now, bool allowUnavailableMonths = false, Dictionary<CurrencyType, decimal>? fallbackRates = null)
     {
         if (months <= 0 || months > 120) throw new ArgumentOutOfRangeException(nameof(months));
         firstMonth = new DateTime(firstMonth.Year, firstMonth.Month, 1);
@@ -25,6 +25,17 @@ partial class DatabaseUtil
         var ratesByCurrency = history.Where(r => r.source == RateSource.GoogleFinance && r.exchangeRateToRmb > 0)
             .GroupBy(r => r.currency).ToDictionary(g => g.Key,
                 g => g.OrderBy(r => r.rateDate).ToList());
+        var quoteCache = new Dictionary<(CurrencyType, DateTime), RateHistory?>();
+        RateHistory? FindQuote(CurrencyType currency, DateTime date)
+        {
+            if (!quoteCache.TryGetValue((currency, date), out var quote))
+            {
+                quote = ratesByCurrency.GetValueOrDefault(currency)?.LastOrDefault(r =>
+                    DateTime.SpecifyKind(r.rateDate, DateTimeKind.Local).ToUniversalTime().Date <= date);
+                quoteCache[(currency, date)] = quote;
+            }
+            return quote;
+        }
         var recordsByMonth = records.Where(r => !r.Fake && !r.isInternal && r.matchedRecordId == null && !r.isRefundMatched && r.date <= now)
             .ToLookup(r => new DateTime(r.date.Year, r.date.Month, 1));
         var result = new List<MonthlyRmbExpenseCalculation>();
@@ -34,19 +45,25 @@ partial class DatabaseUtil
             if (month > currentMonth) break;
             var cutoff = month == currentMonth ? utcToday : month.AddMonths(1).AddDays(-1);
             var monthlyRecords = recordsByMonth[month].ToList();
+            var datedRecords = monthlyRecords.Where(RequiresTransactionDateRate).ToList();
+            var ordinaryRecords = monthlyRecords.Where(r => !RequiresTransactionDateRate(r)).ToList();
             var rates = new Dictionary<CurrencyType, decimal> { [CurrencyType.RMB] = 1m };
             var selectedRates = new Dictionary<CurrencyType, MonthlyReferenceRate>();
-            var missing = new List<CurrencyType>();
-            foreach (var currency in monthlyRecords.Select(r => r.t).Distinct().Where(c => c != CurrencyType.RMB))
+            var missing = new List<string>();
+            foreach (var currency in ordinaryRecords.Select(r => r.t).Distinct().Where(c => c != CurrencyType.RMB))
             {
                 // Google quote dates are UTC dates, even though RateHistory stores local timestamps.
-                var quote = ratesByCurrency.GetValueOrDefault(currency)?.LastOrDefault(r =>
-                    DateTime.SpecifyKind(r.rateDate, DateTimeKind.Local).ToUniversalTime().Date <= cutoff);
+                var quote = FindQuote(currency, cutoff);
                 if (quote is null)
                 {
+                    if (fallbackRates is not null && fallbackRates.TryGetValue(currency, out var fallback))
+                    {
+                        rates[currency] = fallback;
+                        continue;
+                    }
                     if (!allowUnavailableMonths)
                         throw new InvalidOperationException($"Monthly expense: GoogleFinance rate missing for {currency} at {cutoff:yyyy-MM-dd}.");
-                    missing.Add(currency);
+                    missing.Add($"{currency} {cutoff:yyyy-MM-dd}");
                     continue;
                 }
                 rates[currency] = quote.exchangeRateToRmb!.Value;
@@ -54,27 +71,46 @@ partial class DatabaseUtil
                     DateTime.SpecifyKind(quote.rateDate, DateTimeKind.Local).ToUniversalTime().Date);
             }
 
+            var dailyRates = new Dictionary<Record, decimal>();
+            foreach (var record in datedRecords)
+            {
+                // Record.date is the transaction calendar date; quote timestamps encode UTC quote dates.
+                var quote = record.t == CurrencyType.RMB ? null : FindQuote(record.t, record.date.Date);
+                if (record.t == CurrencyType.RMB) dailyRates[record] = 1m;
+                else if (quote is not null) dailyRates[record] = quote.exchangeRateToRmb!.Value;
+                else
+                {
+                    var message = $"Record {record.Id}: GoogleFinance rate missing for {record.t} at {record.date:yyyy-MM-dd}.";
+                    if (!allowUnavailableMonths) throw new InvalidOperationException(message);
+                    missing.Add($"Record {record.Id} / {record.t} / {record.date:yyyy-MM-dd}");
+                }
+            }
             if (missing.Count > 0)
             {
                 result.Add(new(new ReasonFlowSeries
                 {
                     Currency = CurrencyType.RMB, Month = month, MonthLabel = month.ToString("yyyy年MM月"),
                     IsAvailable = false,
-                    RateDescription = $"无法计算：缺少 {cutoff:yyyy-MM-dd} 或更早的 Google 汇率（{String.Join("、", missing)}）。"
+                    RateDescription = $"缺少指定日期或此前的 Google 汇率：{String.Join("、", missing)}"
                 }, selectedRates, []));
                 continue;
             }
-            var convertedPurchases = monthlyRecords.Where(IsForeignFundedRmbPurchase).ToHashSet();
-            var series = BuildRmbReasonFlowSeries(monthlyRecords.Where(r => !convertedPurchases.Contains(r)).ToList(),
+            var series = BuildRmbReasonFlowSeries(ordinaryRecords,
                 month, month.AddMonths(1), rates);
             var details = new List<MonthlyExchangeLossDetail>();
-            foreach (var record in convertedPurchases)
+            foreach (var record in datedRecords)
             {
+                var reason = String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason;
+                var converted = Currency.RoundMoney(Math.Abs(record.v) * dailyRates[record]);
+                if (!IsForeignFundedRmbPurchase(record))
+                {
+                    AddItem(reason, record.v > 0, converted);
+                    continue;
+                }
                 var principal = Currency.RoundMoney(-record.DescCurrency!.v);
-                var converted = TryConvertToRmb(-record.v, record.t, rates)!.Value;
                 var loss = converted - principal;
                 details.Add(new(record.Id, record.t, -record.v, principal, converted, loss));
-                AddItem(String.IsNullOrWhiteSpace(record.Reason) ? "未分类" : record.Reason, false, principal);
+                AddItem(reason, false, principal);
             }
             // Net gains reduce the same expense item; a net gain remains a negative exchange loss.
             AddItem("汇损", false, details.Sum(detail => detail.LossRmb));
@@ -82,7 +118,7 @@ partial class DatabaseUtil
                 .ThenBy(item => item.Reason).ToList();
             series.TotalExpense = Currency.RoundMoney(series.Items.Where(item => !item.IsIncome).Sum(item => item.Total));
             series.TotalIncome = Currency.RoundMoney(series.Items.Where(item => item.IsIncome).Sum(item => item.Total));
-            series.RateDescription = selectedRates.Count == 0 ? "人民币金额，无需汇率折算。"
+            series.RateDescription = selectedRates.Count == 0 ? "无月末历史报价；跨币种交易按交易日 Google 基准折算。"
                 : "Google 基准（RMB / 单位外币，报价日期 UTC）：" + String.Join("；", selectedRates.OrderBy(p => p.Key)
                     .Select(p => $"{p.Key} {p.Value.RmbPerUnit:0.########}（{p.Value.SourceDateUtc:yyyy-MM-dd}）"));
             var debitTotal = details.Sum(d => d.DebitRmb);
@@ -100,6 +136,9 @@ partial class DatabaseUtil
         }
         return result;
     }
+
+    private static bool RequiresTransactionDateRate(Record record) =>
+        record.Reason == "换汇" || record.DescCurrency is { } original && original.t != record.t;
 
     private static bool IsForeignFundedRmbPurchase(Record record) => record.v < 0 && record.t != CurrencyType.RMB
         && record.DescCurrency is { t: CurrencyType.RMB, v: < 0 }
