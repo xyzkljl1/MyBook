@@ -21,7 +21,7 @@ namespace MyBook
         private const string BeginningHoldingRestatementSourcePrefix = "BeginningHoldingRestatement/";
         private const string InitialHoldingReason = "Initial holding";
         private const string InitialCashBalanceReason = "Initial cash balance";
-        private const string BeginningHoldingRestatementReason = "期初估值重述";
+        private const string BeginningHoldingRestatementReason = "持仓价格变动";
         private static readonly string[] TransferInstitutionTypes = ["WISE", "SCHWAB", "FIRSTTRADE", "IBKR", "KRAKEN", "NEXUS", "ZA", "CICC"];
         private const string BootstrapSqlRelativePath = "Database/bootstrap.sql";
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";

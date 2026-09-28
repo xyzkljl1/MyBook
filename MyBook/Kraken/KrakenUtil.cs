@@ -772,7 +772,7 @@ namespace MyBook
                 "credit" => "\u4fe1\u7528",
                 "settled" => "\u7ed3\u7b97",
                 "sale" => "\u51fa\u552e",
-                _ => String.IsNullOrWhiteSpace(subtype) ? type : $"{type}/{subtype}"
+                _ => throw new InvalidOperationException($"Unsupported Kraken ledger type: type={type}; subtype={subtype}.")
             };
         }
 

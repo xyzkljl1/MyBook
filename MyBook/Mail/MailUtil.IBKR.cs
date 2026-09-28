@@ -1836,7 +1836,7 @@ namespace MyBook
             {
                 var amount = ParseIBKRDecimalAt(bondRow, 5, "bond interest accrual change");
                 total += amount;
-                builder.Add(new Currency(amount, baseCurrency), "应计债券利息", $"NavAccrual/{FormatIBKRCsvRow(bondRow)}",
+                builder.Add(new Currency(amount, baseCurrency), "应计债息", $"NavAccrual/{FormatIBKRCsvRow(bondRow)}",
                     destAccount: "ACCRUED_INTEREST");
             }
             var fxTranslation = ReadIBKRInterestAccrualComponent(report, "外汇换算");

@@ -14,7 +14,7 @@ public static class IncomeExpenseUtil
         var isIncome = record.Reason switch
         {
             "持仓价格变动" or "利息" or "股息" or "债息"
-                or "应计利息" or "应计债券利息" or "应计股息"
+                or "应计利息" or "应计债息" or "应计债券利息" or "应计股息"
                 or "应计利息汇率变动" or "其它外汇换算"
                 or "DP" or "视频收益" or "返现" => true,
             "消费" or "吃喝" or "日用品" or "水电网" or "虚拟产品" or "游戏"
