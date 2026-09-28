@@ -635,6 +635,10 @@ namespace MyBook
                     if (!statementImportId.HasValue)
                         return false;
 
+                    // 工行自动购汇还款全额偿还上一期账单；其它银行确认此规则后再接入。
+                    if (provider is StatementImportProvider.ICBCBillMail or StatementImportProvider.ICBCSIMSMS)
+                        MatchFullStatementRepayments(StatementImportProvider.ICBCBillMail, StatementImportProvider.ICBCSIMSMS,
+                            statementImportId.Value, recordList, "自动购汇还款");
                     MatchBlockchainTransfersForStatements([statementImportId.Value]);
                     MatchKnownInternalTransfersForStatements([statementImportId.Value]);
                     MatchInternalTransfersAroundStatement(statementImportId.Value);
