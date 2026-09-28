@@ -17,22 +17,35 @@ partial class WebUtil
             throw new InvalidOperationException("Steam import: an absolute-balance wallet account is required.");
         var beginning = database.GetAccountBalance(account, CurrencyType.RMB);
         var previous = database.GetStatementRecords(StatementImportProvider.SteamWeb, account);
+        var bankPurchases = database.GetSteamBankPurchases(account.Id);
+        var walletSince = since.Date.AddDays(-15);
+        var purchaseSince = since.Date.AddDays(-60);
         await WithSteamSessionAsync(async (info, accessToken, token) =>
         {
             if (!info.HasWallet || info.Currency != ECurrencyCode.CNY || info.PendingBalance != 0)
                 throw new InvalidOperationException("Steam import: unsupported wallet currency or pending balance.");
             using var http = CreateSteamHistoryClient(info.SteamId, accessToken);
-            var entries = await ReadSteamHistoryAsync(http, since.Date.AddDays(-15), token).ConfigureAwait(false);
+            var purchases = new List<SteamExternalPurchase>();
+            var entries = await ReadSteamHistoryAsync(http, walletSince, token, purchases, purchaseSince).ConfigureAwait(false);
             var now = DateTime.Now;
             var records = BuildSteamWalletRecords(entries, account, previous, beginning.v, info.Balance, now);
-            if (records.Count > 0)
+            var supplements = BuildSteamPurchaseSupplements(purchases, bankPurchases);
+            var supplemented = 0;
+            if (records.Count > 0 || supplements.Count > 0)
                 database.SaveStatementRecordsOnce(StatementImportProvider.SteamWeb, now.Date, records,
                     accountBalances: [new(account, new Currency(info.Balance, CurrencyType.RMB))],
                     statementKey: $"Steam/{account.Id}/{now:yyyyMMddHHmmssfffffff}",
                     beginningAccountBalances: [new(account, beginning)], forceValidateBeginningBalances: true,
-                    afterSaveInTransaction: id => database.MarkRecordsAsRefundMatched(
-                        FindSteamRefundMatches(previous.Concat(database.GetRecordsByStatementImport(id))), withinImportTransaction: true));
+                    afterSaveInTransaction: id =>
+                    {
+                        if (records.Count > 0)
+                            database.MarkRecordsAsRefundMatched(
+                                FindSteamRefundMatches(previous.Concat(database.GetRecordsByStatementImport(id))), withinImportTransaction: true);
+                        supplemented = database.AppendSteamPurchaseSupplements(account.Id, purchases);
+                    });
             Console.WriteLine($"Steam: {records.Count} wallet record(s); balance {info.Balance:0.00} RMB validated.");
+            var pending = purchases.Select(p => p.Id).Distinct().Count(id => !bankPurchases.Any(b => HasSteamOrderCode(b.Record.Source, id)));
+            Console.WriteLine($"Steam: {supplemented} bank record source(s) supplemented; {pending - supplemented} external purchase(s) unmatched.");
             return true;
         }).ConfigureAwait(false);
     }
@@ -95,7 +108,8 @@ partial class WebUtil
         }
     }
 
-    private static async Task<List<SteamWalletEntry>> ReadSteamHistoryAsync(HttpClient http, DateTime since, CancellationToken token)
+    private static async Task<List<SteamWalletEntry>> ReadSteamHistoryAsync(HttpClient http, DateTime since, CancellationToken token,
+        List<SteamExternalPurchase>? purchases = null, DateTime? purchaseSince = null)
     {
         var html = await RequestSteamHistoryAsync(http, "/account/history/?l=english", null, token).ConfigureAwait(false);
         var document = new HtmlDocument(); document.LoadHtml(html);
@@ -112,7 +126,9 @@ partial class WebUtil
         {
             var (entries, oldest) = ParseSteamHistoryPage(html, since);
             result.AddRange(entries);
-            if (cursor == "null" || oldest.HasValue && oldest.Value < since) break;
+            if (purchases is not null) purchases.AddRange(ParseSteamExternalPurchases(html, purchaseSince ?? since));
+            var searchSince = purchaseSince < since ? purchaseSince.Value : since;
+            if (cursor == "null" || oldest.HasValue && oldest.Value < searchSince) break;
             if (!sessionMatch.Success || !seenCursors.Add(cursor) || page >= 100)
                 throw new InvalidOperationException("Steam history: incomplete pagination.");
             var form = new Dictionary<string, string> { ["sessionid"] = sessionMatch.Groups["id"].Value };
