@@ -258,7 +258,7 @@ namespace MyBook
     {
         public const string CurrencyType = "enum('RMB','USD','JPY','SGD','HKD','GBP','EUR')";
         public const string HoldingType = "enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto')";
-        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','PlaidSchwab','WiseApi','AntMail','EleMail','PayPalCN','BilibiliWeb','SteamWeb')";
+        public const string StatementImportProvider = "enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','PlaidSchwab','WiseApi','AntMail','EleMail','PayPalCN','BilibiliWeb','SteamWeb','DailyFetch')";
         public const string SnapshotSource = "enum('AutoDaily','Manual','Start')";
         public const string SnapshotItemType = "enum('AccountBalance','Holding')";
         public const string AccountUsage = "enum('Life','Investment','Transit','Undetermined')";
@@ -729,6 +729,7 @@ namespace MyBook
         PayPalCN,
         BilibiliWeb,
         SteamWeb,
+        DailyFetch,
     }
 
     [SugarIndex("unique_StatementImports_provider_time_key", nameof(StatementImport.provider), OrderByType.Asc, nameof(StatementImport.time), OrderByType.Asc, nameof(StatementImport.statementKey), OrderByType.Asc, true)]

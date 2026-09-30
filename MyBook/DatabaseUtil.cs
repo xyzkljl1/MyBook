@@ -688,15 +688,18 @@ namespace MyBook
             => SaveStatementQueryProgress([provider], time);
 
         public void SaveStatementQueryProgress(IEnumerable<StatementImportProvider> providers, DateTime time)
+            => SaveStatementProgress(providers, time, ImportSchedule.SuccessfulQueryKey);
+
+        public void SaveStatementProgress(IEnumerable<StatementImportProvider> providers, DateTime time, string statementKey)
         {
             ExecuteLockedTransaction(() =>
             {
                 foreach (var provider in providers)
                 {
                     var progress = db.Queryable<StatementImport>()
-                        .Single(import => import.provider == provider && import.statementKey == ImportSchedule.SuccessfulQueryKey);
+                        .Single(import => import.provider == provider && import.statementKey == statementKey);
                     if (progress is null)
-                        InsertStatementImport(provider, time, ImportSchedule.SuccessfulQueryKey);
+                        InsertStatementImport(provider, time, statementKey);
                     else
                     {
                         progress.time = NormalizeStatementImportTime(time);
@@ -3787,6 +3790,7 @@ namespace MyBook
                         .First());
 
             return Enum.GetValues<StatementImportProvider>()
+                .Where(provider => provider != StatementImportProvider.DailyFetch)
                 .Select(provider =>
                 {
                     latestImports.TryGetValue(provider, out var latestImport);

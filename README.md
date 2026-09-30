@@ -121,7 +121,7 @@ Import progress and scheduling use dates in the runtime machine's local time zon
 
 Historical rate timestamps use local time, separately from retrieval time. Kylc supplies dates only; its dates use Beijing midnight converted to local time as date markers, not actual publication times.
 
-Release builds wait until the next 00:05 local time to start daily imports, fetching exchange rates first; startup does not trigger an immediate cycle. Debug builds do not schedule imports. Each cycle runs configured, enabled integrations whose query intervals have elapsed. Intervals must be positive and become due on the specified day. Failed queries do not restart the interval. A zero missing-report deadline disables only overdue errors, not network, parsing or financial validation errors.
+Release builds check for daily imports immediately on startup and every 24 hours afterward, fetching exchange rates first. Automatic cycles are attempted at most once per local calendar day, including across restarts; a failed or interrupted cycle waits until a later day unless retried manually. Debug builds do not schedule imports. Each cycle runs configured, enabled integrations whose query intervals have elapsed. Intervals must be positive and become due on the specified day. Failed queries do not restart the interval. A zero missing-report deadline disables only overdue errors, not network, parsing or financial validation errors.
 
 SMS polling uses its own configured interval. Mail imports share IMAP sessions and download matching attachments.
 

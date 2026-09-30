@@ -60,9 +60,8 @@ namespace MyBook
             dailyTimer = new Timer(
                 _ => RunDailyFetchInBackground(),
                 null,
-                Timeout.InfiniteTimeSpan,
-                Timeout.InfiniteTimeSpan);
-            ScheduleNextDailyFetch();
+                TimeSpan.Zero,
+                TimeSpan.FromDays(1));
             StartSIMPolling();
             //pubWeb.Fetch(new Finance("QQQ", HoldingType.NASDAQ));
             //pubWeb.Fetch(new Finance("021282", HoldingType.CNFUND));
@@ -79,7 +78,7 @@ namespace MyBook
 
         private void RunDailyFetchInBackground()
         {
-            UpdateRuntimeStatus(status => status.NextFetchTime = null);
+            UpdateRuntimeStatus(status => status.NextFetchTime = GetNextDailyRunTime(DateTime.Now));
 
             _ = Task.Run(async () =>
             {
@@ -92,22 +91,7 @@ namespace MyBook
                     CreateImportFailureMarker("scheduled fetch", e);
                     Console.WriteLine($"scheduled fetch fail: {e.Message}");
                 }
-                finally
-                {
-                    ScheduleNextDailyFetch();
-                }
             });
-        }
-
-        private void ScheduleNextDailyFetch()
-        {
-            lock (runtimeStatusLock)
-            {
-                if (dailyTimer is null) return;
-                var nextRun = GetNextDailyRunTime(DateTime.Now);
-                dailyTimer.Change(GetDueTime(nextRun), Timeout.InfiniteTimeSpan);
-                runtimeStatus.NextFetchTime = nextRun;
-            }
         }
 
         private async Task RunDailyFetchAsync()
@@ -115,9 +99,17 @@ namespace MyBook
             if (!await fetchLock.WaitAsync(0).ConfigureAwait(false))
                 return;
 
-            SetCurrentTask("每日导入");
+            var started = false;
             try
             {
+                var today = DateTime.Today;
+                if (database.GetLatestStatementImportTime(StatementImportProvider.DailyFetch) >= today)
+                    return;
+
+                // Mark the attempt before importing so failures or restarts cannot repeat it today.
+                database.SaveStatementProgress([StatementImportProvider.DailyFetch], today, "scheduled-attempt");
+                started = true;
+                SetCurrentTask("每日导入");
                 await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates).ConfigureAwait(false);
                 foreach (var source in PubWebUtil.KylcSources)
                     await RunImportTaskAsync(source.ToString(), () => pubWeb.FetchKylcRates(source)).ConfigureAwait(false);
@@ -186,7 +178,8 @@ namespace MyBook
             }
             finally
             {
-                UpdateRuntimeStatus(status => status.LastFetchTime = DateTime.Now);
+                if (started)
+                    UpdateRuntimeStatus(status => status.LastFetchTime = DateTime.Now);
                 SetCurrentTask(null);
                 fetchLock.Release();
             }
@@ -371,18 +364,7 @@ namespace MyBook
         }
 
         private static DateTime GetNextDailyRunTime(DateTime now)
-        {
-            var nextRun = now.Date.AddMinutes(5);
-            if (now >= nextRun)
-                nextRun = nextRun.AddDays(1);
-            return nextRun;
-        }
-
-        private static TimeSpan GetDueTime(DateTime runTime)
-        {
-            var dueTime = runTime - DateTime.Now;
-            return dueTime > TimeSpan.Zero ? dueTime : TimeSpan.Zero;
-        }
+            => now.AddDays(1);
 
         public void Dispose()
         {
