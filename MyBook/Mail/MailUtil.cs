@@ -819,10 +819,11 @@ namespace MyBook
                         var folder = await EnsureOpenFolderAsync(connection, label, cancellationToken).ConfigureAwait(false);
                         return await action(folder).ConfigureAwait(false);
                     }
-                    catch (Exception exception) when (attempt == 0 && !cancellationToken.IsCancellationRequested && IsMailConnectionException(exception))
+                    catch (Exception exception) when (attempt < 3 && !cancellationToken.IsCancellationRequested && IsMailConnectionException(exception))
                     {
                         Console.WriteLine($"mail reconnect {mailbox.Label} {label}: {exception.GetType().Name}");
                         await ResetConnectionAsync(connection).ConfigureAwait(false);
+                        await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
