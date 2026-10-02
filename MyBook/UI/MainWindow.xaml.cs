@@ -730,7 +730,14 @@ namespace MyBook
                 : SelectedInvestmentAccount.ByReasonPeriods)
                 .Select(period => InvestmentStatisticsPeriodViewModel.From(period, ShowInvestmentInUsd));
 
-        public string InvestmentCurrencyText => ShowInvestmentInUsd ? "USD" : "RMB";
+        public int InvestmentCurrencyIndex
+        {
+            get => ShowInvestmentInUsd ? 1 : 0;
+            set
+            {
+                if (value is 0 or 1) ShowInvestmentInUsd = value == 1;
+            }
+        }
 
         public bool ShowInvestmentInUsd
         {
@@ -740,7 +747,7 @@ namespace MyBook
                 if (showInvestmentInUsd == value) return;
                 showInvestmentInUsd = value;
                 OnPropertyChanged(nameof(ShowInvestmentInUsd));
-                OnPropertyChanged(nameof(InvestmentCurrencyText));
+                OnPropertyChanged(nameof(InvestmentCurrencyIndex));
                 OnPropertyChanged(nameof(VisibleInvestmentPeriods));
             }
         }

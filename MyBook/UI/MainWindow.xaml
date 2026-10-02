@@ -590,11 +590,44 @@
                                          IsChecked="{Binding ShowInvestmentByHolding, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                          FontSize="13"
                                          Foreground="#334155"/>
-                            <ToggleButton Content="{Binding InvestmentCurrencyText}"
-                                          IsChecked="{Binding ShowInvestmentInUsd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                          ToolTip="切换人民币／美元"
-                                          MinWidth="64" Height="32" Padding="12,3"
-                                          Margin="18,0,0,0" FontSize="13" Foreground="#334155"/>
+                            <Border Margin="18,0,0,0" Padding="2" CornerRadius="6" Background="#E2E8F0">
+                                <ListBox SelectedIndex="{Binding InvestmentCurrencyIndex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         Width="128" BorderThickness="0" Padding="0" Background="Transparent"
+                                         FontSize="13" KeyboardNavigation.DirectionalNavigation="Cycle"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                         AutomationProperties.Name="投资统计币种">
+                                    <ListBox.ItemsPanel>
+                                        <ItemsPanelTemplate><UniformGrid Columns="2"/></ItemsPanelTemplate>
+                                    </ListBox.ItemsPanel>
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem">
+                                            <Setter Property="Foreground" Value="#334155"/>
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="ListBoxItem">
+                                                        <Border x:Name="Segment" Padding="12,5" CornerRadius="4"
+                                                                Background="Transparent" BorderBrush="Transparent" BorderThickness="1">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsSelected" Value="True">
+                                                                <Setter TargetName="Segment" Property="Background" Value="#0F766E"/>
+                                                                <Setter Property="Foreground" Value="White"/>
+                                                            </Trigger>
+                                                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                                                <Setter TargetName="Segment" Property="BorderBrush" Value="#94A3B8"/>
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
+                                    <ListBoxItem Content="RMB"/>
+                                    <ListBoxItem Content="USD"/>
+                                </ListBox>
+                            </Border>
                         </StackPanel>
                         <ComboBox Grid.Column="2"
                                   Style="{StaticResource FilterComboBox}"
