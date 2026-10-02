@@ -88,7 +88,12 @@ partial class DatabaseUtil
         return hasLaterQuote ? previous : null;
     }
 
-    private static DateTime GetExchangeLossQuoteDate(Record record) => record.date.Date;
+    private static DateTime GetExchangeLossQuoteDate(Record record)
+    {
+        // 肉眼比较 iFAST 与 Google 汇率走势后，认为 -1 天是比较有可能的偏移值，尚未严格验证。
+        const int benchmarkRateOffsetDays = -1;
+        return record.date.Date.AddDays(benchmarkRateOffsetDays);
+    }
 
     private static decimal? GetConversionRmbDebit(Record record, IReadOnlyDictionary<(CurrencyType, DateTime), RateHistory> rates)
     {
