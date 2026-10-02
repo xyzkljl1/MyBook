@@ -16,7 +16,9 @@ partial class MailUtil
         if (subject is "大象银行EleBank - 收款成功通知" or "大象银行交易通知") return true;
         if (subject is "大象银行EleBank - 开户通知" or "大象银行EleBank - 开通转数快转账功能电邮验证码验证"
             or "大象银行EleBank - 电邮验证成功" or "大象银行EleBank - 电邮验证码"
-            or "大象银行实体卡申领通知" or "大象银行开卡通知" or "大象银行绑卡通知") return false;
+            or "大象银行实体卡申领通知" or "大象银行开卡通知" or "大象银行绑卡通知"
+            or "大象银行实体卡发出通知" or "大象银行EleBank - 电子月结单通知"
+            or "大象银行实体卡激活成功通知") return false;
         throw new MailParseException("Unsupported ELE mail subject.");
     }
 
