@@ -13,6 +13,9 @@ namespace MyBook
     {
         private async Task<List<RateHistory>> ReadGoogleCurrencyRates(CurrencyType currency, DateTime sinceUtc, DateTime throughExclusiveUtc)
         {
+            if (sinceUtc >= throughExclusiveUtc)
+                return [];
+
             async Task<List<RateHistory>> Read(bool reverse)
             {
                 var pair = reverse ? $"CNY-{currency}" : $"{currency}-CNY";
