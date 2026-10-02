@@ -663,6 +663,7 @@ namespace MyBook
         DateTime allocatedExpenseStartDate = DateTime.Today.AddDays(-14);
         DateTime allocatedExpenseEndDate = DateTime.Today;
         bool showInvestmentByHolding;
+        bool showInvestmentInUsd;
         DetailAccountFilterViewModel? selectedDetailAccountFilter;
         string? loadedDetailAccountFilterKey;
         string? loadedDetailBalanceAccountName;
@@ -724,9 +725,25 @@ namespace MyBook
         }
         public IEnumerable<InvestmentStatisticsPeriodViewModel> VisibleInvestmentPeriods => SelectedInvestmentAccount is null
             ? Enumerable.Empty<InvestmentStatisticsPeriodViewModel>()
-            : ShowInvestmentByHolding
+            : (ShowInvestmentByHolding
                 ? SelectedInvestmentAccount.ByHoldingPeriods
-                : SelectedInvestmentAccount.ByReasonPeriods;
+                : SelectedInvestmentAccount.ByReasonPeriods)
+                .Select(period => InvestmentStatisticsPeriodViewModel.From(period, ShowInvestmentInUsd));
+
+        public string InvestmentCurrencyText => ShowInvestmentInUsd ? "USD" : "RMB";
+
+        public bool ShowInvestmentInUsd
+        {
+            get => showInvestmentInUsd;
+            set
+            {
+                if (showInvestmentInUsd == value) return;
+                showInvestmentInUsd = value;
+                OnPropertyChanged(nameof(ShowInvestmentInUsd));
+                OnPropertyChanged(nameof(InvestmentCurrencyText));
+                OnPropertyChanged(nameof(VisibleInvestmentPeriods));
+            }
+        }
         public DoubleCollection AssetSummaryTicks => new(AssetSummaries.Select(summary => summary.DayOffset));
         public double AssetSummaryMaximum => AssetSummaries.Count == 0 ? 0 : AssetSummaries[^1].DayOffset;
         public double ReasonMonthMaximum => Math.Max(0, ReasonMonthSeries.Count - 1);
@@ -1045,6 +1062,7 @@ namespace MyBook
 
         public void CopyDashboardSettingsFrom(DashboardViewModel source)
         {
+            ShowInvestmentInUsd = source.ShowInvestmentInUsd;
             showSingleCurrencyMonthly = source.ShowSingleCurrencyMonthly;
             selectedMonthlyAccount = MonthlyAccounts.FirstOrDefault(account =>
                 String.Equals(account.DisplayName, source.SelectedMonthlyAccount?.DisplayName, StringComparison.Ordinal)) ??
@@ -2216,34 +2234,36 @@ namespace MyBook
         public List<InvestmentStatisticsItemViewModel> Items { get; set; } = [];
         public string TotalText { get; set; } = "";
 
-        public static InvestmentStatisticsPeriodViewModel From(InvestmentStatisticsPeriod period)
+        public static InvestmentStatisticsPeriodViewModel From(InvestmentStatisticsPeriod period, bool showUsd = false)
         {
             return new InvestmentStatisticsPeriodViewModel
             {
                 Title = period.Title,
-                Items = period.Items.Select(InvestmentStatisticsItemViewModel.From).ToList(),
-                TotalText = $"¥{period.Total:N2}"
+                Items = period.Items.Where(item => (showUsd ? item.TotalUsd : item.Total) != 0)
+                    .OrderByDescending(item => Math.Abs((showUsd ? item.TotalUsd : item.Total) ?? 0))
+                    .ThenBy(item => item.Name)
+                    .Select(item => InvestmentStatisticsItemViewModel.From(item, showUsd)).ToList(),
+                TotalText = FormatTotal(showUsd ? period.TotalUsd : period.Total, showUsd)
             };
         }
+
+        internal static string FormatTotal(decimal? total, bool showUsd) => total.HasValue
+            ? $"{(showUsd ? "$" : "¥")}{total.Value:N2}" : "—";
     }
 
     public class InvestmentAccountStatisticsViewModel
     {
         public string DisplayName { get; set; } = "";
-        public List<InvestmentStatisticsPeriodViewModel> ByReasonPeriods { get; set; } = [];
-        public List<InvestmentStatisticsPeriodViewModel> ByHoldingPeriods { get; set; } = [];
+        public List<InvestmentStatisticsPeriod> ByReasonPeriods { get; set; } = [];
+        public List<InvestmentStatisticsPeriod> ByHoldingPeriods { get; set; } = [];
 
         public static InvestmentAccountStatisticsViewModel From(InvestmentAccountStatistics account)
         {
             return new InvestmentAccountStatisticsViewModel
             {
                 DisplayName = account.DisplayName,
-                ByReasonPeriods = account.ByReason.Periods
-                    .Select(InvestmentStatisticsPeriodViewModel.From)
-                    .ToList(),
+                ByReasonPeriods = account.ByReason.Periods,
                 ByHoldingPeriods = account.ByHolding.Periods
-                    .Select(InvestmentStatisticsPeriodViewModel.From)
-                    .ToList()
             };
         }
     }
@@ -2253,12 +2273,12 @@ namespace MyBook
         public string Name { get; set; } = "";
         public string TotalText { get; set; } = "";
 
-        public static InvestmentStatisticsItemViewModel From(InvestmentStatisticsItem item)
+        public static InvestmentStatisticsItemViewModel From(InvestmentStatisticsItem item, bool showUsd = false)
         {
             return new InvestmentStatisticsItemViewModel
             {
                 Name = item.Name,
-                TotalText = $"¥{item.Total:N2}"
+                TotalText = InvestmentStatisticsPeriodViewModel.FormatTotal(showUsd ? item.TotalUsd : item.Total, showUsd)
             };
         }
     }

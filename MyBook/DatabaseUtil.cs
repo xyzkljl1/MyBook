@@ -4942,18 +4942,28 @@ namespace MyBook
             Dictionary<CurrencyType, decimal> exchangeRates,
             Func<Record, string> keySelector)
         {
+            var usdRates = exchangeRates.TryGetValue(CurrencyType.USD, out var usdToRmb) && usdToRmb > 0
+                ? exchangeRates.ToDictionary(pair => pair.Key, pair => pair.Value / usdToRmb)
+                : new Dictionary<CurrencyType, decimal>();
+            usdRates[CurrencyType.USD] = 1m;
             var items = records
                 .Where(record => record.date >= start && record.date < end && record.v != 0)
                 .GroupBy(keySelector)
-                .Select(group => new InvestmentStatisticsItem
+                .Select(group =>
                 {
-                    Name = group.Key,
-                    Total = Currency.RoundMoney(group
-                        .Select(record => TryConvertToRmb(record.v, record.t, exchangeRates))
-                        .Where(value => value.HasValue)
-                        .Sum(value => value!.Value))
+                    var usdAmounts = group.Select(record => usdRates.TryGetValue(record.t, out var rate)
+                        ? (decimal?)Currency.RoundMoney(record.v * rate) : null).ToList();
+                    return new InvestmentStatisticsItem
+                    {
+                        Name = group.Key,
+                        Total = Currency.RoundMoney(group
+                            .Select(record => TryConvertToRmb(record.v, record.t, exchangeRates))
+                            .Where(value => value.HasValue)
+                            .Sum(value => value!.Value)),
+                        TotalUsd = usdAmounts.All(value => value.HasValue) ? usdAmounts.Sum(value => value!.Value) : null
+                    };
                 })
-                .Where(item => item.Total != 0)
+                .Where(item => item.Total != 0 || item.TotalUsd != 0)
                 .OrderByDescending(item => Math.Abs(item.Total))
                 .ThenBy(item => item.Name)
                 .ToList();
@@ -4961,7 +4971,8 @@ namespace MyBook
             {
                 Title = title,
                 Items = items,
-                Total = Currency.RoundMoney(items.Sum(item => item.Total))
+                Total = Currency.RoundMoney(items.Sum(item => item.Total)),
+                TotalUsd = items.All(item => item.TotalUsd.HasValue) ? items.Sum(item => item.TotalUsd!.Value) : null
             };
         }
 

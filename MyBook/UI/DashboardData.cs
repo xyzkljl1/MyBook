@@ -166,12 +166,14 @@ namespace MyBook
         public string Title { get; set; } = "";
         public List<InvestmentStatisticsItem> Items { get; set; } = [];
         public decimal Total { get; set; }
+        public decimal? TotalUsd { get; set; }
     }
 
     public class InvestmentStatisticsItem
     {
         public string Name { get; set; } = "";
         public decimal Total { get; set; }
+        public decimal? TotalUsd { get; set; }
     }
 
     public class RecordDetailData

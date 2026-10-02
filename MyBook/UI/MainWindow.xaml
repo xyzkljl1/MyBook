@@ -590,6 +590,11 @@
                                          IsChecked="{Binding ShowInvestmentByHolding, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                          FontSize="13"
                                          Foreground="#334155"/>
+                            <ToggleButton Content="{Binding InvestmentCurrencyText}"
+                                          IsChecked="{Binding ShowInvestmentInUsd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          ToolTip="切换人民币／美元"
+                                          MinWidth="64" Height="32" Padding="12,3"
+                                          Margin="18,0,0,0" FontSize="13" Foreground="#334155"/>
                         </StackPanel>
                         <ComboBox Grid.Column="2"
                                   Style="{StaticResource FilterComboBox}"
