@@ -381,6 +381,21 @@ namespace MyBook
         public int? _account_Id { get; set; } = null;
     }
 
+    // 人工维护的商户分类规则，作为固定数据保留；仅由明确接入的模块使用。
+    [SugarTable("MerchantReasonRules")]
+    public class MerchantReasonRule
+    {
+        [SugarColumn(IsPrimaryKey = true, DefaultValue = "''", ColumnDataType = "varchar(255)")]
+        public string merchantText { get; set; } = "";
+
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(255)")]
+        public string reason { get; set; } = "";
+
+        // 仅作人工备注，不参与匹配。
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(255)")]
+        public string desc { get; set; } = "";
+    }
+
     // 账户。一个账户可以同时拥有多个币种余额，具体余额由 AccountBalances 视图按 Holdings 汇总。
     // 主副卡关系按账户存储；副卡账户指向对应主卡账户。
     [SugarIndex("unique_Accounts_name", nameof(Account.name), OrderByType.Asc, true)]

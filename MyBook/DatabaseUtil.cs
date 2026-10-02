@@ -27,7 +27,7 @@ namespace MyBook
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(AccountBalance), typeof(LoginSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(MerchantReasonRule), typeof(AccountBalance), typeof(LoginSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -195,6 +195,27 @@ namespace MyBook
                 throw new ArgumentException("Debug SQL is empty.", nameof(sql));
 
             return ExecuteLockedTransaction(() => db.Ado.ExecuteCommand(sql));
+        }
+
+        public List<MerchantReasonRule> GetMerchantReasonRules()
+        {
+            var rules = db.Queryable<MerchantReasonRule>().OrderBy(rule => rule.merchantText).ToList();
+            foreach (var rule in rules)
+            {
+                if (String.IsNullOrWhiteSpace(rule.merchantText) || String.IsNullOrWhiteSpace(rule.reason))
+                    throw new InvalidOperationException($"Empty merchant reason rule: {rule.merchantText}");
+            }
+            return rules;
+        }
+
+        // 只传入对方商户描述；多条规则可以命中同一分类，但不能任意选择冲突分类。
+        public static string? MatchMerchantReason(string merchant, IReadOnlyList<MerchantReasonRule> rules)
+        {
+            var matches = rules.Where(rule => merchant.Contains(rule.merchantText.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
+            var reasons = matches.Select(rule => rule.reason.Trim()).Distinct(StringComparer.Ordinal).ToList();
+            if (reasons.Count > 1)
+                throw new InvalidOperationException($"Conflicting merchant reason rules: {String.Join(",", matches.Select(rule => rule.merchantText))}");
+            return reasons.SingleOrDefault();
         }
 
         public LoginSessionLease OpenLoginSession(LoginProvider provider, string? username = null) =>
@@ -5381,6 +5402,7 @@ namespace MyBook
             {
                 ["Accounts"] = db.Queryable<Account>().Count(),
                 ["AccountInternalIds"] = db.Queryable<AccountInternalId>().Count(),
+                ["MerchantReasonRules"] = db.Queryable<MerchantReasonRule>().Count(),
                 ["AccountBalances"] = db.Queryable<AccountBalance>().Count(),
                 ["StatementImports"] = db.Queryable<StatementImport>().Count(),
                 ["Records"] = db.Queryable<Record>().Count(),
@@ -5946,6 +5968,8 @@ namespace MyBook
                 return "Accounts";
             if (type == typeof(AccountInternalId))
                 return "AccountInternalIds";
+            if (type == typeof(MerchantReasonRule))
+                return "MerchantReasonRules";
             if (type == typeof(AccountBalance))
                 return "AccountBalances";
             if (type == typeof(LoginSession))

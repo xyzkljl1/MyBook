@@ -33,7 +33,7 @@ namespace MyBook
                 ImportICBCBill, missingAfterDays);
         }
 
-        // 工行对账单，按卡号区分用途。
+        // 工行信用卡账单：消费优先按商户分类，未匹配时按交易卡区分用途。
         private bool ImportICBCBill(MimeMessage message, DateTime? firstMailDeadline)
         {
             var billText = message.HtmlBody ?? message.TextBody ?? "";
@@ -54,8 +54,9 @@ namespace MyBook
             // 只从汇总表登记卡号；交易明细里的卡号只用于该交易本身，不能作为卡号来源。
             var internalCardNos = ParseICBCInternalCardNos(tables[1]);
 
-            records.AddRange(ParseICBCTransactionRecords(tables[2])); // 人民币交易明细。
-            records.AddRange(ParseICBCTransactionRecords(tables[3])); // 外币交易明细。
+            var merchantRules = database.GetMerchantReasonRules();
+            records.AddRange(ParseICBCTransactionRecords(tables[2], merchantRules)); // 人民币交易明细。
+            records.AddRange(ParseICBCTransactionRecords(tables[3], merchantRules)); // 外币交易明细。
             return database.SaveStatementRecordsOnce(
                 ICBCProvider,
                 GetMailDate(message),
@@ -157,7 +158,7 @@ namespace MyBook
             return result;
         }
 
-        private Records ParseICBCTransactionRecords(FormUtil.FormTable table)
+        private Records ParseICBCTransactionRecords(FormUtil.FormTable table, IReadOnlyList<MerchantReasonRule> merchantRules)
         {
             if (table.Headers.Count != 7
                 || table.Headers[0] != "卡号后四位"
@@ -196,7 +197,7 @@ namespace MyBook
                 {
                     if (record.v >= 0)
                         throw new MailParseException($"Parse ICBC Bill Fail, Invalid Expense: {transactionType}");
-                    record.Reason = GetICBCExpenseReason(transactionType, cardAccount);
+                    record.Reason = GetICBCExpenseReason(transactionType, cardAccount, line[4], merchantRules);
                     records.Add(record);
                 }
                 else if (IsICBCRefundTransactionType(transactionType))
@@ -241,13 +242,16 @@ namespace MyBook
                 or "透支利息";
         }
 
-        private static string GetICBCExpenseReason(string transactionType, Account cardAccount)
+        private static string GetICBCExpenseReason(string transactionType, Account cardAccount,
+            string merchant, IReadOnlyList<MerchantReasonRule> merchantRules)
         {
             return transactionType switch
             {
                 "跨境手续费" => "手续费",
                 "透支利息" => "利息",
-                _ => cardAccount.desc // 工行按交易明细中的卡区分用途，副卡记录仍入主卡账。
+                "境外取现" => cardAccount.desc,
+                // 使用原始对方商户文本；副卡记录仍入主卡账，但分类回退使用副卡描述。
+                _ => DatabaseUtil.MatchMerchantReason(merchant, merchantRules) ?? cardAccount.desc
             };
         }
 

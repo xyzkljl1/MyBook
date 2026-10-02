@@ -30,6 +30,13 @@ CREATE TABLE `accountinternalids` (
   CONSTRAINT `fk_AccountInternalIds_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `merchantreasonrules` (
+  `merchantText` varchar(255) NOT NULL DEFAULT '',
+  `reason` varchar(255) NOT NULL DEFAULT '',
+  `desc` varchar(255) NOT NULL DEFAULT '',
+  PRIMARY KEY (`merchantText`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE `loginsessions` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `provider` enum('FirstTrade','Steam') NOT NULL,
