@@ -5743,11 +5743,11 @@ namespace MyBook
                         $"Database schema mismatch: {tableName} must be {expectedObjectType}, actual {objectType}");
                 }
 
-                var dbColumns = GetDatabaseColumnNames(tableName);
+                var dbColumns = GetDatabaseColumnTypes(tableName);
                 var codeColumns = GetColumnNames(type);
 
-                var missingColumns = codeColumns.Except(dbColumns, StringComparer.OrdinalIgnoreCase).ToList();
-                var extraColumns = dbColumns.Except(codeColumns, StringComparer.OrdinalIgnoreCase).ToList();
+                var missingColumns = codeColumns.Except(dbColumns.Keys, StringComparer.OrdinalIgnoreCase).ToList();
+                var extraColumns = dbColumns.Keys.Except(codeColumns, StringComparer.OrdinalIgnoreCase).ToList();
                 if (missingColumns.Count > 0 || extraColumns.Count > 0)
                 {
                     var missingText = missingColumns.Count > 0 ? String.Join(",", missingColumns) : "none";
@@ -5755,6 +5755,22 @@ namespace MyBook
                     throw new InvalidOperationException(
                         $"Database schema mismatch: table {tableName}, missing columns [{missingText}], extra columns [{extraText}]");
                 }
+                ValidateEnumColumnTypes(type, tableName, dbColumns);
+            }
+        }
+
+        private static void ValidateEnumColumnTypes(Type type, string tableName, IReadOnlyDictionary<string, string> dbColumns)
+        {
+            foreach (var property in GetColumnProperties(type))
+            {
+                var column = property.GetCustomAttribute<SugarColumn>();
+                if (column?.ColumnDataType?.StartsWith("enum(", StringComparison.OrdinalIgnoreCase) != true) continue;
+                var name = String.IsNullOrWhiteSpace(column.ColumnName) ? property.Name : column.ColumnName;
+                var actual = dbColumns[name];
+                // ENUM labels and their order are part of the schema; never update them automatically.
+                if (!String.Equals(column.ColumnDataType, actual, StringComparison.Ordinal))
+                    throw new InvalidOperationException(
+                        $"Database schema mismatch: enum {tableName}.{name}, expected {column.ColumnDataType}, actual {actual}.");
             }
         }
 
@@ -5770,21 +5786,21 @@ namespace MyBook
             return result.Rows.Count == 0 ? null : result.Rows[0]["TABLE_TYPE"]?.ToString();
         }
 
-        private HashSet<string> GetDatabaseColumnNames(string tableName)
+        private Dictionary<string, string> GetDatabaseColumnTypes(string tableName)
         {
             var result = db.Ado.GetDataTable("""
-                select `COLUMN_NAME`
+                select `COLUMN_NAME`, `COLUMN_TYPE`
                 from `information_schema`.`COLUMNS`
                 where `TABLE_SCHEMA` = database()
                     and `TABLE_NAME` = @tableName
                 """,
                 new SugarParameter("@tableName", tableName));
-            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var columns = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (System.Data.DataRow row in result.Rows)
             {
                 var name = row["COLUMN_NAME"]?.ToString();
                 if (!String.IsNullOrWhiteSpace(name))
-                    columns.Add(name);
+                    columns.Add(name, row["COLUMN_TYPE"].ToString()!);
             }
 
             return columns;
@@ -5942,12 +5958,15 @@ namespace MyBook
             return type.Name;
         }
 
-        private static HashSet<string> GetColumnNames(Type type)
-        {
-            return type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+        private static IEnumerable<PropertyInfo> GetColumnProperties(Type type) =>
+            type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
                 .Where(property => property.GetIndexParameters().Length == 0)
                 .Where(property => property.GetCustomAttribute<SugarColumn>()?.IsIgnore != true)
-                .Where(property => !HasNavigateAttribute(property))
+                .Where(property => !HasNavigateAttribute(property));
+
+        private static HashSet<string> GetColumnNames(Type type)
+        {
+            return GetColumnProperties(type)
                 .Select(property =>
                 {
                     var column = property.GetCustomAttribute<SugarColumn>();
