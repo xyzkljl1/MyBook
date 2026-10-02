@@ -332,8 +332,19 @@ namespace MyBook
                 DestAccount = BuildICBCHistoryDetailDestAccount(row),
                 Reason = row.Summary switch
                 {
-                    "网转" or "单笔付款" or "柜面提取" => "转账",
-                    "消费" => "消费",
+                    var summary when IsICBCHistoryTransferPrincipal(summary) => "转账",
+                    "消费" or "无卡支付" or "缴费" or "证明开立" => "消费",
+                    // 账单自身缺少“消”字，摘要“费”按消费处理。
+                    "费" => "消费",
+                    "自动还款" or "还款" or "购汇还款" => "还款",
+                    "退款" or "电信退款+账本退费" => "退款",
+                    "信使费" => "短信费用",
+                    "利息" => "利息",
+                    "跨境汇费" or "跨境费" or "挂失费" or "开换卡费" => "手续费",
+                    "银联入账" or "金融付款" => "转账",
+                    "个人购汇" => "换汇",
+                    "基金购买" or "银证" => "理财交易",
+                    "理财" or "汇款冲正" or "工资" or "报销" => row.Summary,
                     _ => throw new MailParseException($"Unsupported ICBC history detail summary: {row.Summary}; postingDate={row.PostingDate:yyyy-MM-dd HH:mm:ss}")
                 }
             };
@@ -2040,7 +2051,9 @@ namespace MyBook
         }
 
         internal static bool IsICBCHistoryTransferPrincipal(string summary) =>
-            summary is "网转" or "转账" or "转帐" or "单笔付款" or "柜面提取";
+            summary is "网转" or "转账" or "转帐" or "转入" or "单笔付款" or "柜面提取" or "ATM取款"
+                or "他行汇入" or "跨行汇款" or "跨境汇款" or "余额宝提现" or "银证转账"
+            || summary.EndsWith("支付宝余额提现", StringComparison.Ordinal);
 
         private static string[] GetICBCHistoryCreditSummaries()
         {
