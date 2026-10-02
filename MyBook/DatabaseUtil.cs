@@ -3743,7 +3743,7 @@ namespace MyBook
                     exchangeRates),
                 RmbReasonFlowSeriesByMonth = CalculateMonthlyRmbExpenses(lifeRecords.Concat(accountNetFlowRecords.Where(record =>
                         lifeAccountIds.Contains(record._account_Id) && (record.isInternal || record.matchedRecordId != null)
-                        && record.exchangeLossCache.HasValue && IsRmbConversion(record))).ToList(), GetRateHistory(RateSource.GoogleFinance),
+                        && record.exchangeLossCache.HasValue && IsCurrencyConversion(record))).ToList(), GetRateHistory(RateSource.GoogleFinance),
                     reasonFirstMonth, reasonMonths.Count, DateTime.Now, allowUnavailableMonths: true, fallbackRates: exchangeRates)
                     .Select(result => result.Series)
                     .ToList(),
