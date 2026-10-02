@@ -84,19 +84,18 @@ namespace MyBook
             Func<CurrencyType, DateTime, Task<List<RateHistory>>> fetch)
         {
             var db = database ?? throw new InvalidOperationException("Scheduled rates require a database.");
-            var progress = db.GetLatestRateTimes(source);
-            var pending = new List<RateHistory>();
+            var progress = db.GetLatestCompleteExchangeRateTimes(source);
             foreach (var currency in currencies)
             {
                 DateTime? latest = progress.TryGetValue(currency, out var last) ? last : null;
                 await ImportSchedule.RunAsync($"{source}/{currency}", 1, 5, () => latest, async since =>
                 {
                     var batch = await fetch(currency, since).ConfigureAwait(false);
-                    pending.AddRange(batch);
-                    if (batch.Count > 0) latest = batch.Max(r => r.rateDate);
+                    db.SaveRateHistory(batch);
+                    latest = batch.Where(r => r.exchangeRateToRmb is > 0 && r.exchangeRateFromRmb is > 0)
+                        .Max(r => (DateTime?)r.rateDate) ?? latest;
                 }).ConfigureAwait(false);
             }
-            db.SaveRateHistory(pending);
         }
 
         private static List<RateHistory> PairExchangeRates(List<RateHistory> forward, List<RateHistory> reverse)
@@ -108,15 +107,16 @@ namespace MyBook
             var result = new List<RateHistory>();
             foreach (var rate in forward)
             {
-                // A one-sided date is not an observation of a complete exchange-rate pair.
-                if (!reverseByDate.TryGetValue(QuoteDate(rate), out var other)) continue;
-                if (rate.rateDate != other.rateDate || rate.currency != other.currency || rate.source != other.source)
-                    throw new InvalidOperationException($"Exchange rate pair timestamp mismatch: {rate.source}/{rate.currency} {rate.rateDate:O} / {other.rateDate:O}.");
-                rate.exchangeRateFromRmb = other.exchangeRateFromRmb;
-                rate.fetchedAt = rate.fetchedAt > other.fetchedAt ? rate.fetchedAt : other.fetchedAt;
+                if (reverseByDate.Remove(QuoteDate(rate), out var other))
+                {
+                    if (rate.rateDate != other.rateDate || rate.currency != other.currency || rate.source != other.source)
+                        throw new InvalidOperationException($"Exchange rate pair timestamp mismatch: {rate.source}/{rate.currency} {rate.rateDate:O} / {other.rateDate:O}.");
+                    rate.exchangeRateFromRmb = other.exchangeRateFromRmb;
+                    rate.fetchedAt = rate.fetchedAt > other.fetchedAt ? rate.fetchedAt : other.fetchedAt;
+                }
                 result.Add(rate);
             }
-            return result;
+            return result.Concat(reverseByDate.Values).OrderBy(r => r.rateDate).ToList();
         }
 
         public async Task FetchExchangeRates(IEnumerable<CurrencyType> currencyTypes)

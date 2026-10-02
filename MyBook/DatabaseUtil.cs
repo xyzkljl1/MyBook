@@ -5390,9 +5390,10 @@ namespace MyBook
             .GroupBy(r => new { r.source, r.currency })
             .Select(r => SqlFunc.AggregateMin(r.Id)).ToList();
 
-        internal Dictionary<CurrencyType, DateTime> GetLatestRateTimes(RateSource source)
+        internal Dictionary<CurrencyType, DateTime> GetLatestCompleteExchangeRateTimes(RateSource source)
         {
-            return db.Queryable<RateHistory>().Where(r => r.source == source)
+            return db.Queryable<RateHistory>().Where(r => r.source == source
+                    && r.exchangeRateToRmb > 0 && r.exchangeRateFromRmb > 0)
                 .GroupBy(r => r.currency)
                 .Select(r => new { Currency = r.currency, Time = SqlFunc.AggregateMax(r.rateDate) })
                 .ToList().ToDictionary(r => r.Currency, r => r.Time);
@@ -5408,30 +5409,42 @@ namespace MyBook
             {
                 foreach (var rate in rates)
                 {
-                    if (rate.exchangeRateToRmb.HasValue || rate.exchangeRateFromRmb.HasValue)
+                    foreach (var value in new[] { rate.exchangeRateToRmb, rate.exchangeRateFromRmb }.OfType<decimal>())
                     {
-                        if (rate.exchangeRateToRmb is not > 0 || rate.exchangeRateFromRmb is not > 0)
-                            throw new InvalidOperationException($"Incomplete exchange rate pair: {rate.source}/{rate.currency} {rate.rateDate:O}.");
-                        MySqlDecimalColumnTypes.ValidateCurrencyValue(rate.exchangeRateToRmb.Value, nameof(rate.exchangeRateToRmb));
-                        MySqlDecimalColumnTypes.ValidateCurrencyValue(rate.exchangeRateFromRmb.Value, nameof(rate.exchangeRateFromRmb));
+                        if (value <= 0)
+                            throw new InvalidOperationException($"Invalid exchange rate: {rate.source}/{rate.currency} {rate.rateDate:O}.");
+                        MySqlDecimalColumnTypes.ValidateCurrencyValue(value, nameof(RateHistory));
                     }
                     var existing = db.Queryable<RateHistory>().Where(r => r.source == rate.source
                         && r.currency == rate.currency && r.rateDate == rate.rateDate).First();
                     if (existing is null)
                         db.Insertable(rate).ExecuteCommand();
-                    else
-                    {
-                        if (existing.exchangeRateToRmb != rate.exchangeRateToRmb || existing.exchangeRateFromRmb != rate.exchangeRateFromRmb || existing.aer != rate.aer
-                            || existing.grossRate != rate.grossRate
-                                && (!completeMissingGross || existing.grossRate.HasValue && rate.grossRate.HasValue))
-                            throw new InvalidOperationException($"Conflicting rate history: {rate.source}, {rate.currency}, {rate.rateDate:O}.");
-                        // A later notice may supply Gross; never erase or replace an already known rate.
-                        if (completeMissingGross && existing.grossRate is null && rate.grossRate.HasValue)
-                            db.Updateable<RateHistory>().SetColumns(item => item.grossRate == rate.grossRate)
-                                .Where(item => item.Id == existing.Id).ExecuteCommand();
-                    }
+                    else if (MergeRateHistoryValues(existing, rate, completeMissingGross))
+                        db.Updateable(existing).UpdateColumns(item => new
+                            { item.exchangeRateToRmb, item.exchangeRateFromRmb, item.grossRate, item.fetchedAt }).ExecuteCommand();
                 }
             });
+        }
+
+        internal static bool MergeRateHistoryValues(RateHistory existing, RateHistory rate, bool completeMissingGross = false)
+        {
+            if (existing.exchangeRateToRmb.HasValue && rate.exchangeRateToRmb.HasValue && existing.exchangeRateToRmb != rate.exchangeRateToRmb
+                || existing.exchangeRateFromRmb.HasValue && rate.exchangeRateFromRmb.HasValue && existing.exchangeRateFromRmb != rate.exchangeRateFromRmb
+                || existing.aer != rate.aer || existing.grossRate != rate.grossRate
+                    && (!completeMissingGross || existing.grossRate.HasValue && rate.grossRate.HasValue))
+                throw new InvalidOperationException($"Conflicting rate history: {rate.source}, {rate.currency}, {rate.rateDate:O}.");
+            var completeExchangeRate = existing.exchangeRateToRmb is null && rate.exchangeRateToRmb.HasValue
+                || existing.exchangeRateFromRmb is null && rate.exchangeRateFromRmb.HasValue;
+            var completeGross = completeMissingGross && existing.grossRate is null && rate.grossRate.HasValue;
+            // Return the stored pair to the caller so progress includes sides completed by this import.
+            rate.exchangeRateToRmb ??= existing.exchangeRateToRmb;
+            rate.exchangeRateFromRmb ??= existing.exchangeRateFromRmb;
+            existing.exchangeRateToRmb = rate.exchangeRateToRmb;
+            existing.exchangeRateFromRmb = rate.exchangeRateFromRmb;
+            if (completeExchangeRate && rate.fetchedAt > existing.fetchedAt) existing.fetchedAt = rate.fetchedAt;
+            // Preserve the existing iFast rule: only fill missing Gross, never erase it.
+            if (completeGross) existing.grossRate = rate.grossRate;
+            return completeExchangeRate || completeGross;
         }
 
         private void SaveFinanceCore(Finance finance)

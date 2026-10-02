@@ -23,37 +23,40 @@ partial class DatabaseUtil
     internal static Dictionary<int, decimal> BuildExchangeLossCache(IEnumerable<Record> records, IEnumerable<RateHistory> history)
     {
         var rates = GetExchangeLossRates(history);
+        // The first inserted Google quote for each currency is its fixed import starting point.
+        var startDates = history.Where(r => r.source == RateSource.GoogleFinance).GroupBy(r => r.currency)
+            .ToDictionary(g => g.Key, g => DateTime.SpecifyKind(g.MinBy(r => r.Id)!.rateDate, DateTimeKind.Local).ToUniversalTime().Date);
         var result = new Dictionary<int, decimal>();
         // Stop at the first missing quote so the last cached ID cannot advance past it.
         foreach (var record in records.Where(r => r.exchangeLossCache is null && !r.Fake && !r.isRefundMatched).OrderBy(r => r.Id))
         {
             var purchase = !record.isInternal && record.matchedRecordId is null && IsForeignFundedRmbPurchase(record);
             if (!purchase && !IsCurrencyConversion(record)) continue;
-            // Exact transaction-day quote only; no previous-date fallback and no recalculation.
             var quoteDate = GetExchangeLossQuoteDate(record);
             var currency = record.t == CurrencyType.RMB ? record.DescCurrency!.t : record.t;
-            if (!rates.TryGetValue((currency, quoteDate), out var rate)) break;
+            if (startDates.TryGetValue(currency, out var start) && quoteDate < start
+                || record.t != CurrencyType.RMB && record.DescCurrency!.t != CurrencyType.RMB
+                    && startDates.TryGetValue(record.DescCurrency.t, out var targetStart) && quoteDate < targetStart)
+                continue;
+            if (GetExchangeLossRate(rates, currency, quoteDate,
+                fromRmb: record.t == CurrencyType.RMB || record.DescCurrency!.t != CurrencyType.RMB) is not { } rate) break;
             if (purchase)
             {
-                if (rate.exchangeRateToRmb is not > 0) break;
-                result.Add(record.Id, -record.v * rate.exchangeRateToRmb.Value + record.DescCurrency!.v);
+                result.Add(record.Id, -record.v * rate + record.DescCurrency!.v);
             }
             // Conversion/repayment principal may be internal and matched; only this record's amounts are used.
             else
             {
-                if (record.t == CurrencyType.RMB && rate.exchangeRateFromRmb is > 0)
-                    result.Add(record.Id, -record.v - Math.Abs(record.DescCurrency!.v) / rate.exchangeRateFromRmb.Value);
-                else if (record.DescCurrency!.t == CurrencyType.RMB && rate.exchangeRateToRmb is > 0)
-                    result.Add(record.Id, -record.v * rate.exchangeRateToRmb.Value - Math.Abs(record.DescCurrency!.v));
-                else if (record.t != CurrencyType.RMB && record.DescCurrency.t != CurrencyType.RMB
-                    && GetConversionRmbDebit(record, rates) is { } rmbDebit
-                    && rates.TryGetValue((record.DescCurrency.t, quoteDate), out var targetRate)
-                    && targetRate.exchangeRateToRmb is > 0)
+                if (record.t == CurrencyType.RMB)
+                    result.Add(record.Id, -record.v - Math.Abs(record.DescCurrency!.v) / rate);
+                else if (record.DescCurrency!.t == CurrencyType.RMB)
+                    result.Add(record.Id, -record.v * rate - Math.Abs(record.DescCurrency!.v));
+                else if (GetExchangeLossRate(rates, record.DescCurrency.t, quoteDate, fromRmb: false) is { } targetRate)
                 {
                     // rmb->外币->外币->rmb，其中rmb和外币之间使用实际基准汇率，以换一圈无损为标准计算中间的基准汇率。
                     // 中间基准汇率 = 1 / (转出币种 exchangeRateFromRmb * 转入币种 exchangeRateToRmb)。
                     // 直接比较两侧人民币价值，避免先计算中间汇率再换算造成额外舍入。
-                    result.Add(record.Id, rmbDebit - Math.Abs(record.DescCurrency.v) * targetRate.exchangeRateToRmb.Value);
+                    result.Add(record.Id, -record.v / rate - Math.Abs(record.DescCurrency.v) * targetRate);
                 }
                 else break;
             }
@@ -66,14 +69,32 @@ partial class DatabaseUtil
             .GroupBy(r => (r.currency, DateTime.SpecifyKind(r.rateDate, DateTimeKind.Local).ToUniversalTime().Date))
             .ToDictionary(g => g.Key, g => g.Last());
 
+    private static decimal? GetExchangeLossRate(IReadOnlyDictionary<(CurrencyType, DateTime), RateHistory> rates,
+        CurrencyType currency, DateTime quoteDate, bool fromRmb)
+    {
+        decimal? previous = null;
+        var previousDate = DateTime.MinValue;
+        var hasLaterQuote = false;
+        foreach (var ((rateCurrency, date), quote) in rates)
+        {
+            if (rateCurrency != currency) continue;
+            var rate = fromRmb ? quote.exchangeRateFromRmb : quote.exchangeRateToRmb;
+            if (rate is not > 0) continue;
+            if (date == quoteDate) return rate;
+            if (date > quoteDate) hasLaterQuote = true;
+            else if (date > previousDate) { previousDate = date; previous = rate; }
+        }
+        // Only fill an interior gap in the same currency and direction; a missing tail may be delayed data.
+        return hasLaterQuote ? previous : null;
+    }
+
     private static DateTime GetExchangeLossQuoteDate(Record record) => record.date.Date;
 
     private static decimal? GetConversionRmbDebit(Record record, IReadOnlyDictionary<(CurrencyType, DateTime), RateHistory> rates)
     {
         if (record.t == CurrencyType.RMB) return -record.v;
         if (record.DescCurrency!.t == CurrencyType.RMB) return Math.Abs(record.DescCurrency.v) + record.exchangeLossCache;
-        return rates.TryGetValue((record.t, GetExchangeLossQuoteDate(record)), out var rate) && rate.exchangeRateFromRmb is > 0
-            ? -record.v / rate.exchangeRateFromRmb.Value : null;
+        return -record.v / GetExchangeLossRate(rates, record.t, GetExchangeLossQuoteDate(record), fromRmb: true);
     }
 
     // Display calculations only; never writes Records or cached statistics.
