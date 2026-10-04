@@ -4701,8 +4701,15 @@ namespace MyBook
 
         private static string BuildHoldingInvestmentKey(Record record, Dictionary<(int AccountId, string Code), string> holdingNames)
         {
+            if (record.Reason == "视频收益")
+                return record.Reason;
+
             if (String.IsNullOrWhiteSpace(record.DestAccount))
-                return "未关联持仓";
+            {
+                if (record.Reason == "利息")
+                    return record.Reason;
+                throw new InvalidOperationException($"投资收益记录 {record.Id} 未关联持仓：DestAccount 为空。");
+            }
 
             return holdingNames.TryGetValue((record._account_Id, record.DestAccount), out var display)
                 ? display

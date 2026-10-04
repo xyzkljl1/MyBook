@@ -208,11 +208,11 @@ namespace MyBook
                     var asset = AddRecord(-principal, "交易", source + "|asset|" + tx.Description,
                         tx.Date, true, security, quantity, postingDate);
                     AddRecord(principal, "交易", source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
-                        tx.Date, true, null, 0, postingDate).MatchedRecord = asset;
+                        tx.Date, true, null, 0, postingDate, security.code).MatchedRecord = asset;
                     if (tx.Commission != 0) AddRecord(-tx.Commission, "手续费", source + "|commission|" + tx.Description,
-                        tx.Date, false, null, 0, postingDate);
+                        tx.Date, false, null, 0, postingDate, security.code);
                     if (tx.Fees != 0) AddRecord(-tx.Fees, "手续费", source + "|fee|" + tx.Description,
-                        tx.Date, false, null, 0, postingDate);
+                        tx.Date, false, null, 0, postingDate, security.code);
                     cash += tx.Amount;
                     continue;
                 }
@@ -233,7 +233,7 @@ namespace MyBook
                 }
                 cash += tx.Amount;
                 AddRecord(tx.Amount, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
-                    tx.Date, isInternal, null, 0, postingDate);
+                    tx.Date, isInternal, null, 0, postingDate, reason == "转账" ? "" : tx.Symbol);
             }
             // 出于神秘原因first返回的余额会自己浮动。
             if (Math.Abs(cash - endingCash) > 1m) // USD
@@ -259,11 +259,13 @@ namespace MyBook
                 recordDate: time.Date);
 
             Record AddRecord(decimal amount, string reason, string source, DateTime date, bool isInternal, Holding? holding, decimal quantity,
-                DateTime? postingDate = null, string counterparty = "")
+                DateTime? postingDate = null, string? destAccount = null)
             {
                 var record = new Record
                 {
-                    Account = account, v = amount, t = CurrencyType.USD, date = date, postingDate = postingDate ?? date, DestAccount = counterparty,
+                    Account = account, v = amount, t = CurrencyType.USD, date = date, postingDate = postingDate ?? date,
+                    // Cash proceeds and charges retain the related security without changing their cash holding.
+                    DestAccount = destAccount ?? holding?.code ?? "",
                     updateTime = DateTime.Now, Reason = reason, Source = source[..Math.Min(1024, source.Length)],
                     isInternal = isInternal, Holding = holding, HoldingQuantity = quantity
                 };

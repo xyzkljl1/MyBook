@@ -232,12 +232,12 @@ partial class PlaidUtil
                 quantities[key] = quantities.GetValueOrDefault(key) + tx.Quantity;
                 values[key] = values.GetValueOrDefault(key) + principal;
                 var asset = Add(principal, "交易", source + "/asset", tx.TradeDate, tx.Date, true, holding, tx.Quantity);
-                Add(-principal, "交易", source + "/cash", tx.TradeDate, tx.Date, true, null, 0).MatchedRecord = asset;
-                if (tx.Fees != 0) Add(-tx.Fees, "手续费", source + "/fee", tx.TradeDate, tx.Date, false, null, 0);
+                Add(-principal, "交易", source + "/cash", tx.TradeDate, tx.Date, true, null, 0, holding.code).MatchedRecord = asset;
+                if (tx.Fees != 0) Add(-tx.Fees, "手续费", source + "/fee", tx.TradeDate, tx.Date, false, null, 0, holding.code);
                 // This interest is already paid/received in cash, not an outstanding accrued holding.
                 if (settledAccruedInterest != 0)
                     Add(-settledAccruedInterest, "债息", source + "/accrued-interest-settlement",
-                        tx.TradeDate, tx.Date, false, null, 0);
+                        tx.TradeDate, tx.Date, false, null, 0, holding.code);
             }
             else
             {
@@ -252,7 +252,9 @@ partial class PlaidUtil
                     ("fee", "account fee" or "management fee" or "transfer fee" or "miscellaneous fee") when tx.Amount > 0 => "手续费",
                     _ => throw SchwabRawError("unsupported investment transaction type/subtype")
                 };
-                Add(-tx.Amount, reason, source + "/cash", tx.TradeDate, tx.Date, false, null, 0);
+                var destAccount = reason != "转账" && securities.TryGetValue(tx.SecurityId, out var relatedSecurity)
+                    ? BuildRawHolding(relatedSecurity, account, resolveEquity).code : "";
+                Add(-tx.Amount, reason, source + "/cash", tx.TradeDate, tx.Date, false, null, 0, destAccount);
             }
             cash -= tx.Amount;
         }
@@ -284,9 +286,12 @@ partial class PlaidUtil
             account, records, ending, [new(account, new(report.Total, CurrencyType.USD))],
             [new(account, new(beginningValue, CurrencyType.USD))], beginning, recordDate: report.AsOf.Date);
 
-        Record Add(decimal value, string reason, string source, DateTime date, DateTime posted, bool internalTrade, Holding? holding, decimal quantity)
+        Record Add(decimal value, string reason, string source, DateTime date, DateTime posted, bool internalTrade, Holding? holding, decimal quantity,
+            string? destAccount = null)
         {
             var record = new Record { Account = account, v = value, t = CurrencyType.USD, date = date, postingDate = posted,
+                // Cash proceeds and charges retain the related security without changing their cash holding.
+                DestAccount = destAccount ?? holding?.code ?? "",
                 updateTime = DateTime.Now, Reason = reason, Source = source, isInternal = internalTrade, Holding = holding, HoldingQuantity = quantity };
             records.Add(record);
             return record;
