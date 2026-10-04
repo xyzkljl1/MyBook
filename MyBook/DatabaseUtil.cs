@@ -22,6 +22,15 @@ namespace MyBook
         private const string InitialHoldingReason = "Initial holding";
         private const string InitialCashBalanceReason = "Initial cash balance";
         private const string BeginningHoldingRestatementReason = "持仓价格变动";
+        private static readonly HashSet<string> AllowedRecordReasons = new(StringComparer.Ordinal)
+        {
+            "消费", "吃喝", "日用品", "水电网", "虚拟产品", "游戏", "一次性支出",
+            "转账", "还款", "换汇", "链上转账", "利息", "股息", "债息", "返现", "DP", "视频收益",
+            "交易", "持仓价格变动", "其它外汇换算", "应计利息", "应计债息", "应计股息",
+            "手续费", "税费", "退款", "收入", "支出", "Initial cash balance", "Initial holding",
+            "Missing small transactions", "Missing SMS period compensation", "应计利息汇率变动",
+            "短信费用", "理财交易", "理财", "汇款冲正", "工资", "报销", "手动校正"
+        };
         private static readonly string[] TransferInstitutionTypes = ["WISE", "SCHWAB", "FIRSTTRADE", "IBKR", "KRAKEN", "NEXUS", "ZA", "CICC"];
         private const string BootstrapSqlRelativePath = "Database/bootstrap.sql";
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
@@ -1374,6 +1383,7 @@ namespace MyBook
             var normalizedDestAccount = CleanRecordText(edit.DestAccount);
             var normalizedSource = CleanRecordText(edit.Source);
             var normalizedReason = CleanRecordText(edit.Reason);
+            ValidateRecordReason(normalizedReason);
             var normalizedExpenseAllocationDays = NormalizeExpenseAllocationDays(edit.ExpenseAllocationDays);
             var normalizedExpenseAllocationSkipDays = NormalizeExpenseAllocationSkipDays(edit.ExpenseAllocationSkipDays);
             if (existing._account_Id != account.Id)
@@ -2817,6 +2827,12 @@ namespace MyBook
             }).ExecuteReturnIdentity();
         }
 
+        private static void ValidateRecordReason(string? reason)
+        {
+            if (reason is null || !AllowedRecordReasons.Contains(reason))
+                throw new InvalidOperationException($"Unsupported record Reason: '{reason ?? "<null>"}'.");
+        }
+
         private void SaveRecordsCore(List<Record> recordList, int statementImportId)
         {
             if (statementImportId <= 0)
@@ -2824,6 +2840,7 @@ namespace MyBook
 
             foreach (var record in recordList)
             {
+                ValidateRecordReason(record.Reason);
                 if (record.Account is null)
                     throw new InvalidOperationException("Record account is required.");
 
@@ -5671,6 +5688,7 @@ namespace MyBook
                 var fieldsUpdated = ApplyRecordFieldSupplement(record, supplement.FieldSupplement);
                 if (fieldsUpdated)
                 {
+                    ValidateRecordReason(record.Reason);
                     record.allocatedExpenseCacheDirty = true;
                     fieldSupplementRecordIds.Add(record.Id);
                     db.Updateable(record)
