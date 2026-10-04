@@ -877,6 +877,15 @@ namespace MyBook
 
         public string? SelectedDetailAccountFilterKey => SelectedDetailAccountFilter?.Key;
 
+        public int MonthlyCurrencyModeIndex
+        {
+            get => ShowSingleCurrencyMonthly ? 1 : 0;
+            set
+            {
+                if (value is 0 or 1) ShowSingleCurrencyMonthly = value == 1;
+            }
+        }
+
         public bool ShowSingleCurrencyMonthly
         {
             get => showSingleCurrencyMonthly;
@@ -887,6 +896,7 @@ namespace MyBook
 
                 showSingleCurrencyMonthly = value;
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowSingleCurrencyMonthly)));
+                OnPropertyChanged(nameof(MonthlyCurrencyModeIndex));
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VisibleMonthlySeries)));
             }
         }
@@ -944,13 +954,12 @@ namespace MyBook
             }
         }
 
-        public bool ShowInvestmentByReason
+        public int InvestmentModeIndex
         {
-            get => !showInvestmentByHolding;
+            get => ShowInvestmentByHolding ? 1 : 0;
             set
             {
-                if (value)
-                    ShowInvestmentByHolding = false;
+                if (value is 0 or 1) ShowInvestmentByHolding = value == 1;
             }
         }
 
@@ -963,7 +972,7 @@ namespace MyBook
                     return;
 
                 showInvestmentByHolding = value;
-                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowInvestmentByReason)));
+                OnPropertyChanged(nameof(InvestmentModeIndex));
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowInvestmentByHolding)));
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VisibleInvestmentPeriods)));
             }
@@ -1079,6 +1088,7 @@ namespace MyBook
             allocatedExpenseStartDate = source.AllocatedExpenseStartDate;
             allocatedExpenseEndDate = source.AllocatedExpenseEndDate;
             OnPropertyChanged(nameof(ShowSingleCurrencyMonthly));
+            OnPropertyChanged(nameof(MonthlyCurrencyModeIndex));
             OnPropertyChanged(nameof(SelectedMonthlyAccount));
             OnPropertyChanged(nameof(VisibleMonthlySeries));
             OnPropertyChanged(nameof(ShowAllocatedExpenseLineChart));

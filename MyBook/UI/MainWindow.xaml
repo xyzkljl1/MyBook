@@ -200,12 +200,11 @@
                     </Grid.RowDefinitions>
                     <DockPanel Margin="0,16,0,10">
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                            <CheckBox Content="单币种"
-                                      IsChecked="{Binding ShowSingleCurrencyMonthly, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                      FontSize="13"
-                                      Foreground="#334155"
-                                      VerticalAlignment="Center"
-                                      Margin="0,0,12,0"/>
+                            <local:SegmentedSelector SelectedIndex="{Binding MonthlyCurrencyModeIndex, Mode=TwoWay}"
+                                                     Margin="0,0,12,0" AutomationProperties.Name="收支币种显示方式">
+                                <ListBoxItem Content="折算人民币"/>
+                                <ListBoxItem Content="单币种"/>
+                            </local:SegmentedSelector>
                             <ComboBox Style="{StaticResource FilterComboBox}"
                                       ItemsSource="{Binding MonthlyAccounts}"
                                       SelectedItem="{Binding SelectedMonthlyAccount, Mode=TwoWay}"
@@ -579,55 +578,16 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <RadioButton Content="按原因"
-                                         GroupName="InvestmentMode"
-                                         IsChecked="{Binding ShowInvestmentByReason, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                         FontSize="13"
-                                         Foreground="#334155"
-                                         Margin="0,0,18,0"/>
-                            <RadioButton Content="按股票"
-                                         GroupName="InvestmentMode"
-                                         IsChecked="{Binding ShowInvestmentByHolding, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                         FontSize="13"
-                                         Foreground="#334155"/>
-                            <Border Margin="18,0,0,0" Padding="2" CornerRadius="6" Background="#E2E8F0">
-                                <ListBox SelectedIndex="{Binding InvestmentCurrencyIndex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                         Width="128" BorderThickness="0" Padding="0" Background="Transparent"
-                                         FontSize="13" KeyboardNavigation.DirectionalNavigation="Cycle"
-                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                         ScrollViewer.VerticalScrollBarVisibility="Disabled"
-                                         AutomationProperties.Name="投资统计币种">
-                                    <ListBox.ItemsPanel>
-                                        <ItemsPanelTemplate><UniformGrid Columns="2"/></ItemsPanelTemplate>
-                                    </ListBox.ItemsPanel>
-                                    <ListBox.ItemContainerStyle>
-                                        <Style TargetType="ListBoxItem">
-                                            <Setter Property="Foreground" Value="#334155"/>
-                                            <Setter Property="Template">
-                                                <Setter.Value>
-                                                    <ControlTemplate TargetType="ListBoxItem">
-                                                        <Border x:Name="Segment" Padding="12,5" CornerRadius="4"
-                                                                Background="Transparent" BorderBrush="Transparent" BorderThickness="1">
-                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                        </Border>
-                                                        <ControlTemplate.Triggers>
-                                                            <Trigger Property="IsSelected" Value="True">
-                                                                <Setter TargetName="Segment" Property="Background" Value="#0F766E"/>
-                                                                <Setter Property="Foreground" Value="White"/>
-                                                            </Trigger>
-                                                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
-                                                                <Setter TargetName="Segment" Property="BorderBrush" Value="#94A3B8"/>
-                                                            </Trigger>
-                                                        </ControlTemplate.Triggers>
-                                                    </ControlTemplate>
-                                                </Setter.Value>
-                                            </Setter>
-                                        </Style>
-                                    </ListBox.ItemContainerStyle>
-                                    <ListBoxItem Content="RMB"/>
-                                    <ListBoxItem Content="USD"/>
-                                </ListBox>
-                            </Border>
+                            <local:SegmentedSelector SelectedIndex="{Binding InvestmentModeIndex, Mode=TwoWay}"
+                                                     AutomationProperties.Name="投资统计分类方式">
+                                <ListBoxItem Content="按原因"/>
+                                <ListBoxItem Content="按股票"/>
+                            </local:SegmentedSelector>
+                            <local:SegmentedSelector SelectedIndex="{Binding InvestmentCurrencyIndex, Mode=TwoWay}"
+                                                     Width="132" Margin="18,0,0,0" AutomationProperties.Name="投资统计币种">
+                                <ListBoxItem Content="RMB"/>
+                                <ListBoxItem Content="USD"/>
+                            </local:SegmentedSelector>
                         </StackPanel>
                         <ComboBox Grid.Column="2"
                                   Style="{StaticResource FilterComboBox}"
