@@ -36,7 +36,7 @@ namespace MyBook
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(MerchantReasonRule), typeof(AccountBalance), typeof(LoginSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(DestAccountRule), typeof(AccountBalance), typeof(LoginSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -206,9 +206,9 @@ namespace MyBook
             return ExecuteLockedTransaction(() => db.Ado.ExecuteCommand(sql));
         }
 
-        public List<MerchantReasonRule> GetMerchantReasonRules()
+        public List<DestAccountRule> GetDestAccountRules()
         {
-            var rules = db.Queryable<MerchantReasonRule>().OrderBy(rule => rule.merchantText).ToList();
+            var rules = db.Queryable<DestAccountRule>().OrderBy(rule => rule.merchantText).ToList();
             foreach (var rule in rules)
             {
                 if (String.IsNullOrWhiteSpace(rule.merchantText) || String.IsNullOrWhiteSpace(rule.reason))
@@ -218,7 +218,7 @@ namespace MyBook
         }
 
         // 只传入对方商户描述；多条规则可以命中同一分类，但不能任意选择冲突分类。
-        public static string? MatchMerchantReason(string merchant, IReadOnlyList<MerchantReasonRule> rules)
+        public static string? MatchDestAccountReason(string merchant, IReadOnlyList<DestAccountRule> rules)
         {
             var matches = rules.Where(rule => merchant.Contains(rule.merchantText.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
             var reasons = matches.Select(rule => rule.reason.Trim()).Distinct(StringComparer.Ordinal).ToList();
@@ -5452,7 +5452,7 @@ namespace MyBook
             {
                 ["Accounts"] = db.Queryable<Account>().Count(),
                 ["AccountInternalIds"] = db.Queryable<AccountInternalId>().Count(),
-                ["MerchantReasonRules"] = db.Queryable<MerchantReasonRule>().Count(),
+                ["destAccountRules"] = db.Queryable<DestAccountRule>().Count(),
                 ["AccountBalances"] = db.Queryable<AccountBalance>().Count(),
                 ["StatementImports"] = db.Queryable<StatementImport>().Count(),
                 ["Records"] = db.Queryable<Record>().Count(),
@@ -6019,8 +6019,8 @@ namespace MyBook
                 return "Accounts";
             if (type == typeof(AccountInternalId))
                 return "AccountInternalIds";
-            if (type == typeof(MerchantReasonRule))
-                return "MerchantReasonRules";
+            if (type == typeof(DestAccountRule))
+                return "destAccountRules";
             if (type == typeof(AccountBalance))
                 return "AccountBalances";
             if (type == typeof(LoginSession))

@@ -382,8 +382,8 @@ namespace MyBook
     }
 
     // 人工维护的商户分类规则，作为固定数据保留；仅由明确接入的模块使用。
-    [SugarTable("MerchantReasonRules")]
-    public class MerchantReasonRule
+    [SugarTable("destAccountRules")]
+    public class DestAccountRule
     {
         [SugarColumn(IsPrimaryKey = true, DefaultValue = "''", ColumnDataType = "varchar(255)")]
         public string merchantText { get; set; } = "";

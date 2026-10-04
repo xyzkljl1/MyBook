@@ -54,7 +54,7 @@ namespace MyBook
             // 只从汇总表登记卡号；交易明细里的卡号只用于该交易本身，不能作为卡号来源。
             var internalCardNos = ParseICBCInternalCardNos(tables[1]);
 
-            var merchantRules = database.GetMerchantReasonRules();
+            var merchantRules = database.GetDestAccountRules();
             records.AddRange(ParseICBCTransactionRecords(tables[2], merchantRules)); // 人民币交易明细。
             records.AddRange(ParseICBCTransactionRecords(tables[3], merchantRules)); // 外币交易明细。
             return database.SaveStatementRecordsOnce(
@@ -158,7 +158,7 @@ namespace MyBook
             return result;
         }
 
-        private Records ParseICBCTransactionRecords(FormUtil.FormTable table, IReadOnlyList<MerchantReasonRule> merchantRules)
+        private Records ParseICBCTransactionRecords(FormUtil.FormTable table, IReadOnlyList<DestAccountRule> merchantRules)
         {
             if (table.Headers.Count != 7
                 || table.Headers[0] != "卡号后四位"
@@ -243,7 +243,7 @@ namespace MyBook
         }
 
         private static string GetICBCExpenseReason(string transactionType, Account cardAccount,
-            string merchant, IReadOnlyList<MerchantReasonRule> merchantRules)
+            string merchant, IReadOnlyList<DestAccountRule> merchantRules)
         {
             return transactionType switch
             {
@@ -251,7 +251,7 @@ namespace MyBook
                 "透支利息" => "利息",
                 "境外取现" => cardAccount.desc,
                 // 使用原始对方商户文本；副卡记录仍入主卡账，但分类回退使用副卡描述。
-                _ => DatabaseUtil.MatchMerchantReason(merchant, merchantRules) ?? cardAccount.desc
+                _ => DatabaseUtil.MatchDestAccountReason(merchant, merchantRules) ?? cardAccount.desc
             };
         }
 
