@@ -134,6 +134,7 @@ CREATE TABLE `records` (
   `updateTime` datetime NOT NULL,
   `Source` varchar(1024) NOT NULL DEFAULT '',
   `Reason` varchar(1024) NOT NULL DEFAULT '',
+  `reasonDetail` varchar(1024) NOT NULL DEFAULT '',
   `_account_Id` int NOT NULL DEFAULT '0',
   `_descCurrency_v` decimal(30,18) DEFAULT NULL,
   `_descCurrency_t` enum('RMB','USD','JPY','SGD','HKD','GBP','EUR') DEFAULT NULL,

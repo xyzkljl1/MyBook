@@ -595,6 +595,9 @@ namespace MyBook
         [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(1024)")]
         public string Reason { get; set; } = ""; // 消费/收入原因
 
+        [SugarColumn(DefaultValue = "''", ColumnDataType = "varchar(1024)")]
+        public string reasonDetail { get; set; } = ""; // 原因的补充说明。
+
         [SugarColumn(IsNullable = true, ColumnDataType = "json")]
         public string? backup { get; set; } = null; // 非手动来源的记录首次手动编辑前的原始值。
 
