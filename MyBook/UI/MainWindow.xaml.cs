@@ -2257,7 +2257,7 @@ namespace MyBook
             {
                 Title = period.Title,
                 Items = period.Items.Where(item => (showUsd ? item.TotalUsd : item.Total) != 0)
-                    .OrderByDescending(item => Math.Abs((showUsd ? item.TotalUsd : item.Total) ?? 0))
+                    .OrderByDescending(item => (showUsd ? item.TotalUsd : item.Total) ?? 0)
                     .ThenBy(item => item.Name)
                     .Select(item => InvestmentStatisticsItemViewModel.From(item, showUsd)).ToList(),
                 TotalText = FormatTotal(showUsd ? period.TotalUsd : period.Total, showUsd)

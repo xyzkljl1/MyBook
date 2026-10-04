@@ -3729,6 +3729,8 @@ namespace MyBook
                 .ToList();
             var accounts = accountList.ToDictionary(account => account.Id, account => account.name);
             var holdingNames = BuildHoldingNames(holdings);
+            var holdingsById = holdings.ToDictionary(holding => holding.Id);
+            string HoldingKey(Record record) => BuildHoldingInvestmentKey(record, holdingNames, holdingsById);
             var exchangeRates = GetCurrencyToRmbRates();
             var assetSummaryDates = BuildAssetSummaryDates(today.Date);
             var assetSummaryBalances = BuildAssetSummaryBalanceSets(assetSummaryDates, balances, today.Date);
@@ -3778,14 +3780,14 @@ namespace MyBook
                     investmentRecords,
                     today,
                     exchangeRates,
-                    record => BuildHoldingInvestmentKey(record, holdingNames)),
+                    HoldingKey),
                 InvestmentAccounts = BuildInvestmentAccountStatistics(
                     accounts,
                     investmentAccountIds,
                     investmentRecords,
                     today,
                     exchangeRates,
-                    holdingNames),
+                    HoldingKey),
                 TotalAssetsRmb = todayAssetSummary?.TotalAssetsRmb ?? BuildTotalAssetsRmb(balances, exchangeRates),
                 MissingExchangeRateCurrencies = usedCurrencies
                     .Where(currency => currency != CurrencyType.RMB && !exchangeRates.ContainsKey(currency))
@@ -4699,21 +4701,43 @@ namespace MyBook
                     });
         }
 
-        private static string BuildHoldingInvestmentKey(Record record, Dictionary<(int AccountId, string Code), string> holdingNames)
+        private static string BuildHoldingInvestmentKey(Record record, Dictionary<(int AccountId, string Code), string> holdingNames,
+            Dictionary<int, Holding> holdingsById)
         {
-            if (record.Reason == "视频收益")
+            if (record.Reason is "视频收益" or "利息" or "应计利息")
+                return BuildInvestmentReasonKey(record);
+
+            if (record.Reason == "其它外汇换算")
                 return record.Reason;
 
-            if (String.IsNullOrWhiteSpace(record.DestAccount))
+            if (record.Reason == "手续费" && record.DestAccount == "取款费用")
+                return record.Reason;
+
+            if (record.Reason == "持仓价格变动")
             {
-                if (record.Reason == "利息")
-                    return record.Reason;
-                throw new InvalidOperationException($"投资收益记录 {record.Id} 未关联持仓：DestAccount 为空。");
+                if (holdingsById.TryGetValue(record._holding_Id, out var holding)
+                    && holding._account_Id == record._account_Id && !String.IsNullOrWhiteSpace(holding.code))
+                    return holding.code;
+                throw new InvalidOperationException($"投资收益记录 {record.Id} 无法确定持仓代码：Holding {record._holding_Id}。");
             }
 
-            return holdingNames.TryGetValue((record._account_Id, record.DestAccount), out var display)
-                ? display
-                : record.DestAccount;
+            if (String.IsNullOrWhiteSpace(record.DestAccount))
+                throw new InvalidOperationException($"投资收益记录 {record.Id} 未关联持仓：DestAccount 为空。");
+
+            var code = record.DestAccount;
+            if (record.Reason is "股息" or "税费")
+            {
+                // IBKR cash details identify the security as SYMBOL(ISIN), followed by the payment description.
+                var security = Regex.Match(code, @"^(?<symbol>[^\s()]+)\([A-Z]{2}[A-Z0-9]{9}\d\)(?:\s|$)");
+                if (security.Success)
+                    code = security.Groups["symbol"].Value;
+            }
+
+            if (holdingNames.TryGetValue((record._account_Id, code), out var display))
+                return record.Reason is "股息" or "应计股息" or "手续费" or "税费" or "债息" ? code : display;
+            if (record.Reason == "股息")
+                throw new InvalidOperationException($"投资收益记录 {record.Id} 无法确定股息对应的证券代码。");
+            return record.DestAccount;
         }
 
         private static string BuildInvestmentReasonKey(Record record)
@@ -4724,6 +4748,7 @@ namespace MyBook
 
             return reason switch
             {
+                "应计利息" => "利息",
                 "\u5e94\u8ba1\u80a1\u606f" => "\u80a1\u606f",
                 "\u5e94\u8ba1\u7ecf\u7eaa\u5546\u5229\u606f" => "\u73b0\u91d1\u5229\u606f",
                 "\u5e94\u8ba1\u73b0\u91d1\u5229\u606f" => "\u73b0\u91d1\u5229\u606f",
@@ -4744,7 +4769,7 @@ namespace MyBook
             List<Record> investmentRecords,
             DateTime today,
             Dictionary<CurrencyType, decimal> exchangeRates,
-            Dictionary<(int AccountId, string Code), string> holdingNames)
+            Func<Record, string> holdingKey)
         {
             var investmentAccounts = investmentAccountIds
                 .Select(accountId =>
@@ -4763,7 +4788,7 @@ namespace MyBook
 
             var statistics = new List<InvestmentAccountStatistics>
             {
-                BuildInvestmentAccountStatistic("所有账户", investmentRecords, today, exchangeRates, holdingNames)
+                BuildInvestmentAccountStatistic("所有账户", investmentRecords, today, exchangeRates, holdingKey)
             };
 
             foreach (var group in investmentAccounts
@@ -4784,7 +4809,7 @@ namespace MyBook
                         accountRecords,
                         today,
                         exchangeRates,
-                        holdingNames));
+                        holdingKey));
                 }
 
                 foreach (var account in groupAccounts)
@@ -4797,7 +4822,7 @@ namespace MyBook
                         accountRecords,
                         today,
                         exchangeRates,
-                        holdingNames);
+                        holdingKey);
                     statistics.Add(statistic);
                 }
             }
@@ -4810,7 +4835,7 @@ namespace MyBook
             List<Record> records,
             DateTime today,
             Dictionary<CurrencyType, decimal> exchangeRates,
-            Dictionary<(int AccountId, string Code), string> holdingNames)
+            Func<Record, string> holdingKey)
         {
             return new InvestmentAccountStatistics
             {
@@ -4824,7 +4849,7 @@ namespace MyBook
                     records,
                     today,
                     exchangeRates,
-                    record => BuildHoldingInvestmentKey(record, holdingNames))
+                    holdingKey)
             };
         }
 
@@ -4992,7 +5017,7 @@ namespace MyBook
                     };
                 })
                 .Where(item => item.Total != 0 || item.TotalUsd != 0)
-                .OrderByDescending(item => Math.Abs(item.Total))
+                .OrderByDescending(item => item.Total)
                 .ThenBy(item => item.Name)
                 .ToList();
             return new InvestmentStatisticsPeriod
