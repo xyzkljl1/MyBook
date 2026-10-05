@@ -387,6 +387,7 @@ namespace MyBook
                 }
 
                 var viewModel = DashboardViewModel.From(data);
+                viewModel.UpdateMarketPrices(fetcher.GetMarketPrices());
                 if (previousViewModel is not null)
                     viewModel.CopyDashboardSettingsFrom(previousViewModel);
                 if (detailStartDate.HasValue)
@@ -529,6 +530,8 @@ namespace MyBook
         private void ImportStatusTimer_Tick(object? sender, EventArgs e)
         {
             RefreshImportRuntimeStatus();
+            if (DataContext is DashboardViewModel viewModel)
+                viewModel.UpdateMarketPrices(fetcher.GetMarketPrices());
         }
 
         private void ClearImportFailureMarker_Click(object sender, RoutedEventArgs e)
@@ -660,6 +663,9 @@ namespace MyBook
         string? loadedDetailBalanceAccountName;
         MonthlyFlowAccountStatisticsViewModel? selectedMonthlyAccount;
         InvestmentAccountStatisticsViewModel? selectedInvestmentAccount;
+        List<Holding> marketHoldings = [];
+        List<AccountBalance> marketBalances = [];
+        Dictionary<CurrencyType, decimal> marketExchangeRates = [];
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -667,6 +673,11 @@ namespace MyBook
         public string SelectedAssetDateText { get; set; } = "";
         public string ReasonTabHeader { get; set; } = "分类";
         public TotalAssetsViewModel TotalAssets { get; set; } = new();
+        public bool ShowMarketChange { get; private set; }
+        public decimal? MarketChangeRmb { get; private set; }
+        public string MarketChangeText { get; private set; } = "本日浮动 —";
+        public string MarketChangeToolTip { get; private set; } = "尚无可用实时报价。";
+        public string MarketChangeColor => MarketChangeRmb > 0 ? "#047857" : MarketChangeRmb < 0 ? "#B91C1C" : "#64748B";
         public List<CurrencySummaryViewModel> CurrencySummaries { get; set; } = [];
         public List<AssetSummaryViewModel> AssetSummaries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
@@ -1012,6 +1023,9 @@ namespace MyBook
                 : data.InvestmentAccounts;
             var viewModel = new DashboardViewModel
             {
+                marketHoldings = data.MarketHoldings,
+                marketBalances = data.MarketBalances,
+                marketExchangeRates = data.MarketExchangeRates,
                 SnapshotTimeText = "最新",
                 ReasonTabHeader = "分类",
                 TotalAssets = TotalAssetsViewModel.From(data.TotalAssetsRmb),
@@ -1145,6 +1159,52 @@ namespace MyBook
             return true;
         }
 
+        internal void UpdateMarketPrices(IReadOnlyList<MarketPrice> prices)
+        {
+            var quotes = prices.ToDictionary(quote => (quote.Code, quote.HoldingType));
+            var changes = new Dictionary<(int AccountId, CurrencyType Currency), decimal>();
+            var times = new List<DateTimeOffset>();
+            foreach (var holding in marketHoldings)
+            {
+                var code = holding.holdingType == HoldingType.Crypto ? KrakenPubUtil.GetBaseAsset(holding.code) : holding.code;
+                var currency = holding.currentPrice.t;
+                if (!quotes.TryGetValue((code, holding.holdingType), out var quote) || quote.Price <= 0
+                    || quote.Currency != currency || !marketExchangeRates.ContainsKey(currency))
+                    continue;
+                var key = (holding._account_Id, currency);
+                changes[key] = changes.GetValueOrDefault(key)
+                    + Holding.CalculateTotalValue(holding.quantity, quote.Price, holding.holdingType) - holding.totalPrice.v;
+                times.Add(quote.FetchedAt);
+            }
+
+            // Apply price differences to the displayed balance baseline before rounding RMB values,
+            // so this equals the revalued total minus the unchanged book total, even at cent boundaries.
+            var balances = marketBalances.ToDictionary(balance => (balance._account_Id, balance.t), balance => balance.v);
+            decimal? amount = times.Count == 0 ? null : changes.Sum(change =>
+            {
+                var baseline = balances.GetValueOrDefault(change.Key);
+                var rate = marketExchangeRates[change.Key.Currency];
+                return Currency.RoundMoney((baseline + change.Value) * rate) - Currency.RoundMoney(baseline * rate);
+            });
+            var text = amount.HasValue
+                ? $"本日浮动 {(amount > 0 ? "+" : amount < 0 ? "-" : "")}¥{Math.Abs(amount.Value):N2}"
+                    + (times.Count < marketHoldings.Count ? "（部分报价）" : "")
+                : "本日浮动 —";
+            var detail = "实时报价相对当前账面估值的差额，可能包含多日价格变动；不计入原总额。\n"
+                + $"报价覆盖：{times.Count}/{marketHoldings.Count} 项持仓。"
+                + (times.Count == 0 ? " 尚无可用实时报价。"
+                    : $"\n报价获取时间：{times.Min().LocalDateTime:yyyy-MM-dd HH:mm:ss} 至 {times.Max().LocalDateTime:yyyy-MM-dd HH:mm:ss}。");
+            if (MarketChangeRmb == amount && MarketChangeText == text && MarketChangeToolTip == detail)
+                return;
+            MarketChangeRmb = amount;
+            MarketChangeText = text;
+            MarketChangeToolTip = detail;
+            OnPropertyChanged(nameof(MarketChangeRmb));
+            OnPropertyChanged(nameof(MarketChangeText));
+            OnPropertyChanged(nameof(MarketChangeToolTip));
+            OnPropertyChanged(nameof(MarketChangeColor));
+        }
+
         private void ApplySelectedAssetSummary()
         {
             if (AssetSummaries.Count == 0)
@@ -1157,10 +1217,12 @@ namespace MyBook
             SelectedAssetDateText = selected.DateLabel;
             TotalAssets = selected.TotalAssets;
             CurrencySummaries = selected.CurrencySummaries;
+            ShowMarketChange = selected.IsToday;
             OnPropertyChanged(nameof(SnapshotTimeText));
             OnPropertyChanged(nameof(SelectedAssetDateText));
             OnPropertyChanged(nameof(TotalAssets));
             OnPropertyChanged(nameof(CurrencySummaries));
+            OnPropertyChanged(nameof(ShowMarketChange));
         }
 
         private void OnPropertyChanged(string propertyName)
@@ -1486,6 +1548,7 @@ namespace MyBook
 
     public class AssetSummaryViewModel
     {
+        public bool IsToday { get; set; }
         public double DayOffset { get; set; }
         public string DateLabel { get; set; } = "";
         public string StatusText { get; set; } = "";
@@ -1498,6 +1561,7 @@ namespace MyBook
             return new AssetSummaryViewModel
             {
                 DayOffset = (point.Date - firstDate).TotalDays,
+                IsToday = point.IsToday && point.HasData,
                 DateLabel = dateLabel,
                 StatusText = BuildStatusText(point, dateLabel),
                 TotalAssets = TotalAssetsViewModel.From(point.HasData ? point.TotalAssetsRmb : 0),
@@ -1514,6 +1578,7 @@ namespace MyBook
             return new AssetSummaryViewModel
             {
                 DateLabel = DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                IsToday = true,
                 StatusText = "最新",
                 TotalAssets = TotalAssetsViewModel.From(totalAssetsRmb),
                 CurrencySummaries = currencySummaries.Select(CurrencySummaryViewModel.From).ToList()

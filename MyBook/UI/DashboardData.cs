@@ -2,6 +2,9 @@ namespace MyBook
 {
     public class DashboardData
     {
+        internal List<Holding> MarketHoldings { get; set; } = [];
+        internal List<AccountBalance> MarketBalances { get; set; } = [];
+        internal Dictionary<CurrencyType, decimal> MarketExchangeRates { get; set; } = [];
         public List<AssetSummaryPoint> AssetSummaryPoints { get; set; } = [];
         public List<CurrencyBalanceSummary> CurrencySummaries { get; set; } = [];
         public List<MonthlyFlowSeries> MonthlyFlowSeries { get; set; } = [];

@@ -143,7 +143,7 @@
                          Foreground="#64748B"
                          Margin="0,6,0,0"/>
             </StackPanel>
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Top">
+            <WrapPanel Orientation="Horizontal" VerticalAlignment="Top">
                 <TextBox Style="{StaticResource SelectableText}"
                          Text="{Binding TotalAssets.ValueText}"
                          FontSize="44"
@@ -154,7 +154,13 @@
                          FontSize="13"
                          Foreground="#64748B"
                          Margin="12,21,0,0"/>
-            </StackPanel>
+                <TextBox Style="{StaticResource SelectableText}"
+                         Text="{Binding MarketChangeText, Mode=OneWay}"
+                         Foreground="{Binding MarketChangeColor}"
+                         ToolTip="{Binding MarketChangeToolTip}"
+                         Visibility="{Binding ShowMarketChange, Converter={StaticResource BooleanToVisibility}}"
+                         FontSize="14" FontWeight="SemiBold" Margin="16,21,0,0"/>
+            </WrapPanel>
         </DockPanel>
 
         <StackPanel Grid.Row="1" Margin="0,0,0,14" Grid.IsSharedSizeScope="True">

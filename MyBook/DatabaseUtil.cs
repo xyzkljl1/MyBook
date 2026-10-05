@@ -3745,6 +3745,10 @@ namespace MyBook
 
             return new DashboardData
             {
+                MarketHoldings = holdings.Where(holding => holding.quantity != 0
+                    && holding.holdingType is HoldingType.NASDAQ or HoldingType.ARCA or HoldingType.SHANGHAI or HoldingType.Crypto).ToList(),
+                MarketBalances = balances,
+                MarketExchangeRates = exchangeRates,
                 AssetSummaryPoints = assetSummaryPoints,
                 CurrencySummaries = BuildCurrencySummaries(
                     balances,
