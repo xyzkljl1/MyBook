@@ -19,7 +19,7 @@ namespace MyBook
             async Task<List<RateHistory>> Read(bool reverse)
             {
                 var pair = reverse ? $"CNY-{currency}" : $"{currency}-CNY";
-                var html = await ReadGoogleFinancePage(currency, reverse).ConfigureAwait(false);
+                var html = await ReadGoogleFinancePage(currency, history: true, reverse).ConfigureAwait(false);
                 try { return ParseGoogleFinanceHistory(html, currency, sinceUtc, throughExclusiveUtc, DateTime.Now, reverse); }
                 catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException or OverflowException)
                 { throw new InvalidOperationException($"Google Finance GET www.google.com/finance/quote/{pair}: HTTP 200; invalid daily history ({e.GetType().Name})."); }
@@ -79,13 +79,39 @@ namespace MyBook
             }).ToList();
         }
 
-        private async Task<string> ReadGoogleFinancePage(CurrencyType currency, bool reverse = false)
+        public async Task<Currency?> FetchCurrencyToRmb(CurrencyType currencyType)
+        {
+            if (currencyType == CurrencyType.RMB)
+                return new Currency(1, CurrencyType.RMB);
+
+            try
+            {
+                return await ReadGoogleFinanceExchangeRate(currencyType).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"fail to fetch currency exchange rate {currencyType}/CNY: {e.Message}");
+            }
+
+            return null;
+        }
+
+        private async Task<Currency> ReadGoogleFinanceExchangeRate(CurrencyType currency)
+        {
+            var html = await ReadGoogleFinancePage(currency, history: false).ConfigureAwait(false);
+            var rate = ParseGoogleFinanceExchangeRate(html, currency.ToString());
+            if (rate is null or <= 0)
+                throw new InvalidOperationException($"Google Finance GET www.google.com/finance/quote/{currency}-CNY: HTTP 200; missing valid rate in HTML.");
+            return new Currency(rate.Value, CurrencyType.RMB);
+        }
+
+        private async Task<string> ReadGoogleFinancePage(CurrencyType currency, bool history, bool reverse = false)
         {
             var pair = reverse ? $"CNY-{currency}" : $"{currency}-CNY";
             var request = $"Google Finance GET www.google.com/finance/quote/{pair}";
             try
             {
-                using var response = await googleHttpClient.GetAsync($"https://www.google.com/finance/quote/{pair}?window=1M").ConfigureAwait(false);
+                using var response = await googleHttpClient.GetAsync($"https://www.google.com/finance/quote/{pair}?" + (history ? "window=1M" : "hl=en")).ConfigureAwait(false);
                 if (response.StatusCode != HttpStatusCode.OK)
                     throw new InvalidOperationException($"{request}: HTTP {(int)response.StatusCode}.");
                 return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -94,6 +120,15 @@ namespace MyBook
             { throw new InvalidOperationException($"{request}: {e.HttpRequestError}; HTTP {e.StatusCode?.ToString() ?? "unavailable"}."); }
             catch (OperationCanceledException)
             { throw new InvalidOperationException($"{request}: timeout; HTTP unavailable."); }
+        }
+
+        private static decimal? ParseGoogleFinanceExchangeRate(string html, string fromCurrency)
+        {
+            var match = Regex.Match(html, $@"""{Regex.Escape(fromCurrency)} / CNY""\s*,\s*3\s*,\s*null\s*,\s*\[(?<rate>\d+(?:\.\d+)?)", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            if (!match.Success)
+                return null;
+
+            return decimal.TryParse(match.Groups["rate"].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out var rate) ? rate : null;
         }
 
         public async Task<decimal> FetchGoogleFinanceStock(string code, string exchange = "NASDAQ")
