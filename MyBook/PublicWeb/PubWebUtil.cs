@@ -49,11 +49,6 @@ namespace MyBook
                     ret = new Currency(await FetchCNFund(finance.code).ConfigureAwait(false), CurrencyType.RMB);
                     break;
                 case HoldingType.Cash:
-                    var currencyType = Enum.TryParse<CurrencyType>(finance.code, out var parsedCurrencyType)
-                        ? parsedCurrencyType
-                        : finance.currentPrice.t;
-                    ret = await FetchCurrencyToRmb(currencyType).ConfigureAwait(false);
-                    break;
                 case HoldingType.Accrued:
                     break;
                 case HoldingType.Crypto:
@@ -117,26 +112,6 @@ namespace MyBook
                 result.Add(rate);
             }
             return result.Concat(reverseByDate.Values).OrderBy(r => r.rateDate).ToList();
-        }
-
-        public async Task FetchExchangeRates(IEnumerable<CurrencyType> currencyTypes)
-        {
-            var distinctCurrencyTypes = currencyTypes.Distinct().ToList();
-            var rates = await Task.WhenAll(distinctCurrencyTypes.Select(async currencyType =>
-                (CurrencyType: currencyType, Rate: await FetchCurrencyToRmb(currencyType).ConfigureAwait(false)))).ConfigureAwait(false);
-
-            foreach (var (currencyType, rate) in rates)
-            {
-                if (rate is null || rate.v < 0)
-                    continue;
-
-                var finance = new Finance(currencyType.ToString(), HoldingType.Cash)
-                {
-                    currentPrice = rate,
-                    currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds()
-                };
-                database?.SaveFinance(finance);
-            }
         }
 
         public Task<List<Holding>> Fetch(Account account)

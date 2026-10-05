@@ -383,16 +383,8 @@ namespace MyBook
                     .ToList();
                 if (missingFiatRates.Count > 0)
                 {
-                    using var pubWeb = new PubWebUtil(config, database);
-                    await pubWeb.FetchExchangeRates(missingFiatRates);
-                    data = database.GetDashboardData(DateTime.Today, effectiveMonthlyFlowStartMonth);
-                    missingFiatRates = data.MissingExchangeRateCurrencies
-                        .ToList();
-                    if (missingFiatRates.Count > 0)
-                    {
-                        throw new InvalidOperationException(
-                            $"缺少汇率：{String.Join("、", missingFiatRates)}");
-                    }
+                    throw new InvalidOperationException(
+                        $"缺少汇率：{String.Join("、", missingFiatRates)}");
                 }
 
                 var viewModel = DashboardViewModel.From(data);

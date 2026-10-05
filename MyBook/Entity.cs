@@ -158,7 +158,7 @@ namespace MyBook
         private decimal _quantity = 0;
     }
 
-    // 从互联网获取的最新股票价格或汇率，不关联 Account。
+    // 从互联网获取的最新资产价格，不关联 Account。
     [SugarIndex("unique_Finance_code_holding_type", nameof(Finance.code), OrderByType.Asc, nameof(Finance.holdingType), OrderByType.Asc, true)]
     [SugarTable("Finance")]
     public class Finance

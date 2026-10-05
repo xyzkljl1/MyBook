@@ -43,7 +43,7 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **Nexus:** monthly Donation Points income through GraphQL.
 - **Bilibili:** shell wallet balance through the website API, authenticated with `bilibili_cookie`.
 - **Steam:** account/wallet information through SteamKit2 and wallet transactions from authenticated purchase-history pages, both using `steam_proxy`. Run `dotnet MyBook.dll --steam-login` from the build-output directory to enter credentials and complete Steam Guard; `dotnet MyBook.dll --steam-login --saved` uses the stored session.
-- **Exchange rates:** daily historical quotes against CNY from Google Finance and Kylc bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR). Current valuation quotes are fetched separately from Google Finance.
+- **Exchange rates:** daily historical quotes against CNY from Google Finance and Kylc bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR).
 
 Configure the corresponding accounts and fixed import starting points before importing.
 

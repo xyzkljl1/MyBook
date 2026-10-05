@@ -3848,21 +3848,14 @@ namespace MyBook
 
         private Dictionary<CurrencyType, decimal> GetCurrencyToRmbRates()
         {
-            var rates = new Dictionary<CurrencyType, decimal>
-            {
-                [CurrencyType.RMB] = 1
-            };
-            var finances = db.Queryable<Finance>()
-                .Where(finance => finance.holdingType == HoldingType.Cash && finance._currentPrice_t == CurrencyType.RMB)
-                .ToList();
-            foreach (var finance in finances)
-            {
-                if (finance._currentPrice_v <= 0 || !Enum.TryParse<CurrencyType>(finance.code, out var currency))
-                    continue;
-
-                rates[currency] = finance._currentPrice_v;
-            }
-
+            var rates = db.Queryable<RateHistory>()
+                .Where(rate => rate.source == RateSource.GoogleFinance && rate.exchangeRateToRmb > 0
+                    && rate.rateDate == SqlFunc.Subqueryable<RateHistory>()
+                        .Where(other => other.source == rate.source && other.currency == rate.currency && other.exchangeRateToRmb > 0)
+                        .Max(other => other.rateDate))
+                .ToList().GroupBy(rate => rate.currency)
+                .ToDictionary(group => group.Key, group => group.MaxBy(rate => rate.Id)!.exchangeRateToRmb!.Value);
+            rates[CurrencyType.RMB] = 1;
             return rates;
         }
 
