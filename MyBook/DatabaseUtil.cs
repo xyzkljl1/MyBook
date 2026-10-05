@@ -36,7 +36,7 @@ namespace MyBook
         private const string BootstrapFixedDataSqlRelativePath = "Database/bootstrap.fixed-data.sql";
         private readonly SqlSugarClient db;
         private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
-        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(DestAccountRule), typeof(AccountBalance), typeof(LoginSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(Finance), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
+        private static readonly Type[] SchemaTypes = [typeof(Account), typeof(AccountInternalId), typeof(DestAccountRule), typeof(AccountBalance), typeof(LoginSession), typeof(PlaidItem), typeof(Record), typeof(AllocatedExpenseItem), typeof(Holding), typeof(RateHistory), typeof(Snapshot), typeof(SnapshotItem), typeof(StatementImport)];
         private static readonly HashSet<string> SchemaViewNames = ["AccountBalances"];
         private static readonly ForeignKeyDefinition[] ForeignKeys =
         [
@@ -741,14 +741,12 @@ namespace MyBook
 
         public List<bool> SaveStatementRecordsAndHoldingsOnce(
             IEnumerable<StatementRecordHoldingImport> imports,
-            IEnumerable<Finance>? finances = null,
             bool combineAccounts = false)
         {
             var importList = imports.ToList();
             var statements = combineAccounts
                 ? importList.GroupBy(import => (import.Provider, import.Time, import.StatementKey)).Select(group => group.ToList())
                 : importList.Select(import => new List<StatementRecordHoldingImport> { import });
-            var financeList = finances?.ToList() ?? [];
             var saved = new List<bool>();
             return ExecuteLockedTransaction(() =>
             {
@@ -793,8 +791,6 @@ namespace MyBook
 
                 ApplyAutomaticExpenseAllocationForStatements(savedStatementImportIds);
                 ProcessAllocatedExpenseDirtyRecordsCore();
-                foreach (var finance in financeList)
-                    SaveFinanceCore(finance);
                 return saved;
             });
         }
@@ -2451,22 +2447,6 @@ namespace MyBook
             return db.Queryable<Account>().ToList();
         }
 
-        public HoldingType GetKnownEquityHoldingType(string code)
-        {
-            var types = db.Queryable<Holding>()
-                .Where(holding => holding.code == code
-                    && (holding.holdingType == HoldingType.NASDAQ || holding.holdingType == HoldingType.ARCA))
-                .Select(holding => holding.holdingType).ToList()
-                .Concat(db.Queryable<Finance>()
-                    .Where(finance => finance.code == code
-                        && (finance.holdingType == HoldingType.NASDAQ || finance.holdingType == HoldingType.ARCA))
-                    .Select(finance => finance.holdingType).ToList())
-                .Distinct().ToList();
-            if (types.Count != 1)
-                throw new InvalidOperationException("Equity exchange metadata is missing or ambiguous; import product metadata first.");
-            return types[0];
-        }
-
         public AccountInternalId GetAccountInternalIdByDescription(Account account, string description)
         {
             var existingAccount = GetExistingAccountByName(account);
@@ -3848,21 +3828,14 @@ namespace MyBook
 
         private Dictionary<CurrencyType, decimal> GetCurrencyToRmbRates()
         {
-            var rates = new Dictionary<CurrencyType, decimal>
-            {
-                [CurrencyType.RMB] = 1
-            };
-            var finances = db.Queryable<Finance>()
-                .Where(finance => finance.holdingType == HoldingType.Cash && finance._currentPrice_t == CurrencyType.RMB)
-                .ToList();
-            foreach (var finance in finances)
-            {
-                if (finance._currentPrice_v <= 0 || !Enum.TryParse<CurrencyType>(finance.code, out var currency))
-                    continue;
-
-                rates[currency] = finance._currentPrice_v;
-            }
-
+            var rates = db.Queryable<RateHistory>()
+                .Where(rate => rate.source == RateSource.GoogleFinance && rate.exchangeRateToRmb > 0
+                    && rate.rateDate == SqlFunc.Subqueryable<RateHistory>()
+                        .Where(other => other.source == rate.source && other.currency == rate.currency
+                            && other.exchangeRateToRmb > 0).Max(other => other.rateDate))
+                .ToList().GroupBy(rate => rate.currency)
+                .ToDictionary(group => group.Key, group => group.MaxBy(rate => rate.Id)!.exchangeRateToRmb!.Value);
+            rates[CurrencyType.RMB] = 1;
             return rates;
         }
 
@@ -5050,7 +5023,6 @@ namespace MyBook
         public DatabaseCleanupResult CleanVolatileData(int? cleanToSnapshotId = null)
         {
             var beforeCounts = ReadCleanupCounts();
-            var preservedFinance = ReadFinancePreservationItems();
             ExecuteLockedTransaction(() =>
             {
                 var identifiers = ReadAccountIdentifierPreservationItems();
@@ -5059,7 +5031,6 @@ namespace MyBook
                     CleanToSnapshotCore(cleanToSnapshotId.Value);
                 else
                     CleanToStartSnapshotCore();
-                ValidateFinancePreserved(preservedFinance);
                 if (!identifiers.SequenceEqual(ReadAccountIdentifierPreservationItems()))
                     throw new InvalidOperationException("Database cleanup must not change AccountInternalIds rows.");
                 if (!plaidItems.SequenceEqual(ReadPlaidItemPreservationItems()))
@@ -5084,28 +5055,6 @@ namespace MyBook
             db.Queryable<PlaidItem>().OrderBy(item => item.Id).ToList()
                 .Select(item => (item.Id, item.environment, item.itemId, item.accessToken,
                     item.institutionId, item.institutionName, item.createdAtUtc, item.updateTimeUtc, item._account_Id)).ToList();
-
-        private List<FinancePreservationItem> ReadFinancePreservationItems()
-        {
-            return db.Queryable<Finance>()
-                .OrderBy(finance => finance.Id)
-                .ToList()
-                .Select(finance => new FinancePreservationItem(
-                    finance.Id,
-                    finance.code,
-                    finance.holdingType,
-                    finance._currentPrice_v,
-                    finance._currentPrice_t,
-                    finance.currentPriceTime))
-                .ToList();
-        }
-
-        private void ValidateFinancePreserved(List<FinancePreservationItem> expected)
-        {
-            var actual = ReadFinancePreservationItems();
-            if (!expected.SequenceEqual(actual))
-                throw new InvalidOperationException("Database cleanup must not change Finance rows.");
-        }
 
         private void CleanToStartSnapshotCore()
         {
@@ -5457,16 +5406,19 @@ namespace MyBook
                 ["StatementImports"] = db.Queryable<StatementImport>().Count(),
                 ["Records"] = db.Queryable<Record>().Count(),
                 ["Holdings"] = db.Queryable<Holding>().Count(),
-                ["Finance"] = db.Queryable<Finance>().Count(),
                 ["Snapshots"] = db.Queryable<Snapshot>().Count(),
                 ["SnapshotItems"] = db.Queryable<SnapshotItem>().Count()
             };
         }
 
-        public void SaveFinance(Finance finance)
-        {
-            ExecuteLockedTransaction(() => SaveFinanceCore(finance));
-        }
+        internal List<(string Code, HoldingType HoldingType)> GetMarketPriceTargets() => db.Queryable<Holding>()
+            .Where(holding => holding.quantity != 0 && (holding.holdingType == HoldingType.NASDAQ
+                || holding.holdingType == HoldingType.ARCA || holding.holdingType == HoldingType.SHANGHAI
+                || holding.holdingType == HoldingType.Crypto))
+            .Select(holding => new { holding.code, holding.holdingType }).ToList()
+            .Select(holding => (Code: holding.holdingType == HoldingType.Crypto
+                ? KrakenPubUtil.GetBaseAsset(holding.code) : holding.code, HoldingType: holding.holdingType))
+            .Distinct().OrderBy(target => target.Code).ToList();
 
         // The first inserted quote for each source and currency is fixed data.
         private List<int> GetFixedRateHistoryIds() => db.Queryable<RateHistory>()
@@ -5528,26 +5480,6 @@ namespace MyBook
             // Preserve the existing iFast rule: only fill missing Gross, never erase it.
             if (completeGross) existing.grossRate = rate.grossRate;
             return completeExchangeRate || completeGross;
-        }
-
-        private void SaveFinanceCore(Finance finance)
-        {
-            if (finance.currentPriceTime <= 0)
-                finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
-
-            var existing = db.Queryable<Finance>()
-                .Where(it => it.code == finance.code && it.holdingType == finance.holdingType)
-                .First();
-            if (existing is null)
-            {
-                finance.Id = db.Insertable(finance).ExecuteReturnIdentity();
-                return;
-            }
-
-            existing._currentPrice_v = finance._currentPrice_v;
-            existing._currentPrice_t = finance._currentPrice_t;
-            existing.currentPriceTime = finance.currentPriceTime;
-            db.Updateable(existing).ExecuteCommand();
         }
 
         public List<Record> GetRecordsByStatementImport(int statementImportId)
@@ -6033,8 +5965,6 @@ namespace MyBook
                 return "AllocatedExpenseItems";
             if (type == typeof(Holding))
                 return "Holdings";
-            if (type == typeof(Finance))
-                return "Finance";
             if (type == typeof(Snapshot))
                 return "Snapshots";
             if (type == typeof(SnapshotItem))
@@ -6340,14 +6270,6 @@ namespace MyBook
                 FOR EACH ROW {ActionStatement};
                 """;
         }
-
-        private sealed record FinancePreservationItem(
-            int Id,
-            string Code,
-            HoldingType HoldingType,
-            decimal CurrentPriceValue,
-            CurrencyType CurrentPriceCurrency,
-            long CurrentPriceTime);
 
     }
 

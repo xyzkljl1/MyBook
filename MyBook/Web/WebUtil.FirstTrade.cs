@@ -50,7 +50,7 @@ namespace MyBook
                             "Eastern Standard Time").Date).Max();
                     return last.HasValue && last.Value.Date > checkpoint.Date
                         ? last.Value.Date : checkpoint.Date;
-                }).ConfigureAwait(false);
+                }, database.GetKnownEquityMarkets()).ConfigureAwait(false);
                 stage = "validate and import account data";
                 timeout.Token.ThrowIfCancellationRequested();
                 sessionStore.EnsureLock();
@@ -82,11 +82,29 @@ namespace MyBook
                 imports.Add(BuildFirstTradeImport(capture, item, account,
                     database.GetCurrentAccountHoldings(account),
                     database.GetStatementRecords(StatementImportProvider.FirstTradeApi, account),
-                    database.GetKnownEquityHoldingType,
-                    (date, symbol, quantity) => database.GetFirstTradeTransferEvidence(account, date, symbol, quantity)));
+                    symbol => GetFirstTradeEquityHoldingType(item, symbol),
+                    (date, symbol, quantity) => database.GetFirstTradeTransferEvidence(account, date, symbol, quantity,
+                        GetFirstTradeEquityHoldingType(item, symbol))));
             }
             var saved = database.SaveStatementRecordsAndHoldingsOnce(imports);
             return imports.Where((_, index) => saved[index]).Sum(import => import.Records.Count);
+        }
+
+        internal static HoldingType GetFirstTradeEquityHoldingType(FirstTradeAccountCapture item, string symbol)
+            => item.EquityMarkets.TryGetValue(symbol, out var type) ? type
+                : throw new FirstTradeException($"missing exchange metadata for {symbol}");
+
+        internal static HoldingType ParseFirstTradeEquityMarket(JsonElement quote, string symbol)
+        {
+            if (!quote.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object
+                || FirstTradeText(result, "symbol") != symbol || FirstTradeNumber(result, "sec_type") != 1)
+                throw new FirstTradeException($"Quote: HTTP 200; missing or inconsistent equity metadata for {symbol}");
+            return FirstTradeText(result, "exchange") switch
+            {
+                "NASDAQ" => HoldingType.NASDAQ,
+                "NYSEARCA" => HoldingType.ARCA,
+                _ => throw new FirstTradeException($"Quote: HTTP 200; unsupported equity exchange for {symbol}")
+            };
         }
 
         internal static StatementRecordHoldingImport BuildFirstTradeImport(FirstTradeCapture capture,
@@ -328,6 +346,7 @@ namespace MyBook
             public JsonElement Balances { get; set; }
             public List<JsonElement> PositionPages { get; set; } = new();
             public List<JsonElement> HistoryPages { get; set; } = new();
+            public Dictionary<string, HoldingType> EquityMarkets { get; set; } = new(StringComparer.Ordinal);
             public string Csv { get; set; } = "";
             public string Ofx { get; set; } = "";
             public List<FirstTradeTransferEvidence> TransferEvidence { get; set; } = [];
@@ -335,9 +354,9 @@ namespace MyBook
 
         internal sealed class FirstTradeException(string message) : Exception("FirstTrade: " + message);
 
-        internal sealed class FirstTradeClient : IDisposable
+        internal sealed partial class FirstTradeClient : IDisposable
         {
-            private enum Endpoint { Bootstrap, Login, VerifyCode, Accounts, Balances, Positions, History }
+            private enum Endpoint { Bootstrap, Login, VerifyCode, Accounts, Balances, Positions, History, Quote }
             private static readonly Uri Origin = new("https://api3x.firstrade.com/");
             // Shared client value from firstrade-api/urls.py, not a personal session credential.
             private const string ClientToken = "833w3XuIFycv18ybi";
@@ -470,9 +489,11 @@ namespace MyBook
             }
 
             internal async Task<FirstTradeCapture> FetchAsync(CancellationToken token,
-                Func<string, DateTime>? historyFrom = null)
+                Func<string, DateTime>? historyFrom = null, Dictionary<string, HoldingType>? knownEquityMarkets = null)
             {
                 var result = new FirstTradeCapture { StartedAtUtc = DateTimeOffset.UtcNow };
+                // Markets are fixed; reuse Holdings metadata and share new symbols across this capture.
+                var markets = knownEquityMarkets ?? new Dictionary<string, HoldingType>(StringComparer.Ordinal);
                 var today = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(result.StartedAtUtc, "Eastern Standard Time").Date;
                 var accounts = await ReadAsync(Endpoint.Accounts, null, token).ConfigureAwait(false);
                 var items = RequiredItems(accounts);
@@ -495,10 +516,15 @@ namespace MyBook
                     var range = query + "&range=cust&range_arr%5B%5D=" + from.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
                         + "&range_arr%5B%5D=" + today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
                     var history = await ReadPagesAsync(Endpoint.History, range, 1000, token).ConfigureAwait(false);
+                    // Include closed positions that appear only in transaction history.
+                    foreach (var symbol in positions.Concat(history).SelectMany(page => RequiredItems(page).EnumerateArray())
+                        .Select(row => TextOrNull(row, "symbol")).Where(symbol => !String.IsNullOrWhiteSpace(symbol))
+                        .Select(symbol => symbol!).Distinct(StringComparer.Ordinal).Where(symbol => !markets.ContainsKey(symbol)))
+                        markets.Add(symbol, ParseFirstTradeEquityMarket(await ReadQuoteAsync(account, symbol, token).ConfigureAwait(false), symbol));
                     result.Accounts.Add(new FirstTradeAccountCapture
                     {
                         Account = account, HistoryFrom = from, HistoryThrough = today, Summary = item.Clone(),
-                        Balances = balances, PositionPages = positions, HistoryPages = history,
+                        Balances = balances, PositionPages = positions, HistoryPages = history, EquityMarkets = markets,
                         Csv = await DownloadExportAsync(account, from, today, csv: true, token).ConfigureAwait(false),
                         Ofx = await DownloadExportAsync(account, from, today, csv: false, token).ConfigureAwait(false)
                     });
@@ -507,6 +533,10 @@ namespace MyBook
                 SaveSession();
                 return result;
             }
+
+            internal Task<JsonElement> ReadQuoteAsync(string account, string symbol, CancellationToken token)
+                => ReadAsync(Endpoint.Quote, "account=" + Uri.EscapeDataString(account)
+                    + "&q=" + Uri.EscapeDataString(symbol), token);
 
             private async Task<List<JsonElement>> ReadPagesAsync(Endpoint endpoint, string query, int pageSize, CancellationToken token)
             {
@@ -628,6 +658,7 @@ namespace MyBook
                     Endpoint.Balances => ("/private/balances", HttpMethod.Get),
                     Endpoint.Positions => ("/private/positions", HttpMethod.Get),
                     Endpoint.History => ("/private/account_history", HttpMethod.Get),
+                    Endpoint.Quote => ("/public/quote", HttpMethod.Get),
                     _ => throw new FirstTradeException("endpoint is not allowed")
                 };
                 if ((method == HttpMethod.Post) != (form is not null))

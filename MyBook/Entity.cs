@@ -158,60 +158,6 @@ namespace MyBook
         private decimal _quantity = 0;
     }
 
-    // 从互联网获取的最新股票价格或汇率，不关联 Account。
-    [SugarIndex("unique_Finance_code_holding_type", nameof(Finance.code), OrderByType.Asc, nameof(Finance.holdingType), OrderByType.Asc, true)]
-    [SugarTable("Finance")]
-    public class Finance
-    {
-        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
-        public int Id { get; set; }
-
-        [SugarColumn(DefaultValue = "''")]
-        public string code { get; set; } = "";
-
-        [SugarColumn(DefaultValue = "NASDAQ", ColumnDataType = MySqlEnumColumnTypes.HoldingType, SqlParameterDbType = typeof(EnumToStringConvert))]
-        public HoldingType holdingType { get; set; } = HoldingType.NASDAQ;
-
-        [SugarColumn(IsIgnore = true)]
-        public Currency currentPrice
-        {
-            get { return new Currency(_currentPrice_v, _currentPrice_t); }
-            set
-            {
-                _currentPrice_v = value.v;
-                _currentPrice_t = value.t;
-            }
-        }
-
-        [SugarColumn(DefaultValue = "0")]
-        public long currentPriceTime { get; set; } = 0;
-
-        public Finance()
-        {
-        }
-
-        public Finance(string _c, HoldingType _t)
-        {
-            code = _c;
-            holdingType = _t;
-        }
-
-        public static Finance FromHolding(Holding holding)
-        {
-            var code = holding.holdingType == HoldingType.Cash
-                ? holding.currentPrice.t.ToString()
-                : holding.code;
-            return new Finance(code, holding.holdingType);
-        }
-
-        // 用于存储
-        [SugarColumn(DefaultValue = "0", ColumnDataType = MySqlDecimalColumnTypes.CurrencyValue)]
-        public decimal _currentPrice_v { get; set; } = 0;
-
-        [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]
-        public CurrencyType _currentPrice_t { get; set; } = CurrencyType.RMB;
-    }
-
     public enum RateSource { GoogleFinance, IFastWebsite, IFastMail, KylcCcb, KylcIcbc, KylcCib, KylcHfBank }
 
     [SugarTable("RateHistory")]

@@ -12,6 +12,43 @@ namespace MyBook
         private readonly SemaphoreSlim cacheLock = new(1, 1);
         private readonly Dictionary<(string Asset, DateTime Date), KrakenDailyPrice> cache = new();
 
+        internal async Task<List<MarketPrice>> FetchLatestUsdPricesAsync(IEnumerable<string> assets)
+        {
+            var symbols = assets.Select(GetBaseAsset).Distinct(StringComparer.Ordinal).ToList();
+            if (symbols.Count == 0) return [];
+            foreach (var symbol in symbols) ValidateSupportedAsset(symbol);
+            const string request = "Kraken GET api.kraken.com/0/public/Ticker";
+            try
+            {
+                var pairs = String.Join(",", symbols.Select(symbol => symbol + "USD"));
+                using var response = await sharedHttpClient.GetAsync(
+                    $"https://api.kraken.com/0/public/Ticker?pair={Uri.EscapeDataString(pairs)}&assetVersion=1").ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                    throw new InvalidOperationException($"{request}: HTTP {(int)response.StatusCode}.");
+                var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return ParseTickerPrices(text, symbols, DateTimeOffset.Now);
+            }
+            catch (HttpRequestException e) { throw new InvalidOperationException($"{request}: transport {e.HttpRequestError}."); }
+            catch (TaskCanceledException) { throw new InvalidOperationException($"{request}: timeout."); }
+            catch (Exception e) when (e is Newtonsoft.Json.JsonException or FormatException or OverflowException)
+            { throw new InvalidOperationException($"{request}: HTTP 200; invalid ticker response ({e.GetType().Name})."); }
+        }
+
+        internal static List<MarketPrice> ParseTickerPrices(string text, IReadOnlyList<string> symbols, DateTimeOffset fetchedAt)
+        {
+            const string request = "Kraken GET api.kraken.com/0/public/Ticker: HTTP 200";
+            var json = JObject.Parse(text);
+            if (json["error"] is not JArray errors || errors.Count != 0 || json["result"] is not JObject result)
+                throw new InvalidOperationException($"{request}; ticker API error or missing result.");
+            return symbols.Select(symbol =>
+            {
+                var value = result[symbol + "/USD"]?["c"]?[0]?.Value<string>();
+                if (!Decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var price) || price <= 0)
+                    throw new InvalidOperationException($"{request}; missing positive {symbol}/USD last trade price.");
+                return new MarketPrice(symbol, HoldingType.Crypto, price, CurrencyType.USD, fetchedAt);
+            }).ToList();
+        }
+
         public async Task<KrakenDailyPriceSet> FetchDailyUsdPricesAsync(
             IEnumerable<string> assets,
             DateTime firstDate,

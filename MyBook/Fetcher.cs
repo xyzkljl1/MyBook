@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using System;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -24,6 +25,9 @@ namespace MyBook
         SIMUtil sim = null!;
         Timer? dailyTimer;
         Timer? simTimer;
+        Timer? marketPriceTimer;
+        int marketPricesRunning;
+        readonly ConcurrentDictionary<(string Code, HoldingType Type), MarketPrice> marketPrices = new();
         readonly SemaphoreSlim fetchLock = new(1, 1);
         readonly SemaphoreSlim simPollLock = new(1, 1);
         readonly object runtimeStatusLock = new();
@@ -56,6 +60,7 @@ namespace MyBook
             sim = new(database);
             dailyTimer?.Dispose();
             simTimer?.Dispose();
+            marketPriceTimer?.Dispose();
             UpdateRuntimeStatus(status => status.IsScheduledFetchEnabled = true);
             dailyTimer = new Timer(
                 _ => RunDailyFetchInBackground(),
@@ -63,9 +68,35 @@ namespace MyBook
                 TimeSpan.Zero,
                 TimeSpan.FromDays(1));
             StartSIMPolling();
-            //pubWeb.Fetch(new Finance("QQQ", HoldingType.NASDAQ));
-            //pubWeb.Fetch(new Finance("021282", HoldingType.CNFUND));
+            marketPriceTimer = new Timer(_ => RunMarketPricesInBackground(), null,
+                TimeSpan.Zero, TimeSpan.FromMinutes(15));
         }
+
+        private void RunMarketPricesInBackground()
+        {
+            if (Interlocked.CompareExchange(ref marketPricesRunning, 1, 0) != 0)
+                return;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // Only read the held symbols; live quotes never update accounting data.
+                    var targets = new DatabaseUtil(config).GetMarketPriceTargets();
+                    using var quotes = new PubWebUtil(config);
+                    await quotes.FetchMarketPricesAsync(targets, new KrakenPubUtil(), CacheMarketPrice).ConfigureAwait(false);
+                }
+                catch (Exception e)
+                {
+                    CreateImportFailureMarker("market prices", e);
+                    Console.WriteLine($"market prices failed: {e.Message}");
+                }
+                finally { Volatile.Write(ref marketPricesRunning, 0); }
+            });
+        }
+
+        internal IReadOnlyList<MarketPrice> GetMarketPrices() => marketPrices.Values.ToArray();
+
+        private void CacheMarketPrice(MarketPrice quote) => marketPrices[(quote.Code, quote.HoldingType)] = quote;
 
         private static bool IsDebugBuild()
         {
@@ -376,11 +407,15 @@ namespace MyBook
                 runtimeStatus.NextFetchTime = null;
             }
             simTimer?.Dispose();
+            marketPriceTimer?.Dispose();
             pubWeb?.Dispose();
             fetchLock.Dispose();
             simPollLock.Dispose();
         }
     }
+
+    internal sealed record MarketPrice(string Code, HoldingType HoldingType, decimal Price,
+        CurrencyType Currency, DateTimeOffset FetchedAt);
 
     public class FetchRuntimeStatus
     {

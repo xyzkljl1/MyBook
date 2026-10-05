@@ -34,16 +34,17 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **iFAST:** transaction emails and local monthly statements; interest rates from update emails and the official website.
 - **ZA:** transaction notification emails.
 - **Ant / Ele:** one configured account per bank, with transaction notifications fetched from Yahoo Mail.
-- **FirstTrade:** balances, holdings and history through the account API, plus CSV/OFX downloads using the same login session and kept in memory.
+- **FirstTrade:** balances, holdings, transaction history and security information through the account API, plus CSV/OFX downloads using the same login session and kept in memory.
 - **Wise:** multi-currency balances, activities, transfer details and payment receipts through a read-only personal-token API.
 - **Schwab:** investment account data through Plaid.
 - **PayPal:** transaction information from each account's linked Plaid connection and mailbox.
+- **Stock and crypto quotes:** Google Finance for US stocks and ETFs, the existing public quote source for Shanghai stocks, and Kraken public Ticker for cryptocurrencies.
 - **Kraken:** balances and ledger entries through a read-only API; prices through public market-data endpoints.
 - **Ethereum:** transactions and balances for configured addresses through blockchain query endpoints; prices through public market-data endpoints.
 - **Nexus:** monthly Donation Points income through GraphQL.
 - **Bilibili:** shell wallet balance through the website API, authenticated with `bilibili_cookie`.
 - **Steam:** account/wallet information through SteamKit2 and wallet transactions from authenticated purchase-history pages, both using `steam_proxy`. Run `dotnet MyBook.dll --steam-login` from the build-output directory to enter credentials and complete Steam Guard; `dotnet MyBook.dll --steam-login --saved` uses the stored session.
-- **Exchange rates:** daily historical quotes against CNY from Google Finance and Kylc bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR). Current valuation quotes are fetched separately from Google Finance.
+- **Exchange rates:** daily historical quotes against CNY from Google Finance and Kylc bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR). Currency valuations use the latest available Google historical rates.
 
 Configure the corresponding accounts and fixed import starting points before importing.
 
@@ -122,6 +123,8 @@ Import progress and scheduling use dates in the runtime machine's local time zon
 Historical rate timestamps use local time, separately from retrieval time. Kylc supplies dates only; its dates use Beijing midnight converted to local time as date markers, not actual publication times.
 
 Release builds check for daily imports immediately on startup and every 24 hours afterward, fetching exchange rates first. Automatic cycles are attempted at most once per local calendar day, including across restarts; a failed or interrupted cycle waits until a later day unless retried manually. Debug builds do not schedule imports. Each cycle runs configured, enabled integrations whose query intervals have elapsed. Intervals must be positive and become due on the specified day. Failed queries do not restart the interval. A zero missing-report deadline disables only overdue errors, not network, parsing or financial validation errors.
+
+Release builds also fetch current stock and cryptocurrency holding prices on startup and every 15 minutes. Live quotes stay in memory and are fetched again after a restart. Quotes may be delayed by their source or reflect the last trading session when markets are closed. Debug builds do not schedule quote fetching.
 
 SMS polling uses its own configured interval. Mail imports share IMAP sessions and download matching attachments.
 

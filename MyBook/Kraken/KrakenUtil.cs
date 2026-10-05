@@ -138,9 +138,7 @@ namespace MyBook
 
             var quantitiesAtCompletedEnd = DeriveQuantitiesAt(currentBalances, ledgers, rangeEndUtc);
             ValidateQuantitiesEqual(previousQuantities, quantitiesAtCompletedEnd, $"Kraken ending balance {lastCompletedUtcDate:yyyy-MM-dd}");
-            var saved = db.SaveStatementRecordsAndHoldingsOnce(
-                imports,
-                CreateLatestPrices(prices, cryptoAssets, lastCompletedUtcDate));
+            var saved = db.SaveStatementRecordsAndHoldingsOnce(imports);
             Console.WriteLine(
                 $"Fetch Kraken daily reports done: range={firstDate:yyyy-MM-dd}..{lastCompletedUtcDate:yyyy-MM-dd}, "
                 + $"ledgers={ledgers.Count}, saved={saved.Count(value => value)}, skipped={saved.Count(value => !value)}");
@@ -563,19 +561,6 @@ namespace MyBook
                         $"Kraken valuation; asset={asset}; endingValue={endingValue}; repricedBeginning={repricedBeginningValue}; eventValue={eventValue}; close={currentPrice.CloseUsd}; closeDate={currentPrice.SourceCandleDate:yyyy-MM-dd}");
                 }
             }
-        }
-
-        private static List<Finance> CreateLatestPrices(KrakenDailyPriceSet prices, IEnumerable<string> assets, DateTime date)
-        {
-            return assets.Select(KrakenPubUtil.GetBaseAsset).Distinct(StringComparer.Ordinal).Select(asset =>
-            {
-                var price = prices.Get(asset, date);
-                return new Finance(asset, HoldingType.Crypto)
-                {
-                    currentPrice = new Currency(price.CloseUsd, CurrencyType.USD),
-                    currentPriceTime = new DateTimeOffset(DateTime.SpecifyKind(date.AddDays(1), DateTimeKind.Utc)).ToUnixTimeSeconds()
-                };
-            }).ToList();
         }
 
         private async Task<JObject> PostPrivateAsync(

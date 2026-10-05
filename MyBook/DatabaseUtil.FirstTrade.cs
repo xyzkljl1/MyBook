@@ -2,11 +2,17 @@ namespace MyBook;
 
 partial class DatabaseUtil
 {
-    internal WebUtil.FirstTradeTransferEvidence GetFirstTradeTransferEvidence(Account account, DateTime date, string symbol, decimal quantity)
+    internal Dictionary<string, HoldingType> GetKnownEquityMarkets() => db.Queryable<Holding>()
+        .Where(holding => holding.holdingType == HoldingType.NASDAQ || holding.holdingType == HoldingType.ARCA)
+        .Select(holding => new { holding.code, holding.holdingType }).ToList()
+        .GroupBy(holding => holding.code, StringComparer.Ordinal)
+        .ToDictionary(group => group.Key, group => group.First().holdingType, StringComparer.Ordinal);
+
+    internal WebUtil.FirstTradeTransferEvidence GetFirstTradeTransferEvidence(Account account, DateTime date, string symbol,
+        decimal quantity, HoldingType holdingType)
     {
         var since = date.AddDays(-7);
         var until = date.AddDays(8);
-        var holdingType = GetKnownEquityHoldingType(symbol);
         var accounts = GetAllAccounts().ToDictionary(a => a.name, StringComparer.OrdinalIgnoreCase);
         var rows = db.Queryable<Record>().Includes(r => r.Holding).Includes(r => r.Account)
             .Where(r => r._account_Id != account.Id && r.date >= since && r.date < until

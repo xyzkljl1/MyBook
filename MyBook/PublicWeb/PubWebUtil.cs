@@ -23,36 +23,32 @@ namespace MyBook
             googleHttpClient = CreateHttpClient(ParsePubWebProxyConfig(config["pubweb_google_proxy"], "pubweb_google_proxy"));
         }
 
-        public Task<Currency?> Fetch(Holding holding)
+        public Task<MarketPrice?> Fetch(Holding holding)
         {
-            return Fetch(Finance.FromHolding(holding));
+            return Fetch(holding.code, holding.holdingType);
         }
 
-        public async Task<Currency?> Fetch(Finance finance)
+        public async Task<MarketPrice?> Fetch(string code, HoldingType holdingType)
         {
             Currency? ret = null;
-            switch (finance.holdingType)
+            switch (holdingType)
             {
                 case HoldingType.NASDAQ:
-                    ret = new Currency(await FetchGoogleFinanceStock(finance.code, "NASDAQ").ConfigureAwait(false), CurrencyType.USD);
+                    ret = new Currency(await FetchGoogleFinanceStock(code, "NASDAQ").ConfigureAwait(false), CurrencyType.USD);
                     break;
                 case HoldingType.ARCA:
-                    ret = new Currency(await FetchGoogleFinanceStock(finance.code, "NYSEARCA").ConfigureAwait(false), CurrencyType.USD);
+                    ret = new Currency(await FetchGoogleFinanceStock(code, "NYSEARCA").ConfigureAwait(false), CurrencyType.USD);
                     break;
                 case HoldingType.UST:
                     Console.WriteLine("skip UST price: fetcher is not configured");
                     break;
                 case HoldingType.SHANGHAI:
-                    ret = new Currency(await FetchShanghaiStock(finance.code).ConfigureAwait(false), CurrencyType.RMB);
+                    ret = new Currency(await FetchShanghaiStock(code).ConfigureAwait(false), CurrencyType.RMB);
                     break;
                 case HoldingType.CNFUND:
-                    ret = new Currency(await FetchCNFund(finance.code).ConfigureAwait(false), CurrencyType.RMB);
+                    ret = new Currency(await FetchCNFund(code).ConfigureAwait(false), CurrencyType.RMB);
                     break;
                 case HoldingType.Cash:
-                    var currencyType = Enum.TryParse<CurrencyType>(finance.code, out var parsedCurrencyType)
-                        ? parsedCurrencyType
-                        : finance.currentPrice.t;
-                    ret = await FetchCurrencyToRmb(currencyType).ConfigureAwait(false);
                     break;
                 case HoldingType.Accrued:
                     break;
@@ -60,15 +56,8 @@ namespace MyBook
                     break;
             }
 
-            ret = ret is null || ret.v < 0 ? null : ret;
-            if (ret is not null)
-            {
-                finance.currentPrice = ret;
-                finance.currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds();
-                database?.SaveFinance(finance);
-            }
-
-            return ret;
+            return ret is null || ret.v <= 0 ? null
+                : new MarketPrice(code, holdingType, ret.v, ret.t, DateTimeOffset.Now);
         }
 
         internal async Task FetchScheduledExchangeRates()
@@ -119,24 +108,30 @@ namespace MyBook
             return result.Concat(reverseByDate.Values).OrderBy(r => r.rateDate).ToList();
         }
 
-        public async Task FetchExchangeRates(IEnumerable<CurrencyType> currencyTypes)
+        internal async Task FetchMarketPricesAsync(IReadOnlyList<(string Code, HoldingType HoldingType)> targets,
+            KrakenPubUtil kraken, Action<MarketPrice> onPrice)
         {
-            var distinctCurrencyTypes = currencyTypes.Distinct().ToList();
-            var rates = await Task.WhenAll(distinctCurrencyTypes.Select(async currencyType =>
-                (CurrencyType: currencyType, Rate: await FetchCurrencyToRmb(currencyType).ConfigureAwait(false)))).ConfigureAwait(false);
-
-            foreach (var (currencyType, rate) in rates)
+            var errors = new List<Exception>();
+            foreach (var target in targets.Where(target => target.HoldingType != HoldingType.Crypto))
             {
-                if (rate is null || rate.v < 0)
-                    continue;
-
-                var finance = new Finance(currencyType.ToString(), HoldingType.Cash)
+                try
                 {
-                    currentPrice = rate,
-                    currentPriceTime = DateTimeOffset.Now.ToUnixTimeSeconds()
-                };
-                database?.SaveFinance(finance);
+                    var quote = await Fetch(target.Code, target.HoldingType).ConfigureAwait(false)
+                        ?? throw new InvalidOperationException($"Missing market price: {target.Code} ({target.HoldingType}).");
+                    onPrice(quote);
+                }
+                catch (Exception e) { errors.Add(e); }
             }
+            try
+            {
+                var crypto = await kraken.FetchLatestUsdPricesAsync(targets
+                    .Where(target => target.HoldingType == HoldingType.Crypto).Select(target => target.Code)).ConfigureAwait(false);
+                foreach (var quote in crypto)
+                    onPrice(quote);
+            }
+            catch (Exception e) { errors.Add(e); }
+            if (errors.Count > 0)
+                throw new AggregateException("Market price requests failed.", errors);
         }
 
         public Task<List<Holding>> Fetch(Account account)

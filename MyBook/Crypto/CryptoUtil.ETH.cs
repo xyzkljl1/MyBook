@@ -39,8 +39,7 @@ namespace MyBook
                     cancellationToken).ConfigureAwait(false));
             cancellationToken.ThrowIfCancellationRequested();
             // All addresses and days commit together; each day has one shared statement.
-            var saved = database.SaveStatementRecordsAndHoldingsOnce(imports.OrderBy(import => import.RecordDate),
-                CreateLatestPrices(prices, ["ETH", "USDT"], lastCompletedDate), combineAccounts: true);
+            var saved = database.SaveStatementRecordsAndHoldingsOnce(imports.OrderBy(import => import.RecordDate), combineAccounts: true);
             Console.WriteLine($"Fetch Ethereum daily reports done: accounts={accounts.Count}; saved={saved.Count(value => value)}");
         }
 
@@ -239,19 +238,6 @@ namespace MyBook
                         $"{sourcePrefix} valuation; asset={asset}; endingValue={endingValue}; repricedBeginning={repricedBeginningValue}; eventValue={eventValue}; close={currentPrice.CloseUsd}; closeDate={currentPrice.SourceCandleDate:yyyy-MM-dd}"));
                 }
             }
-        }
-
-        private static List<Finance> CreateLatestPrices(KrakenDailyPriceSet prices, IEnumerable<string> assets, DateTime date)
-        {
-            return assets.Distinct(StringComparer.Ordinal).Select(asset =>
-            {
-                var price = prices.Get(asset, date);
-                return new Finance(KrakenPubUtil.GetBaseAsset(asset), HoldingType.Crypto)
-                {
-                    currentPrice = new Currency(price.CloseUsd, CurrencyType.USD),
-                    currentPriceTime = new DateTimeOffset(DateTime.SpecifyKind(date.AddDays(1), DateTimeKind.Utc)).ToUnixTimeSeconds()
-                };
-            }).ToList();
         }
 
         private async Task<List<EthereumAssetEvent>> FetchEventsAsync(

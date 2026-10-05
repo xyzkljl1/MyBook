@@ -62,17 +62,6 @@ CREATE TABLE `plaiditems` (
   CONSTRAINT `fk_PlaidItems_account` FOREIGN KEY (`_account_Id`) REFERENCES `accounts` (`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `finance` (
-  `Id` int NOT NULL AUTO_INCREMENT,
-  `code` varchar(255) NOT NULL DEFAULT '',
-  `holdingType` enum('NASDAQ','ARCA','UST','SHANGHAI','CNFUND','Cash','Accrued','Crypto') NOT NULL DEFAULT 'NASDAQ',
-  `currentPriceTime` bigint NOT NULL DEFAULT '0',
-  `_currentPrice_v` decimal(30,18) NOT NULL DEFAULT '0.000000000000000000',
-  `_currentPrice_t` enum('RMB','USD','JPY','SGD','HKD','GBP','EUR') NOT NULL DEFAULT 'RMB',
-  PRIMARY KEY (`Id`),
-  UNIQUE KEY `unique_Finance_code_holding_type` (`code`,`holdingType`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 CREATE TABLE `statementimports` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `provider` enum('IBKRReportMail','ICBCBillMail','BOCBillMail','ICBCHistoryDetailMail','ICBCSIMSMS','BOCSIMSMS','NexusDpMonthlyReport','KrakenApi','EthereumApi','PayPalUS','Manual','IFastMail','ZAMail','FirstTradeApi','PlaidSchwab','WiseApi','AntMail','EleMail','PayPalCN','BilibiliWeb','SteamWeb','DailyFetch') NOT NULL DEFAULT 'Manual',
