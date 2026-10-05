@@ -157,9 +157,12 @@
                 <TextBox Style="{StaticResource SelectableText}"
                          Text="{Binding MarketChangeText, Mode=OneWay}"
                          Foreground="{Binding MarketChangeColor}"
-                         ToolTip="{Binding MarketChangeToolTip}"
                          Visibility="{Binding ShowMarketChange, Converter={StaticResource BooleanToVisibility}}"
                          FontSize="14" FontWeight="SemiBold" Margin="16,21,0,0"/>
+                <TextBox Style="{StaticResource SelectableText}"
+                         Text="{Binding MarketChangeTimeText, Mode=OneWay}"
+                         Visibility="{Binding ShowMarketChange, Converter={StaticResource BooleanToVisibility}}"
+                         FontSize="12" Foreground="#64748B" Margin="8,22,0,0"/>
             </WrapPanel>
         </DockPanel>
 

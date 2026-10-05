@@ -116,22 +116,34 @@ namespace MyBook
             {
                 try
                 {
-                    var quote = await Fetch(target.Code, target.HoldingType).ConfigureAwait(false)
-                        ?? throw new InvalidOperationException($"Missing market price: {target.Code} ({target.HoldingType}).");
+                    var quote = await FetchWithRetry(async () =>
+                        await Fetch(target.Code, target.HoldingType).ConfigureAwait(false)
+                        ?? throw new InvalidOperationException($"Missing market price: {target.Code} ({target.HoldingType}).")).ConfigureAwait(false);
                     onPrice(quote);
                 }
                 catch (Exception e) { errors.Add(e); }
             }
             try
             {
-                var crypto = await kraken.FetchLatestUsdPricesAsync(targets
-                    .Where(target => target.HoldingType == HoldingType.Crypto).Select(target => target.Code)).ConfigureAwait(false);
+                var crypto = await FetchWithRetry(() => kraken.FetchLatestUsdPricesAsync(targets
+                    .Where(target => target.HoldingType == HoldingType.Crypto).Select(target => target.Code))).ConfigureAwait(false);
                 foreach (var quote in crypto)
                     onPrice(quote);
             }
             catch (Exception e) { errors.Add(e); }
             if (errors.Count > 0)
                 throw new AggregateException("Market price requests failed.", errors);
+
+            static async Task<T> FetchWithRetry<T>(Func<Task<T>> fetch)
+            {
+                // Three attempts in total; retry only the failed quote request.
+                for (var attempt = 1; ; attempt++)
+                {
+                    try { return await fetch().ConfigureAwait(false); }
+                    catch (Exception) when (attempt < 3)
+                    { await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false); }
+                }
+            }
         }
 
         public Task<List<Holding>> Fetch(Account account)

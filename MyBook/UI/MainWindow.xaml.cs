@@ -675,9 +675,9 @@ namespace MyBook
         public TotalAssetsViewModel TotalAssets { get; set; } = new();
         public bool ShowMarketChange { get; private set; }
         public decimal? MarketChangeRmb { get; private set; }
-        public string MarketChangeText { get; private set; } = "本日浮动 —";
-        public string MarketChangeToolTip { get; private set; } = "尚无可用实时报价。";
-        public string MarketChangeColor => MarketChangeRmb > 0 ? "#047857" : MarketChangeRmb < 0 ? "#B91C1C" : "#64748B";
+        public string MarketChangeText { get; private set; } = "—";
+        public string MarketChangeTimeText { get; private set; } = "";
+        public string MarketChangeColor => MarketChangeRmb > 0 ? "#047857" : MarketChangeRmb < 0 || MarketChangeText == "error" ? "#B91C1C" : "#64748B";
         public List<CurrencySummaryViewModel> CurrencySummaries { get; set; } = [];
         public List<AssetSummaryViewModel> AssetSummaries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
@@ -1180,28 +1180,26 @@ namespace MyBook
             // Apply price differences to the displayed balance baseline before rounding RMB values,
             // so this equals the revalued total minus the unchanged book total, even at cent boundaries.
             var balances = marketBalances.ToDictionary(balance => (balance._account_Id, balance.t), balance => balance.v);
-            decimal? amount = times.Count == 0 ? null : changes.Sum(change =>
+            decimal? amount = times.Count == 0 || times.Count < marketHoldings.Count ? null : changes.Sum(change =>
             {
                 var baseline = balances.GetValueOrDefault(change.Key);
                 var rate = marketExchangeRates[change.Key.Currency];
                 return Currency.RoundMoney((baseline + change.Value) * rate) - Currency.RoundMoney(baseline * rate);
             });
             var text = amount.HasValue
-                ? $"本日浮动 {(amount > 0 ? "+" : amount < 0 ? "-" : "")}¥{Math.Abs(amount.Value):N2}"
-                    + (times.Count < marketHoldings.Count ? "（部分报价）" : "")
-                : "本日浮动 —";
-            var detail = "实时报价相对当前账面估值的差额，可能包含多日价格变动；不计入原总额。\n"
-                + $"报价覆盖：{times.Count}/{marketHoldings.Count} 项持仓。"
-                + (times.Count == 0 ? " 尚无可用实时报价。"
-                    : $"\n报价获取时间：{times.Min().LocalDateTime:yyyy-MM-dd HH:mm:ss} 至 {times.Max().LocalDateTime:yyyy-MM-dd HH:mm:ss}。");
-            if (MarketChangeRmb == amount && MarketChangeText == text && MarketChangeToolTip == detail)
+                ? $"{(amount > 0 ? "+" : amount < 0 ? "-" : "")}¥{Math.Abs(amount.Value):N2}"
+                : times.Count > 0 ? "error" : "—";
+            var timeText = times.Count == 0 ? ""
+                : times.Min() == times.Max() ? $"{times.Min().LocalDateTime:MM-dd HH:mm:ss}"
+                : $"{times.Min().LocalDateTime:MM-dd HH:mm:ss} – {times.Max().LocalDateTime:MM-dd HH:mm:ss}";
+            if (MarketChangeRmb == amount && MarketChangeText == text && MarketChangeTimeText == timeText)
                 return;
             MarketChangeRmb = amount;
             MarketChangeText = text;
-            MarketChangeToolTip = detail;
+            MarketChangeTimeText = timeText;
             OnPropertyChanged(nameof(MarketChangeRmb));
             OnPropertyChanged(nameof(MarketChangeText));
-            OnPropertyChanged(nameof(MarketChangeToolTip));
+            OnPropertyChanged(nameof(MarketChangeTimeText));
             OnPropertyChanged(nameof(MarketChangeColor));
         }
 
