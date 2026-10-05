@@ -39,14 +39,17 @@ namespace MyBook
 
         public void RunSchedule()
         {
+            config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
+            marketPriceTimer?.Dispose();
+            marketPriceTimer = new Timer(_ => RunMarketPricesInBackground(), null,
+                TimeSpan.Zero, TimeSpan.FromMinutes(15));
             if (IsDebugBuild())
             {
-                Console.WriteLine("skip scheduled fetch in DEBUG");
+                Console.WriteLine("skip scheduled imports in DEBUG");
                 ResetRuntimeStatus();
                 return;
             }
 
-            config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
             database = new(config);
             mail = new(config, database);
             pubWeb = new(config, database);
@@ -60,7 +63,6 @@ namespace MyBook
             sim = new(database);
             dailyTimer?.Dispose();
             simTimer?.Dispose();
-            marketPriceTimer?.Dispose();
             UpdateRuntimeStatus(status => status.IsScheduledFetchEnabled = true);
             dailyTimer = new Timer(
                 _ => RunDailyFetchInBackground(),
@@ -68,8 +70,6 @@ namespace MyBook
                 TimeSpan.Zero,
                 TimeSpan.FromDays(1));
             StartSIMPolling();
-            marketPriceTimer = new Timer(_ => RunMarketPricesInBackground(), null,
-                TimeSpan.Zero, TimeSpan.FromMinutes(15));
         }
 
         private void RunMarketPricesInBackground()

@@ -124,7 +124,7 @@ Historical rate timestamps use local time, separately from retrieval time. Kylc 
 
 Release builds check for daily imports immediately on startup and every 24 hours afterward, fetching exchange rates first. Automatic cycles are attempted at most once per local calendar day, including across restarts; a failed or interrupted cycle waits until a later day unless retried manually. Debug builds do not schedule imports. Each cycle runs configured, enabled integrations whose query intervals have elapsed. Intervals must be positive and become due on the specified day. Failed queries do not restart the interval. A zero missing-report deadline disables only overdue errors, not network, parsing or financial validation errors.
 
-Release builds also fetch current stock and cryptocurrency holding prices on startup and every 15 minutes. Live quotes stay in memory and are fetched again after a restart. Quotes may be delayed by their source or reflect the last trading session when markets are closed. Debug builds do not schedule quote fetching.
+Both Debug and Release builds fetch current stock and cryptocurrency holding prices on startup and every 15 minutes. Live quotes stay in memory and are fetched again after a restart. Quotes may be delayed by their source or reflect the last trading session when markets are closed.
 
 SMS polling uses its own configured interval. Mail imports share IMAP sessions and download matching attachments.
 
