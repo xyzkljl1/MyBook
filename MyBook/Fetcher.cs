@@ -171,7 +171,7 @@ namespace MyBook
                 if (web.IsFirstTradeConfigured)
                     await RunScheduledImportTaskAsync("FirstTrade", StatementImportProvider.FirstTradeApi,
                         (_, _) => web.FetchFirstTradeAsync(),
-                        intervalDays: 7, missingAfterDays: 0, advanceOnEmptyQuery: true).ConfigureAwait(false);
+                        intervalDays: 7, missingAfterDays: 0).ConfigureAwait(false);
                 await RunScheduledImportTaskAsync("Plaid Schwab", StatementImportProvider.PlaidSchwab,
                     (since, _) => plaid.FetchSchwabAsync(since), intervalDays: 1, missingAfterDays: 0).ConfigureAwait(false);
                 if (wise.IsConfigured)

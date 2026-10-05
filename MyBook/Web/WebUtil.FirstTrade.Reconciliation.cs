@@ -16,11 +16,12 @@ partial class WebUtil
         decimal Quantity, decimal Price, decimal Amount, string Description, string? Subaccount = null,
         string? FitId = null, decimal? Commission = null, decimal? Fees = null);
 
-    private static List<FirstTradeTransaction> ReconcileFirstTradeSources(FirstTradeAccountCapture item)
+    private static List<FirstTradeTransaction>? ReconcileFirstTradeSources(FirstTradeAccountCapture item)
     {
         var csv = ReadFirstTradeCsv(item.Csv);
         var (ofx, asOf) = ReadFirstTradeOfx(item);
         var result = new List<FirstTradeTransaction>();
+        var pending = false;
         var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var row in item.HistoryPages.SelectMany(p => p.GetProperty("items").EnumerateArray()))
         {
@@ -38,33 +39,34 @@ partial class WebUtil
             var tx = new FirstTradeTransaction("", date, type, description, subaccount, symbol, quantity, price, amount);
             var csvRow = Match(csv, tx, "CSV");
             var ofxRow = Match(ofx, tx, "OFX");
-            // Exports can lag the live API. Settled rows must reconcile; security transfers are absent from OFX.
+            // Missing rows after the report's coverage date are normal publication lag.
+            // Validate the rest of the capture before waiting, so lag cannot hide covered-row conflicts.
+            var requiresOfx = !(type == "OTHER" && quantity != 0);
             if (date <= asOf && csvRow is null) throw new FirstTradeException($"CSV missing history transaction on {date:yyyy-MM-dd}");
-            if (date <= asOf && ofxRow is null && !(type == "OTHER" && quantity != 0))
+            if (date <= asOf && ofxRow is null && requiresOfx)
                 throw new FirstTradeException($"OFX missing history transaction on {date:yyyy-MM-dd}");
-            if (csvRow?.Settlement is DateTime csvSettlement && ofxRow?.Settlement is DateTime ofxSettlement && csvSettlement != ofxSettlement)
+            if (csvRow is null || ofxRow is null && requiresOfx)
+            {
+                pending = true;
+                continue;
+            }
+            if (csvRow.Settlement is DateTime csvSettlement && ofxRow?.Settlement is DateTime ofxSettlement && csvSettlement != ofxSettlement)
                 throw new FirstTradeException("CSV/OFX settlement dates disagree");
-            if (csvRow?.Commission is decimal c && ofxRow?.Commission is decimal oc && c != oc
-                || csvRow?.Fees is decimal f && ofxRow?.Fees is decimal of && f != of)
+            if (csvRow.Commission is decimal c && ofxRow?.Commission is decimal oc && c != oc
+                || csvRow.Fees is decimal f && ofxRow?.Fees is decimal of && f != of)
                 throw new FirstTradeException("CSV/OFX charge details disagree");
-            var commission = csvRow?.Commission ?? ofxRow?.Commission ?? 0;
-            var fees = csvRow?.Fees ?? ofxRow?.Fees;
-            var assumed = false;
+            var commission = csvRow.Commission ?? ofxRow?.Commission ?? 0;
+            var fees = csvRow.Fees ?? ofxRow?.Fees ?? 0;
             if (commission < 0 || fees < 0 || Decimal.Round(commission, 2) != commission
-                || fees.HasValue && Decimal.Round(fees.Value, 2) != fees.Value)
+                || Decimal.Round(fees, 2) != fees)
                 throw new FirstTradeException("invalid commission or fee precision");
             if (type is "BOUGHT" or "SOLD")
             {
                 var gross = Decimal.Round(Math.Abs(quantity) * price, 2, MidpointRounding.AwayFromZero);
-                if (fees is null)
-                {
-                    fees = type == "SOLD" ? FirstTradeSecFee(date, gross) : 0;
-                    assumed = type == "SOLD";
-                }
-                FirstTradeEqual((type == "BOUGHT" ? -gross : gross) - commission - fees.Value, amount,
-                    $"trade amount after {(assumed ? "assumed SEC" : "reported")} charges on {date:yyyy-MM-dd}");
+                FirstTradeEqual((type == "BOUGHT" ? -gross : gross) - commission - fees, amount,
+                    $"trade amount after reported charges on {date:yyyy-MM-dd}");
             }
-            else if (commission != 0 || fees.GetValueOrDefault() != 0)
+            else if (commission != 0 || fees != 0)
                 throw new FirstTradeException("non-trade has unsupported embedded charges");
             // Description is mutable. Decimal strings avoid JSON scale differences changing identity.
             var hash = FirstTradeHash(JsonSerializer.Serialize(new { date, type, subaccount, symbol,
@@ -74,11 +76,11 @@ partial class WebUtil
             occurrences[hash] = ++occurrence;
             var identity = hash + ":" + occurrence;
             result.Add(tx with { Key = ofxRow?.FitId is string id ? "ofx:" + id : "v2:" + identity,
-                Identity = identity, SettlementDate = csvRow?.Settlement ?? ofxRow?.Settlement,
-                Commission = commission, Fees = fees ?? 0 });
+                Identity = identity, SettlementDate = csvRow.Settlement ?? ofxRow?.Settlement,
+                Commission = commission, Fees = fees });
         }
         if (csv.Any(InRange) || ofx.Any(InRange)) throw new FirstTradeException("export contains transactions missing from API history");
-        return result;
+        return pending ? null : result;
 
         bool InRange(FirstTradeExportRow row) => row.Date >= item.HistoryFrom.Date && row.Date <= item.HistoryThrough.Date;
 
@@ -99,16 +101,6 @@ partial class WebUtil
             return found;
         }
         static string Clean(string value) => Regex.Replace(value.ToUpperInvariant(), @"\s+", " ").Trim();
-    }
-
-    internal static decimal FirstTradeSecFee(DateTime date, decimal gross)
-    {
-        // User-authorized assumption: round each sale's SEC fee to cents, midpoint away from zero.
-        // Firstrade published USD 20.60 per million effective 2026-04-06; update on a new fee advisory.
-        // https://www.firstrade.com/trading/pricing
-        if (date < new DateTime(2026, 4, 6) || gross <= 0)
-            throw new FirstTradeException("SEC fee rate is not verified for this trade date or amount");
-        return Decimal.Round(gross * 0.00002060m, 2, MidpointRounding.AwayFromZero);
     }
 
     private static bool IsFirstTradeSubaccountTransfer(FirstTradeTransaction tx) => tx.Type == "OTHER" && tx.Quantity != 0

@@ -15,10 +15,10 @@ namespace MyBook
         public bool IsFirstTradeConfigured => new[] { "firsttrade_username", "firsttrade_password", "firsttrade_totp_secret" }
             .Any(key => !String.IsNullOrWhiteSpace(config[key]));
 
-        public async Task FetchFirstTradeAsync(CancellationToken cancellationToken = default)
+        public async Task<bool> FetchFirstTradeAsync(CancellationToken cancellationToken = default)
         {
             if (!await firstTradeLock.WaitAsync(0, cancellationToken).ConfigureAwait(false))
-                return;
+                return true; // Another import is running; this is not a report-lag result.
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromMinutes(5));
             var stage = "configuration";
@@ -55,7 +55,13 @@ namespace MyBook
                 timeout.Token.ThrowIfCancellationRequested();
                 sessionStore.EnsureLock();
                 var recordCount = ImportFirstTradeCapture(capture);
+                if (recordCount is null)
+                {
+                    Console.WriteLine("FirstTrade: 等待报表更新；本轮未入账，查询进度不变。");
+                    return false;
+                }
                 Console.WriteLine($"FirstTrade imported {capture.Accounts.Count} account(s), {recordCount} record(s); cash, positions and account values validated.");
+                return true;
             }
             catch (FirstTradeException) { throw; }
             catch (OperationCanceledException)
@@ -73,18 +79,20 @@ namespace MyBook
         private static string FirstTradeAccountKey(string account) =>
             "FirstTrade:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(account))) + ":";
 
-        private int ImportFirstTradeCapture(FirstTradeCapture capture)
+        private int? ImportFirstTradeCapture(FirstTradeCapture capture)
         {
             var imports = new List<StatementRecordHoldingImport>();
             foreach (var item in capture.Accounts)
             {
                 var account = database.GetAccountByTypeAndId("FIRSTTRADE", item.Account);
-                imports.Add(BuildFirstTradeImport(capture, item, account,
+                var import = BuildFirstTradeImport(capture, item, account,
                     database.GetCurrentAccountHoldings(account),
                     database.GetStatementRecords(StatementImportProvider.FirstTradeApi, account),
                     symbol => GetFirstTradeEquityHoldingType(item, symbol),
                     (date, symbol, quantity) => database.GetFirstTradeTransferEvidence(account, date, symbol, quantity,
-                        GetFirstTradeEquityHoldingType(item, symbol))));
+                        GetFirstTradeEquityHoldingType(item, symbol)));
+                if (import is null) return null;
+                imports.Add(import);
             }
             var saved = database.SaveStatementRecordsAndHoldingsOnce(imports);
             return imports.Where((_, index) => saved[index]).Sum(import => import.Records.Count);
@@ -107,11 +115,13 @@ namespace MyBook
             };
         }
 
-        internal static StatementRecordHoldingImport BuildFirstTradeImport(FirstTradeCapture capture,
+        internal static StatementRecordHoldingImport? BuildFirstTradeImport(FirstTradeCapture capture,
             FirstTradeAccountCapture item, Account account, List<Holding> beginning,
             List<Record> previousRecords, Func<string, HoldingType> resolveEquity,
             Func<DateTime, string, decimal, FirstTradeTransferEvidence>? resolveTransfer = null)
         {
+            var transactions = ReconcileFirstTradeSources(item);
+            if (transactions is null) return null;
             const string transactionPrefix = "FirstTrade transaction|";
             var time = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(capture.CompletedAtUtc, "Eastern Standard Time").DateTime;
             var key = FirstTradeAccountKey(item.Account) + capture.CompletedAtUtc.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture);
@@ -158,7 +168,6 @@ namespace MyBook
             if (Math.Abs(endingTotal - FirstTradeNumber(balance, "total_account_value")) >= 100m)
                 throw new FirstTradeException("account total: difference must be less than USD 100");
 
-            var transactions = ReconcileFirstTradeSources(item);
             var known = MatchFirstTradePrevious(transactions, previousRecords, item.HistoryFrom, item.HistoryThrough);
             var transfers = transactions.Where(t => t.Type == "OTHER" && t.Quantity == 0).ToList();
             foreach (var group in transfers.GroupBy(t => (t.Date, Amount: Math.Abs(t.Amount))))
