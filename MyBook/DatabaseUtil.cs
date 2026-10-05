@@ -4369,8 +4369,7 @@ namespace MyBook
                         exchangeRates);
                 })
                 .Where(ShouldShowAccountNetFlowStatistic)
-                .OrderByDescending(statistic => Math.Abs(statistic.NetRmb))
-                .ThenByDescending(statistic => Math.Abs(statistic.CurrentBalanceRmb))
+                .OrderByDescending(statistic => statistic.CurrentBalanceRmb)
                 .ThenBy(statistic => statistic.DisplayName)
                 .ToList();
 
