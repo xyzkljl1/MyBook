@@ -6,6 +6,7 @@
 /MyBook/bin
 /MyBook/obj
 /MyBook/config.json
+/MyBook/config.json.backup-*
 /MyBook/Properties
 /MyBook/MyBook.csproj.user
 /*.html

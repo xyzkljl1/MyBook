@@ -1,5 +1,3 @@
-using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using SteamKit2.Authentication;
@@ -10,12 +8,10 @@ internal static class SteamLogin
 {
     internal static int Run(string[] args)
     {
-        var ownConsole = false;
+        using var console = new CommandLineConsole();
         try
         {
-            if (!args.Contains("--saved") && GetConsoleWindow() == IntPtr.Zero && !AttachConsole(UInt32.MaxValue))
-                ownConsole = AllocConsole();
-            Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+            console.Open(interactive: !args.Contains("--saved"));
             if (args.Length is < 1 or > 2 || args.Any(arg => arg is not ("--steam-login" or "--saved"))
                 || args.Distinct(StringComparer.Ordinal).Count() != args.Length)
                 throw new ArgumentException("Usage: MyBook.exe --steam-login [--saved]");
@@ -53,15 +49,6 @@ internal static class SteamLogin
                 || message == "No saved Steam session; complete initial authorization first.");
             Console.WriteLine("Steam login failed: " + (safe ? message : exception.GetType().Name));
             return 1;
-        }
-        finally
-        {
-            if (ownConsole)
-            {
-                Console.WriteLine("Press any key to close.");
-                try { Console.ReadKey(intercept: true); } catch (InvalidOperationException) { }
-                FreeConsole();
-            }
         }
     }
 
@@ -106,8 +93,4 @@ internal static class SteamLogin
         }
     }
 
-    [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
-    [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AttachConsole(uint processId);
-    [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AllocConsole();
-    [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool FreeConsole();
 }

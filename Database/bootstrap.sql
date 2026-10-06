@@ -39,7 +39,7 @@ CREATE TABLE `destAccountRules` (
 
 CREATE TABLE `loginsessions` (
   `Id` int NOT NULL AUTO_INCREMENT,
-  `provider` enum('FirstTrade','Steam') NOT NULL,
+  `provider` enum('FirstTrade','Steam','Bilibili') NOT NULL,
   `loginHash` char(64) NOT NULL,
   `sessionJson` json NOT NULL,
   `createdAt` datetime(6) NOT NULL,

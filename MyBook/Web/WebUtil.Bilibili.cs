@@ -1,5 +1,3 @@
-using System.Net.Http;
-using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace MyBook
@@ -30,50 +28,36 @@ namespace MyBook
                 beginningAccountBalances: [new(account, beginning)], forceValidateBeginningBalances: true);
         }
 
+        // The module manages one Bilibili login independently of the browser and financial imports.
+        public async Task LoginBilibiliAsync(Func<string, Task> showQrCode, Action<string> showStatus,
+            CancellationToken cancellationToken = default)
+        {
+            _ = database.GetAccountByName("Bilibili");
+            using var sessionStore = database.OpenLoginSession(LoginProvider.Bilibili, "Bilibili");
+            using var client = new BilibiliClient();
+            var session = await client.LoginAsync(showQrCode, showStatus, cancellationToken).ConfigureAwait(false);
+            sessionStore.Save(JsonSerializer.Serialize(session), newSession: true);
+        }
+
         public async Task<Currency> FetchBilibiliBalance()
         {
-            const string requestName = "POST pay.bilibili.com/bk/brokerage/getUserBrokerage";
-            var cookie = config["bilibili_cookie"];
-            if (String.IsNullOrWhiteSpace(cookie))
-                throw new InvalidOperationException("Missing bilibili_cookie configuration.");
+            using var sessionStore = database.OpenLoginSession(LoginProvider.Bilibili, "Bilibili");
+            var json = sessionStore.Read();
+            BilibiliClient.Session session;
             try
             {
-                using var client = new HttpClient(new HttpClientHandler
-                {
-                    UseProxy = false, UseCookies = false, AllowAutoRedirect = false
-                }) { Timeout = TimeSpan.FromSeconds(30) };
-                using var request = new HttpRequestMessage(HttpMethod.Post,
-                    "https://pay.bilibili.com/bk/brokerage/getUserBrokerage");
-                request.Headers.Add("Cookie", cookie);
-                request.Headers.Referrer = new Uri("https://pay.bilibili.com/pay-v2-web/shell_index");
-                request.Headers.Add("Origin", "https://pay.bilibili.com");
-                var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                request.Content = JsonContent.Create(new { traceId = timestamp, timestamp, sdkVersion = "1.2.1" });
-                using var response = await client.SendAsync(request).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                    throw new InvalidOperationException($"{requestName}: HTTP {(int)response.StatusCode}.");
-                using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
-                var root = json.RootElement;
-                var code = root.GetProperty("errno").GetInt64();
-                if (code != 0)
-                    throw new InvalidOperationException($"{requestName}: HTTP {(int)response.StatusCode}, business code {code}.");
-                var balance = root.GetProperty("data").GetProperty("brokerage").GetDecimal();
-                if (balance < 0 || Decimal.Round(balance, 2) != balance)
-                    throw new InvalidOperationException($"{requestName}: invalid balance.");
-                return new Currency(balance, CurrencyType.RMB);
+                session = json is null ? throw new JsonException() :
+                    JsonSerializer.Deserialize<BilibiliClient.Session>(json) ?? throw new JsonException();
+                if (String.IsNullOrWhiteSpace(session.Cookie)) throw new JsonException();
             }
-            catch (HttpRequestException e)
+            catch (JsonException)
             {
-                throw new InvalidOperationException($"{requestName}: {e.HttpRequestError}.");
+                throw new BilibiliException("Bilibili session unavailable; run MyBook.exe --bilibili-login to log in.");
             }
-            catch (TaskCanceledException)
-            {
-                throw new InvalidOperationException($"{requestName}: timeout.");
-            }
-            catch (Exception e) when (e is JsonException or KeyNotFoundException or FormatException)
-            {
-                throw new InvalidOperationException($"{requestName}: invalid request or response format.");
-            }
+            using var client = new BilibiliClient();
+            await client.RestoreAndRefreshAsync(session,
+                (value, newSession) => sessionStore.Save(JsonSerializer.Serialize(value), newSession)).ConfigureAwait(false);
+            return await client.FetchBalanceAsync().ConfigureAwait(false);
         }
     }
 }

@@ -239,7 +239,8 @@ namespace MyBook
     public enum LoginProvider
     {
         FirstTrade,
-        Steam
+        Steam,
+        Bilibili
     }
 
     // Login identity is independent of financial accounts; one login can own several accounts.
@@ -250,17 +251,17 @@ namespace MyBook
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
 
-        [SugarColumn(ColumnDataType = "enum('FirstTrade','Steam')", SqlParameterDbType = typeof(EnumToStringConvert))]
+        [SugarColumn(ColumnDataType = "enum('FirstTrade','Steam','Bilibili')", SqlParameterDbType = typeof(EnumToStringConvert))]
         public required LoginProvider provider { get; set; }
 
         [SugarColumn(ColumnDataType = "char(64)")]
         public required string loginHash { get; set; }
 
-        // JSON is explicitly permitted only for FirstTrade/Steam login state in this column.
+        // JSON is explicitly permitted for FirstTrade, Steam and Bilibili login state in this column.
         [SugarColumn(ColumnDataType = "json")]
         public required string sessionJson { get; set; }
 
-        // Local time of session creation; token renewal does not change this value.
+        // Local time of this history row's creation. Bilibili renewal creates a new row; in-place updates retain it.
         [SugarColumn(ColumnDataType = "datetime(6)")]
         public DateTime createdAt { get; set; }
     }

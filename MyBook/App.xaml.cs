@@ -27,9 +27,12 @@ namespace MyBook
                 return;
             }
 
-            if (e.Args.Any(arg => arg.Equals("--steam-login", StringComparison.OrdinalIgnoreCase)))
+            Func<string[], int>? runLogin = e.Args.Any(arg => arg.Equals("--bilibili-login", StringComparison.OrdinalIgnoreCase))
+                ? WebUtil.BilibiliLogin.Run
+                : e.Args.Any(arg => arg.Equals("--steam-login", StringComparison.OrdinalIgnoreCase)) ? SteamLogin.Run : null;
+            if (runLogin is not null)
             {
-                var exitCode = SteamLogin.Run(e.Args);
+                var exitCode = runLogin(e.Args);
                 Shutdown(exitCode);
                 Environment.Exit(exitCode);
                 return;

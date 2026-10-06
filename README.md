@@ -42,7 +42,7 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **Kraken:** balances and ledger entries through a read-only API; prices through public market-data endpoints.
 - **Ethereum:** transactions and balances for configured addresses through blockchain query endpoints; prices through public market-data endpoints.
 - **Nexus:** monthly Donation Points income through GraphQL.
-- **Bilibili:** shell wallet balance through the website API, authenticated with `bilibili_cookie`.
+- **Bilibili:** shell wallet balance through the website API. Run `dotnet MyBook.dll --bilibili-login` from the build-output directory and scan the console QR code with the Bilibili app. This mode only authorizes and saves the program's independent session; it does not start the dashboard or background tasks. The session is renewed automatically when importing.
 - **Steam:** account/wallet information through SteamKit2 and wallet transactions from authenticated purchase-history pages, both using `steam_proxy`. Run `dotnet MyBook.dll --steam-login` from the build-output directory to enter credentials and complete Steam Guard; `dotnet MyBook.dll --steam-login --saved` uses the stored session.
 - **Exchange rates:** daily historical quotes against CNY from Google Finance and Kylc bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR). Currency valuations use the latest available Google historical rates.
 
