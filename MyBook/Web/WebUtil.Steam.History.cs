@@ -20,8 +20,9 @@ partial class WebUtil
         var bankPurchases = database.GetSteamBankPurchases(account.Id);
         var walletSince = since.Date.AddDays(-15);
         var purchaseSince = since.Date.AddDays(-60);
-        await WithSteamSessionAsync(async (info, accessToken, token) =>
+        await WithSteamSessionAsync(async (readInfo, accessToken, token) =>
         {
+            var info = await readInfo().ConfigureAwait(false);
             if (!info.HasWallet || info.Currency != ECurrencyCode.CNY || info.PendingBalance != 0)
                 throw new InvalidOperationException("Steam import: unsupported wallet currency or pending balance.");
             using var http = CreateSteamHistoryClient(info.SteamId, accessToken);

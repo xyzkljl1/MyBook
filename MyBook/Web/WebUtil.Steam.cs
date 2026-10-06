@@ -12,9 +12,11 @@ partial class WebUtil
     // Supplying credentials explicitly starts a new authorization. Otherwise only the saved token is used.
     public async Task<SteamLoginInfo> LoginSteamAsync(string? loginName = null,
         string? password = null, IAuthenticator? authenticator = null, CancellationToken cancellationToken = default)
-        => await WithSteamSessionAsync((info, _, _) => Task.FromResult(info), loginName, password, authenticator, cancellationToken).ConfigureAwait(false);
+        => await WithSteamSessionAsync((readInfo, _, _) => readInfo(), loginName, password, authenticator, cancellationToken).ConfigureAwait(false);
 
-    private async Task<T> WithSteamSessionAsync<T>(Func<SteamLoginInfo, string, CancellationToken, Task<T>> fetch,
+    public Task RefreshSteamSessionAsync() => WithSteamSessionAsync((_, _, _) => Task.FromResult(true));
+
+    private async Task<T> WithSteamSessionAsync<T>(Func<Func<Task<SteamLoginInfo>>, string, CancellationToken, Task<T>> fetch,
         string? loginName = null, string? password = null, IAuthenticator? authenticator = null, CancellationToken cancellationToken = default)
     {
         var authorize = password is not null;
@@ -88,10 +90,14 @@ partial class WebUtil
                     saved.refreshToken = renewed.RefreshToken;
                     sessionStore.Save(JsonSerializer.Serialize(saved));
                 }
-                var info = await account.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-                var funds = await wallet.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-                return await fetch(new SteamLoginInfo(client.SteamID!.ConvertToUInt64(), info.PersonaName,
-                    funds.HasWallet, funds.Currency, funds.LongBalance / 100m, funds.LongBalanceDelayed / 100m), renewed.AccessToken, timeout.Token).ConfigureAwait(false);
+                async Task<SteamLoginInfo> ReadInfo()
+                {
+                    var info = await account.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+                    var funds = await wallet.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+                    return new SteamLoginInfo(client.SteamID!.ConvertToUInt64(), info.PersonaName,
+                        funds.HasWallet, funds.Currency, funds.LongBalance / 100m, funds.LongBalanceDelayed / 100m);
+                }
+                return await fetch(ReadInfo, renewed.AccessToken, timeout.Token).ConfigureAwait(false);
             }
             finally
             {

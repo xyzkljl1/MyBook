@@ -141,6 +141,8 @@ namespace MyBook
                 database.SaveStatementProgress([StatementImportProvider.DailyFetch], today, "scheduled-attempt");
                 started = true;
                 SetCurrentTask("每日导入");
+                await RunImportTaskAsync("Steam session refresh", web.RefreshSteamSessionAsync).ConfigureAwait(false);
+                await RunImportTaskAsync("Bilibili session refresh", web.RefreshBilibiliSessionAsync).ConfigureAwait(false);
                 await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates).ConfigureAwait(false);
                 foreach (var source in PubWebUtil.KylcSources)
                     await RunImportTaskAsync(source.ToString(), () => pubWeb.FetchKylcRates(source)).ConfigureAwait(false);

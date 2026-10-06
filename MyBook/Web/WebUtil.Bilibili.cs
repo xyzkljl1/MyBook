@@ -39,7 +39,11 @@ namespace MyBook
             sessionStore.Save(JsonSerializer.Serialize(session), newSession: true);
         }
 
-        public async Task<Currency> FetchBilibiliBalance()
+        public Task RefreshBilibiliSessionAsync() => WithBilibiliSessionAsync(_ => Task.FromResult(true));
+
+        public Task<Currency> FetchBilibiliBalance() => WithBilibiliSessionAsync(client => client.FetchBalanceAsync());
+
+        private async Task<T> WithBilibiliSessionAsync<T>(Func<BilibiliClient, Task<T>> operation)
         {
             using var sessionStore = database.OpenLoginSession(LoginProvider.Bilibili);
             var json = sessionStore.Read();
@@ -57,7 +61,7 @@ namespace MyBook
             using var client = new BilibiliClient();
             await client.RestoreAndRefreshAsync(session,
                 (value, newSession) => sessionStore.Save(JsonSerializer.Serialize(value), newSession)).ConfigureAwait(false);
-            return await client.FetchBalanceAsync().ConfigureAwait(false);
+            return await operation(client).ConfigureAwait(false);
         }
     }
 }
