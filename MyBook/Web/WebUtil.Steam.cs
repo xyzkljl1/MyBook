@@ -23,7 +23,7 @@ partial class WebUtil
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            using var sessionStore = database.OpenLoginSession(LoginProvider.Steam, loginName);
+            using var sessionStore = database.OpenLoginSession(LoginProvider.Steam);
             var saved = authorize ? null : JsonSerializer.Deserialize<SteamSessionState>(sessionStore.Read()
                 ?? throw new InvalidOperationException("No saved Steam session; complete initial authorization first."));
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

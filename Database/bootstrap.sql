@@ -40,11 +40,10 @@ CREATE TABLE `destAccountRules` (
 CREATE TABLE `loginsessions` (
   `Id` int NOT NULL AUTO_INCREMENT,
   `provider` enum('FirstTrade','Steam','Bilibili') NOT NULL,
-  `loginHash` char(64) NOT NULL,
   `sessionJson` json NOT NULL,
   `createdAt` datetime(6) NOT NULL,
   PRIMARY KEY (`Id`),
-  KEY `index_LoginSessions_provider_login_id` (`provider`,`loginHash`,`Id`)
+  KEY `index_LoginSessions_provider_id` (`provider`,`Id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 CREATE TABLE `plaiditems` (
   `Id` int NOT NULL AUTO_INCREMENT,

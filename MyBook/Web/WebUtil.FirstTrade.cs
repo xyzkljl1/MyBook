@@ -34,7 +34,7 @@ namespace MyBook
                 var checkpoint = database.GetStatementImportCheckpointTime(StatementImportProvider.FirstTradeApi)
                     ?? throw new FirstTradeException("initial database checkpoint is missing");
                 stage = "acquire database session";
-                using var sessionStore = database.OpenLoginSession(LoginProvider.FirstTrade, username);
+                using var sessionStore = database.OpenLoginSession(LoginProvider.FirstTrade);
                 using var client = new FirstTradeClient(username, password, totpSecret, sessionStore, proxy: config["mail_proxy"]);
                 stage = "login";
                 await client.LoginAsync(timeout.Token).ConfigureAwait(false);

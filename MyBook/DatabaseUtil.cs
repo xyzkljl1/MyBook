@@ -3,7 +3,6 @@ using SqlSugar;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
@@ -227,19 +226,18 @@ namespace MyBook
             return reasons.SingleOrDefault();
         }
 
-        public LoginSessionLease OpenLoginSession(LoginProvider provider, string? username = null) =>
-            new(db.CurrentConnectionConfig.ConnectionString, provider, username);
+        public LoginSessionLease OpenLoginSession(LoginProvider provider) =>
+            new(db.CurrentConnectionConfig.ConnectionString, provider);
 
         internal sealed class LoginSessionLease : IDisposable
         {
             private readonly SqlSugarClient connection;
             private readonly LoginProvider provider;
-            private readonly string loginHash;
             private readonly string lockName;
             private readonly int connectionId;
             private bool disposed;
 
-            internal LoginSessionLease(string connectionString, LoginProvider provider, string? username)
+            internal LoginSessionLease(string connectionString, LoginProvider provider)
             {
                 this.provider = provider;
                 connection = CreateDatabaseClient(connectionString);
@@ -248,17 +246,7 @@ namespace MyBook
                 try
                 {
                     connection.Ado.Open();
-                    if (username is null)
-                    {
-                        var identities = connection.Queryable<LoginSession>().Where(row => row.provider == provider)
-                            .Select(row => row.loginHash).Distinct().ToList();
-                        if (identities.Count != 1)
-                            throw new InvalidOperationException();
-                        loginHash = identities[0];
-                    }
-                    else loginHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username)));
-                    // Keep FirstTrade's lock name to exclude older processes during the transition.
-                    lockName = $"MyBook.{provider}:" + loginHash[..40];
+                    lockName = $"MyBook.{provider}";
                     connectionId = connection.Ado.GetInt("select connection_id()");
                     if (connection.Ado.GetInt("select get_lock(@name, 0)", new SugarParameter("@name", lockName)) != 1)
                         throw new InvalidOperationException();
@@ -266,7 +254,7 @@ namespace MyBook
                 catch
                 {
                     connection.Dispose();
-                    throw new InvalidOperationException($"{provider} session database unavailable, login identity missing/ambiguous, or session in use; login was not attempted.");
+                    throw new InvalidOperationException($"{provider} session database unavailable or session in use; login was not attempted.");
                 }
             }
 
@@ -285,7 +273,7 @@ namespace MyBook
             public string? Read()
             {
                 EnsureLock();
-                try { return connection.Queryable<LoginSession>().Where(row => row.provider == provider && row.loginHash == loginHash).OrderByDescending(row => row.Id).First()?.sessionJson; }
+                try { return connection.Queryable<LoginSession>().Where(row => row.provider == provider).OrderByDescending(row => row.Id).First()?.sessionJson; }
                 catch { throw new InvalidOperationException($"{provider} session database read failed."); }
             }
 
@@ -297,7 +285,7 @@ namespace MyBook
                     // Session writes commit independently of financial import validation.
                     var result = connection.Ado.UseTran(() =>
                     {
-                        var latest = connection.Queryable<LoginSession>().Where(row => row.provider == provider && row.loginHash == loginHash)
+                        var latest = connection.Queryable<LoginSession>().Where(row => row.provider == provider)
                             .OrderByDescending(row => row.Id).First();
                         // Retain login history, but clear credentials from the superseded session.
                         if (newSession || latest is null)
@@ -305,8 +293,8 @@ namespace MyBook
                             if (latest is not null)
                                 connection.Ado.ExecuteCommand("UPDATE LoginSessions SET sessionJson=JSON_OBJECT() WHERE Id=@id",
                                     new SugarParameter("@id", latest.Id));
-                            connection.Ado.ExecuteCommand("INSERT INTO LoginSessions (provider,loginHash,sessionJson,createdAt) VALUES (@provider,@hash,@state,@created)",
-                                new SugarParameter("@provider", provider.ToString()), new SugarParameter("@hash", loginHash),
+                            connection.Ado.ExecuteCommand("INSERT INTO LoginSessions (provider,sessionJson,createdAt) VALUES (@provider,@state,@created)",
+                                new SugarParameter("@provider", provider.ToString()),
                                 new SugarParameter("@state", stateJson), new SugarParameter("@created", DateTime.Now));
                         }
                         else

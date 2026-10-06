@@ -33,7 +33,7 @@ namespace MyBook
             CancellationToken cancellationToken = default)
         {
             _ = database.GetAccountByName("Bilibili");
-            using var sessionStore = database.OpenLoginSession(LoginProvider.Bilibili, "Bilibili");
+            using var sessionStore = database.OpenLoginSession(LoginProvider.Bilibili);
             using var client = new BilibiliClient();
             var session = await client.LoginAsync(showQrCode, showStatus, cancellationToken).ConfigureAwait(false);
             sessionStore.Save(JsonSerializer.Serialize(session), newSession: true);
@@ -41,7 +41,7 @@ namespace MyBook
 
         public async Task<Currency> FetchBilibiliBalance()
         {
-            using var sessionStore = database.OpenLoginSession(LoginProvider.Bilibili, "Bilibili");
+            using var sessionStore = database.OpenLoginSession(LoginProvider.Bilibili);
             var json = sessionStore.Read();
             BilibiliClient.Session session;
             try

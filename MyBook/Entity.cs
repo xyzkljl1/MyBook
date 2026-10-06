@@ -243,8 +243,8 @@ namespace MyBook
         Bilibili
     }
 
-    // Login identity is independent of financial accounts; one login can own several accounts.
-    [SugarIndex("index_LoginSessions_provider_login_id", nameof(provider), OrderByType.Asc, nameof(loginHash), OrderByType.Asc, nameof(Id), OrderByType.Asc, false)]
+    // Each provider has one login identity and retains its session history.
+    [SugarIndex("index_LoginSessions_provider_id", nameof(provider), OrderByType.Asc, nameof(Id), OrderByType.Asc, false)]
     [SugarTable("LoginSessions")]
     public class LoginSession
     {
@@ -253,9 +253,6 @@ namespace MyBook
 
         [SugarColumn(ColumnDataType = "enum('FirstTrade','Steam','Bilibili')", SqlParameterDbType = typeof(EnumToStringConvert))]
         public required LoginProvider provider { get; set; }
-
-        [SugarColumn(ColumnDataType = "char(64)")]
-        public required string loginHash { get; set; }
 
         // JSON is explicitly permitted for FirstTrade, Steam and Bilibili login state in this column.
         [SugarColumn(ColumnDataType = "json")]
