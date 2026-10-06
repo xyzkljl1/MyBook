@@ -2549,7 +2549,9 @@ namespace MyBook
             {
                 AssertIBKRMoneyFieldEquals(currentPrice * quantity, currentValue, currentValueText, $"IBKR bond holding value {contract.Code}");
             }
-            else if (quantity != 0 && currentPrice * quantity != currentValue)
+            // Compare monetary values at the same precision as holdings before deriving a replacement unit price.
+            else if (quantity != 0 && Holding.CalculateTotalValue(quantity, currentPrice, contract.HoldingType)
+                != Decimal.Round(currentValue, 2, MidpointRounding.AwayFromZero))
             {
                 currentPrice = currentValue / quantity;
                 AssertIBKRMoneyFieldEquals(currentPrice * quantity, currentValue, currentValueText, $"IBKR holding value {contract.Code}");
