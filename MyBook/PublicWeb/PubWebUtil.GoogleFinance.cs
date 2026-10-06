@@ -85,7 +85,7 @@ namespace MyBook
             var request = $"Google Finance GET www.google.com/finance/quote/{pair}";
             try
             {
-                using var response = await googleHttpClient.GetAsync($"https://www.google.com/finance/quote/{pair}?window=1M").ConfigureAwait(false);
+                using var response = await googleHttpClient.GetAsync($"https://www.google.com/finance/quote/{pair}?hl=en&window=1M").ConfigureAwait(false);
                 if (response.StatusCode != HttpStatusCode.OK)
                     throw new InvalidOperationException($"{request}: HTTP {(int)response.StatusCode}.");
                 return await response.Content.ReadAsStringAsync().ConfigureAwait(false);

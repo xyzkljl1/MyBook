@@ -154,15 +154,16 @@
                          FontSize="13"
                          Foreground="#64748B"
                          Margin="12,21,0,0"/>
-                <TextBox Style="{StaticResource SelectableText}"
-                         Text="{Binding MarketChangeText, Mode=OneWay}"
-                         Foreground="{Binding MarketChangeColor}"
-                         Visibility="{Binding ShowMarketChange, Converter={StaticResource BooleanToVisibility}}"
-                         FontSize="14" FontWeight="SemiBold" Margin="16,21,0,0"/>
-                <TextBox Style="{StaticResource SelectableText}"
-                         Text="{Binding MarketChangeTimeText, Mode=OneWay}"
-                         Visibility="{Binding ShowMarketChange, Converter={StaticResource BooleanToVisibility}}"
-                         FontSize="12" Foreground="#64748B" Margin="8,22,0,0"/>
+                <StackPanel Margin="16,21,0,0"
+                            Visibility="{Binding ShowMarketChange, Converter={StaticResource BooleanToVisibility}}">
+                    <TextBox Style="{StaticResource SelectableText}"
+                             Text="{Binding MarketChangeText, Mode=OneWay}"
+                             Foreground="{Binding MarketChangeColor}"
+                             FontSize="14" FontWeight="SemiBold"/>
+                    <TextBox Style="{StaticResource SelectableText}"
+                             Text="{Binding MarketChangeTimeText, Mode=OneWay}"
+                             FontSize="12" Foreground="#64748B" Margin="0,2,0,0"/>
+                </StackPanel>
             </WrapPanel>
         </DockPanel>
 

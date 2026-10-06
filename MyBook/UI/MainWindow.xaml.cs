@@ -1190,8 +1190,7 @@ namespace MyBook
                 ? $"{(amount > 0 ? "+" : amount < 0 ? "-" : "")}¥{Math.Abs(amount.Value):N2}"
                 : times.Count > 0 ? "error" : "—";
             var timeText = times.Count == 0 ? ""
-                : times.Min() == times.Max() ? $"{times.Min().LocalDateTime:MM-dd HH:mm:ss}"
-                : $"{times.Min().LocalDateTime:MM-dd HH:mm:ss} – {times.Max().LocalDateTime:MM-dd HH:mm:ss}";
+                : $"~{Math.Max(0, (int)(DateTimeOffset.Now - times.Max()).TotalMinutes)}min";
             if (MarketChangeRmb == amount && MarketChangeText == text && MarketChangeTimeText == timeText)
                 return;
             MarketChangeRmb = amount;
