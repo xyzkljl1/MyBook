@@ -674,11 +674,11 @@ namespace MyBook
         public string SelectedAssetDateText { get; set; } = "";
         public string ReasonTabHeader { get; set; } = "分类";
         public TotalAssetsViewModel TotalAssets { get; set; } = new();
-        public bool ShowMarketChange => showMarketChangeForToday && MarketChangeTimeText.Length > 0;
+        public bool ShowMarketChange => showMarketChangeForToday && MarketChangeRmb.HasValue;
         public decimal? MarketChangeRmb { get; private set; }
         public string MarketChangeText { get; private set; } = "";
         public string MarketChangeTimeText { get; private set; } = "";
-        public string MarketChangeColor => MarketChangeRmb > 0 ? "#047857" : MarketChangeRmb < 0 || MarketChangeText == "error" ? "#B91C1C" : "#64748B";
+        public string MarketChangeColor => MarketChangeRmb > 0 ? "#047857" : MarketChangeRmb < 0 ? "#B91C1C" : "#64748B";
         public List<CurrencySummaryViewModel> CurrencySummaries { get; set; } = [];
         public List<AssetSummaryViewModel> AssetSummaries { get; set; } = [];
         public List<MonthlyFlowSeriesViewModel> MonthlySeries { get; set; } = [];
@@ -1189,8 +1189,8 @@ namespace MyBook
             });
             var text = amount.HasValue
                 ? $"{(amount > 0 ? "+" : amount < 0 ? "-" : "")}¥{Math.Abs(amount.Value):N2}"
-                : times.Count > 0 ? "error" : "";
-            var timeText = times.Count == 0 ? ""
+                : "";
+            var timeText = !amount.HasValue ? ""
                 : $"~{Math.Max(0, (int)(DateTimeOffset.Now - times.Max()).TotalMinutes)}min";
             if (MarketChangeRmb == amount && MarketChangeText == text && MarketChangeTimeText == timeText)
                 return;
