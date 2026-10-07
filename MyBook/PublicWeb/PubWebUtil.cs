@@ -77,7 +77,7 @@ namespace MyBook
             foreach (var currency in currencies)
             {
                 DateTime? latest = progress.TryGetValue(currency, out var last) ? last : null;
-                await ImportSchedule.RunAsync($"{source}/{currency}", 1, 5, () => latest, async since =>
+                await ImportSchedule.RunAsync($"{source}/{currency}", 1, 7, () => latest, async since =>
                 {
                     var batch = await fetch(currency, since).ConfigureAwait(false);
                     db.SaveRateHistory(batch);
