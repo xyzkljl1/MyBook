@@ -3735,6 +3735,8 @@ namespace MyBook
             {
                 MarketHoldings = holdings.Where(holding => holding.quantity != 0
                     && holding.holdingType is HoldingType.NASDAQ or HoldingType.ARCA or HoldingType.SHANGHAI or HoldingType.Crypto).ToList(),
+                LiveHoldings = holdings.Where(holding => holding.quantity != 0 && !Holding.IsSingleValueAsset(holding.holdingType)).ToList(),
+                HoldingAccountNames = accounts,
                 MarketBalances = balances,
                 MarketExchangeRates = exchangeRates,
                 AssetSummaryPoints = assetSummaryPoints,

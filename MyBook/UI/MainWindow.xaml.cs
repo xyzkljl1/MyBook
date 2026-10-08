@@ -687,6 +687,7 @@ namespace MyBook
         public List<AccountNetFlowStatisticsViewModel> AccountNetFlows { get; set; } = [];
         public List<ReasonFlowSeriesViewModel> ReasonMonthSeries { get; set; } = [];
         public List<InvestmentAccountStatisticsViewModel> InvestmentAccounts { get; set; } = [];
+        public LiveHoldingsViewModel LiveHoldings { get; private set; } = new([], new Dictionary<int, string>(), new Dictionary<CurrencyType, decimal>());
         public List<StatementImportSummaryViewModel> LatestStatementImports { get; set; } = [];
         public string ImportRuntimeText { get; private set; } = "导入未启用";
         public bool HasImportFailureMarker { get; private set; }
@@ -1025,6 +1026,7 @@ namespace MyBook
             var viewModel = new DashboardViewModel
             {
                 marketHoldings = data.MarketHoldings,
+                LiveHoldings = new(data.LiveHoldings, data.HoldingAccountNames, data.MarketExchangeRates),
                 marketBalances = data.MarketBalances,
                 marketExchangeRates = data.MarketExchangeRates,
                 SnapshotTimeText = "最新",
@@ -1084,6 +1086,7 @@ namespace MyBook
 
         public void CopyDashboardSettingsFrom(DashboardViewModel source)
         {
+            LiveHoldings.ShowAccounts = source.LiveHoldings.ShowAccounts;
             ShowInvestmentInUsd = source.ShowInvestmentInUsd;
             showSingleCurrencyMonthly = source.ShowSingleCurrencyMonthly;
             selectedMonthlyAccount = MonthlyAccounts.FirstOrDefault(account =>
@@ -1163,6 +1166,7 @@ namespace MyBook
         internal void UpdateMarketPrices(IReadOnlyList<MarketPrice> prices)
         {
             var quotes = prices.ToDictionary(quote => (quote.Code, quote.HoldingType));
+            LiveHoldings.UpdatePrices(quotes);
             var changes = new Dictionary<(int AccountId, CurrencyType Currency), decimal>();
             var times = new List<DateTimeOffset>();
             foreach (var holding in marketHoldings)

@@ -660,6 +660,77 @@
                 </Grid>
             </TabItem>
 
+            <TabItem Header="实时持仓">
+                <Border Style="{StaticResource Card}" Margin="0,16,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <local:SegmentedSelector SelectedIndex="{Binding LiveHoldings.ModeIndex, Mode=TwoWay}"
+                                                 HorizontalAlignment="Left" Margin="0,0,0,8"
+                                                 AutomationProperties.Name="实时持仓显示方式">
+                            <ListBoxItem Content="按标的汇总"/>
+                            <ListBoxItem Content="按账户展开"/>
+                        </local:SegmentedSelector>
+                        <DataGrid Grid.Row="1" ItemsSource="{Binding LiveHoldings.Rows}" AutoGenerateColumns="False"
+                                  Grid.IsSharedSizeScope="True"
+                                  IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
+                                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                  SelectionUnit="CellOrRowHeader" ClipboardCopyMode="IncludeHeader"
+                                  AlternatingRowBackground="#F8FAFC" RowBackground="White"
+                                  BorderBrush="#E2E8F0" BorderThickness="1" FontSize="12">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="账户" Binding="{Binding AccountName}" Width="1.4*"/>
+                                <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="*"/>
+                                <DataGridTemplateColumn Header="数量" SortMemberPath="Quantity" ClipboardContentBinding="{Binding QuantityText}" Width="0.8*">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding QuantityText, Mode=OneWay}" Margin="6,4" TextAlignment="Right"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="最新单价" SortMemberPath="Price" ClipboardContentBinding="{Binding PriceWithChangeText}" Width="1.8*">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Grid HorizontalAlignment="Right" Margin="6,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="LivePriceChange"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBox Style="{StaticResource SelectableText}" Text="{Binding PriceText, Mode=OneWay}"/>
+                                                <TextBox Grid.Column="1" Style="{StaticResource SelectableText}" Text="{Binding PriceChangeText, Mode=OneWay}" Foreground="{Binding PriceChangeColor}"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="最新市值" SortMemberPath="ValueRmb" ClipboardContentBinding="{Binding ValueWithChangeText}" Width="2*">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Grid HorizontalAlignment="Right" Margin="6,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="LiveValueChange"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBox Style="{StaticResource SelectableText}" Text="{Binding ValueText, Mode=OneWay}"/>
+                                                <TextBox Grid.Column="1" Style="{StaticResource SelectableText}" Text="{Binding ValueChangeText, Mode=OneWay}" Foreground="{Binding ValueChangeColor}"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="报价获取时间" SortMemberPath="FetchedAt" ClipboardContentBinding="{Binding FetchedAtText}" Width="*">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding FetchedAtText, Mode=OneWay}" Margin="6,4"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Border>
+            </TabItem>
+
             <TabItem Header="导入记录">
                 <Border Style="{StaticResource Card}" Margin="0,16,0,0">
                     <Grid>
