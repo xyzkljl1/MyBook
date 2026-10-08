@@ -13,7 +13,7 @@ namespace MyBook
         private const string ICBCSIMCompensationCodePrefix = "ICBCSIMCompensation-";
         private static readonly TimeSpan ICBCSIMOrderingWindow = TimeSpan.FromMinutes(2);
         private static readonly Regex ICBCSIMTransactionRegex = new(
-            @"尾号(?<cardTail>\d{4})卡(?<month>\d{1,2})月(?<day>\d{1,2})日(?<hour>\d{1,2}):(?<minute>\d{2})(?:手机银行|营业网点)?(?<direction>支出|收入)[(（](?<summary>[^)）]+)[)）](?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]\s*余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)元",
+            @"尾号(?<cardTail>\d{4})卡(?<month>\d{1,2})月(?<day>\d{1,2})日(?<hour>\d{1,2}):(?<minute>\d{2})(?:手机银行|营业网点)?(?<direction>支出|收入)[(（](?<summary>.+?)[)）](?<amount>[+-]?\d[\d,]*(?:\.\d+)?)元[，,]\s*余额(?<balance>[+-]?\d[\d,]*(?:\.\d+)?)元",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
         private static readonly Regex ICBCSIMIgnoredNotificationRegex = new(
             @"^您尾号\d{4}(?:卡人民币卡片临时额度将于.+到期|信用卡信用额度已恢复为人民币[\d,.]+元).+【工商银行】$",
