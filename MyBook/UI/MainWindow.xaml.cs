@@ -596,10 +596,11 @@ namespace MyBook
             return (Drawing.Icon)icon.Clone();
         }
 
-        private void RestoreFromTray()
+        internal void RestoreFromTray()
         {
             Show();
-            WindowState = WindowState.Normal;
+            if (WindowState == WindowState.Minimized)
+                WindowState = WindowState.Normal;
             Activate();
         }
 

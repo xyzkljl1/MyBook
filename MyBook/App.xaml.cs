@@ -9,7 +9,10 @@ namespace MyBook
     public partial class App : Application
     {
         private const string SingleInstanceMutexName = @"Local\MyBook.SingleInstance";
+        private const string ShowWindowEventName = @"Local\MyBook.ShowWindow";
         private Mutex? singleInstanceMutex;
+        private EventWaitHandle? showWindowEvent;
+        private RegisteredWaitHandle? showWindowWait;
 
         private void Application_Startup(object sender, StartupEventArgs e)
         {
@@ -18,14 +21,25 @@ namespace MyBook
             {
                 singleInstanceMutex.Dispose();
                 singleInstanceMutex = null;
+                if (e.Args.Length == 0 && TryShowRunningInstance())
+                {
+                    Shutdown(0);
+                    return;
+                }
+
                 Console.WriteLine("MyBook is already running.");
                 if (e.Args.Length == 0)
-                    MessageBox.Show("MyBook is already running.", "MyBook", MessageBoxButton.OK, MessageBoxImage.Information);
+                    MessageBox.Show("MyBook is already running, but it cannot receive window activation requests.",
+                        "MyBook", MessageBoxButton.OK, MessageBoxImage.Information);
 
                 Shutdown(1);
                 Environment.Exit(1);
                 return;
             }
+
+            // Create before constructing the window so activation requests during startup remain pending.
+            if (e.Args.Length == 0)
+                showWindowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEventName);
 
             Func<string[], int>? runLogin = e.Args.Any(arg => arg.Equals("--bilibili-login", StringComparison.OrdinalIgnoreCase))
                 ? WebUtil.BilibiliLogin.Run
@@ -94,10 +108,37 @@ namespace MyBook
 
             MainWindow = new MainWindow();
             MainWindow.Show();
+            if (showWindowEvent is not null)
+                showWindowWait = ThreadPool.RegisterWaitForSingleObject(showWindowEvent, (_, _) =>
+                {
+                    if (!Dispatcher.HasShutdownStarted)
+                        Dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            if (!Dispatcher.HasShutdownStarted && MainWindow is MyBook.MainWindow window)
+                                window.RestoreFromTray();
+                        }));
+                }, null, Timeout.Infinite, false);
+        }
+
+        private static bool TryShowRunningInstance()
+        {
+            // The mutex owner may still be creating the event; wait briefly for that startup gap.
+            for (var attempt = 0; attempt < 10; attempt++)
+            {
+                if (EventWaitHandle.TryOpenExisting(ShowWindowEventName, out var signal))
+                {
+                    using (signal)
+                        return signal.Set();
+                }
+                Thread.Sleep(50);
+            }
+            return false;
         }
 
         protected override void OnExit(ExitEventArgs e)
         {
+            showWindowWait?.Unregister(null);
+            showWindowEvent?.Dispose();
             try
             {
                 singleInstanceMutex?.ReleaseMutex();
