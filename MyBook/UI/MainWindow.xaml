@@ -149,11 +149,14 @@
                          FontSize="44"
                          FontWeight="SemiBold"
                          Foreground="#047857"/>
-                <TextBox Style="{StaticResource SelectableText}"
-                         Text="{Binding TotalAssets.ExactText}"
-                         FontSize="13"
-                         Foreground="#64748B"
-                         Margin="12,21,0,0"/>
+                <StackPanel Margin="12,21,0,0">
+                    <TextBox Style="{StaticResource SelectableText}"
+                             Text="{Binding TotalAssets.ExactText}"
+                             FontSize="13"
+                             Foreground="#64748B"/>
+                    <TextBlock Text="不计本日浮动"
+                               FontSize="11" Foreground="#64748B" Margin="0,2,0,0"/>
+                </StackPanel>
                 <StackPanel Margin="16,21,0,0"
                             Visibility="{Binding ShowMarketChange, Converter={StaticResource BooleanToVisibility}}">
                     <TextBox Style="{StaticResource SelectableText}"
