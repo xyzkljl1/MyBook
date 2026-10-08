@@ -241,7 +241,8 @@ partial class PlaidUtil
             }
             else
             {
-                if (tx.Quantity != 0 || tx.Price != 0 || tx.Fees != 0) throw SchwabRawError("non-trade has security movement or unsplit fees");
+                // Cash transactions can carry a placeholder price; amount determines the cash movement.
+                if (tx.Quantity != 0 || tx.Fees != 0) throw SchwabRawError("non-trade has security movement or unsplit fees");
                 var reason = (tx.Type, tx.Subtype) switch
                 {
                     ("transfer", "transfer" or "contribution" or "deposit" or "withdrawal" or "distribution") => "转账",
@@ -249,6 +250,7 @@ partial class PlaidUtil
                     ("cash", "interest") when tx.Amount < 0 => securities.TryGetValue(tx.SecurityId, out var p) && p.Type == "fixed income" ? "债息" : "利息",
                     ("fee", "margin expense") when tx.Amount > 0 => "利息",
                     ("fee", "tax" or "tax withheld" or "non-resident tax") when tx.Amount > 0 => "税费",
+                    ("fee", "adjustment") when tx.Amount > 0 && IsSchwabDividendTaxAdjustment(tx, report.Transactions) => "税费",
                     ("fee", "account fee" or "management fee" or "transfer fee" or "miscellaneous fee") when tx.Amount > 0 => "手续费",
                     _ => throw SchwabRawError("unsupported investment transaction type/subtype")
                 };
@@ -296,6 +298,17 @@ partial class PlaidUtil
             records.Add(record);
             return record;
         }
+    }
+
+    private static bool IsSchwabDividendTaxAdjustment(SchwabRawTransaction adjustment, List<SchwabRawTransaction> transactions)
+    {
+        // User-approved inference for Schwab dividend withholding reported as fee/adjustment.
+        // Infer tax only from a unique same-day, same-security dividend and an exact rounded 10% charge.
+        if (String.IsNullOrWhiteSpace(adjustment.SecurityId)) return false;
+        var dividends = transactions.Where(tx => tx.Date == adjustment.Date && tx.SecurityId == adjustment.SecurityId
+            && tx.Type == "cash" && tx.Subtype is "dividend" or "qualified dividend" or "non-qualified dividend").ToList();
+        return dividends.Count == 1 && dividends[0].Amount < 0 && dividends[0].Quantity == 0 && dividends[0].Fees == 0
+            && adjustment.Amount == Decimal.Round(-dividends[0].Amount * 0.1m, 2, MidpointRounding.AwayFromZero);
     }
 
     private static Holding BuildRawHolding(SchwabRawPosition position, Account account, Func<string, HoldingType> resolveEquity)
