@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -110,11 +109,13 @@ namespace MyBook
                 var html = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var price = ParseGoogleFinanceStockPrice(html, symbol, market);
                 if (price is null or <= 0)
-                    throw new InvalidOperationException($"{request}: HTTP 200; missing positive stock price.");
+                    throw new InvalidOperationException($"{request}: HTTP 200; missing or invalid stock quote or quote timestamp.");
 
                 Console.WriteLine($"{symbol}:{market}:{price.Value}");
                 return price.Value;
             }
+            catch (Exception e) when (e is JsonException or FormatException or OverflowException or ArgumentException)
+            { throw new InvalidOperationException($"{request}: HTTP 200; invalid stock quote ({e.GetType().Name})."); }
             catch (HttpRequestException e) { throw new InvalidOperationException($"{request}: transport {e.HttpRequestError}."); }
             catch (OperationCanceledException) { throw new InvalidOperationException($"{request}: timeout."); }
         }
@@ -128,16 +129,34 @@ namespace MyBook
             if (!entityMatch.Success)
                 return null;
 
-            var symbolMarker = $@"""{symbol}:{exchange}""";
-            var entityEnd = html.IndexOf(symbolMarker, entityMatch.Index, StringComparison.OrdinalIgnoreCase);
-            var entityLength = entityEnd > entityMatch.Index ? entityEnd - entityMatch.Index : Math.Min(1200, html.Length - entityMatch.Index);
-            var entity = html.Substring(entityMatch.Index, entityLength);
-            var quoteMatches = Regex.Matches(entity, @"\[(?<price>-?\d+(?:\.\d+)?),-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?,\d+,\d+,\d+\]");
-            if (quoteMatches.Count == 0)
-                return null;
+            using var reader = new JsonTextReader(new StringReader(html[entityMatch.Index..]))
+                { FloatParseHandling = FloatParseHandling.Decimal };
+            var entity = (JArray)JToken.ReadFrom(reader);
+            var regularPrice = ReadPrice(entity.ElementAtOrDefault(5));
+            if (regularPrice is null) return null;
+            var extendedQuote = entity.ElementAtOrDefault(16);
+            if (extendedQuote is null || extendedQuote.Type == JTokenType.Null) return regularPrice;
 
-            var match = quoteMatches[quoteMatches.Count - 1];
-            return decimal.TryParse(match.Groups["price"].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out var price) ? price : null;
+            // Google pairs regular/extended prices [5]/[16] with timestamps [17]/[18].
+            // An old pre-market quote remains present during regular trading; array order is not recency.
+            var extendedPrice = ReadPrice(extendedQuote);
+            var regularTime = ReadTime(entity.ElementAtOrDefault(17));
+            var extendedTime = ReadTime(entity.ElementAtOrDefault(18));
+            if (extendedPrice is null || regularTime is null || extendedTime is null) return null;
+            return extendedTime > regularTime ? extendedPrice : regularPrice;
+
+            static decimal? ReadPrice(JToken? token) => token is JArray quote && quote.Count > 0
+                && quote[0].Type is JTokenType.Integer or JTokenType.Float && (decimal)quote[0] > 0
+                    ? (decimal)quote[0] : null;
+
+            static decimal? ReadTime(JToken? token)
+            {
+                if (token is not JArray time || time.Count is < 1 or > 2 || time[0].Type != JTokenType.Integer
+                    || (time.Count == 2 && time[1].Type is not (JTokenType.Integer or JTokenType.Null))) return null;
+                var seconds = (decimal)time[0];
+                var nanos = (decimal?)time.ElementAtOrDefault(1) ?? 0;
+                return seconds > 0 && nanos is >= 0 and < 1_000_000_000 ? seconds + nanos / 1_000_000_000m : null;
+            }
         }
     }
 }
