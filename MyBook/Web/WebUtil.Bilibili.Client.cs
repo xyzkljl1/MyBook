@@ -22,7 +22,8 @@ partial class WebUtil
         {
             client = new HttpClient(handler ?? new HttpClientHandler
             {
-                UseProxy = false, UseCookies = false, AllowAutoRedirect = false
+                UseProxy = false, UseCookies = false, AllowAutoRedirect = false,
+                AutomaticDecompression = DecompressionMethods.All
             }) { Timeout = TimeSpan.FromSeconds(30) };
         }
 

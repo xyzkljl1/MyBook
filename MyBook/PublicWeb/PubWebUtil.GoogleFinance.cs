@@ -42,10 +42,27 @@ namespace MyBook
         {
             var quotes = new Dictionary<DateTime, decimal>();
             var found = false;
+            var datasets = new List<JToken>();
+            var liveQuoteTimes = new HashSet<DateTime>();
+            var pair = reverse ? $"CNY-{currency}" : $"{currency}-CNY";
             foreach (Match match in Regex.Matches(html, @"AF_initDataCallback\(\{key: '[^']+',.*?data:(?<data>.*?), sideChannel:", RegexOptions.Singleline))
             {
                 using var reader = new JsonTextReader(new StringReader(match.Groups["data"].Value)) { FloatParseHandling = FloatParseHandling.Decimal };
                 var data = JToken.ReadFrom(reader);
+                datasets.Add(data);
+                if (data.SelectToken("[0][0][0]") is not JArray entity
+                    || (string?)entity.ElementAtOrDefault(21) != pair) continue;
+                // Google can append either quote timestamp to its daily chart, including a stale weekend quote.
+                foreach (var index in new[] { 11, 17 })
+                    if (entity.ElementAtOrDefault(index) is JArray stamp && stamp.Count > 0
+                        && stamp[0].Type == JTokenType.Integer)
+                        liveQuoteTimes.Add(DateTimeOffset.FromUnixTimeSeconds((long)stamp[0]).UtcDateTime
+                            .AddTicks(((long?)stamp.ElementAtOrDefault(1) ?? 0) / 100));
+            }
+            if (liveQuoteTimes.Count == 0)
+                throw new InvalidOperationException("Currency quote timestamps are missing.");
+            foreach (var data in datasets)
+            {
                 if (data.SelectToken("[0][0]") is not JArray chart
                     || !chart.Descendants().OfType<JValue>().Any(v => v.Type == JTokenType.String && (string?)v == (reverse ? $"CNY / {currency}" : $"{currency} / CNY"))
                     || chart.SelectToken("[3][0][0]") is not JArray period || period.Count != 1 || (int?)period[0] != 1
@@ -58,7 +75,8 @@ namespace MyBook
                         throw new InvalidOperationException("Historical quote must provide a zero UTC offset.");
                     var utc = new DateTime((int)time[0], (int)time[1], (int)time[2], (int?)time[3] ?? 0,
                         (int?)time[4] ?? 0, (int?)time[5] ?? 0, DateTimeKind.Utc).AddTicks(((long?)time[6] ?? 0) / 100);
-                    // The last chart point can be a live quote for the unfinished UTC day.
+                    // Match quote metadata, not merely today's date or the last position: the last point can be historical.
+                    if (ReferenceEquals(point, points.Last) && liveQuoteTimes.Contains(utc)) continue;
                     if (utc.Date < sinceUtc || utc.Date >= utcToday) continue;
                     var rate = (decimal?)point[1]?[0];
                     if (rate is null or <= 0) throw new InvalidOperationException("Missing positive historical exchange rate.");
