@@ -608,7 +608,8 @@ namespace MyBook
                         return json["result"]
                             ?? throw new InvalidOperationException("Kraken response does not contain a result.");
                     }
-                    catch (HttpRequestException) when (attempt < 3)
+                    catch (Exception e) when (attempt < 3 && !cancellationToken.IsCancellationRequested
+                        && e is HttpRequestException or OperationCanceledException)
                     {
                         await Task.Delay(TimeSpan.FromMilliseconds(500 * attempt), cancellationToken).ConfigureAwait(false);
                     }

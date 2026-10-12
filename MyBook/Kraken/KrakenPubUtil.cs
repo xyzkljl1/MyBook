@@ -120,10 +120,23 @@ namespace MyBook
             var since = new DateTimeOffset(DateTime.SpecifyKind(requestStart, DateTimeKind.Utc)).ToUnixTimeSeconds();
             var pair = asset + "USD";
             var url = $"{KrakenOhlcUrl}?pair={Uri.EscapeDataString(pair)}&assetVersion=1&interval=1440&since={since.ToString(CultureInfo.InvariantCulture)}";
-            using var response = await sharedHttpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
-            var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-                throw new InvalidOperationException($"Kraken OHLC request failed for {pair}: {(int)response.StatusCode} {response.ReasonPhrase}.");
+            string text;
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    using var response = await sharedHttpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
+                    text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                        throw new InvalidOperationException($"Kraken OHLC request failed for {pair}: {(int)response.StatusCode} {response.ReasonPhrase}.");
+                    break;
+                }
+                catch (Exception e) when (attempt < 3 && !cancellationToken.IsCancellationRequested
+                    && e is HttpRequestException or OperationCanceledException)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(500 * attempt), cancellationToken).ConfigureAwait(false);
+                }
+            }
 
             var json = JObject.Parse(text);
             var errors = json["error"] as JArray;
