@@ -87,6 +87,9 @@ partial class PubWebUtil
         if (table is null)
         {
             var empty = document.DocumentNode.SelectSingleNode("//*[contains(concat(' ', normalize-space(@class), ' '), ' huilv-history-empty-alert ')]");
+            if (empty is not null && Regex.IsMatch(empty.InnerText, "频繁|频率|次数|限流|过快")
+                && Regex.IsMatch(empty.InnerText, "稍后|稍等|重试|再试"))
+                throw new InvalidOperationException("Kylc rate limited; retry later.");
             if (empty?.InnerText.Trim() == "没有相关汇率记录!") return [];
             throw new InvalidOperationException("Missing historical quote table.");
         }

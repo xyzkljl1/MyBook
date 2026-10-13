@@ -144,8 +144,9 @@ namespace MyBook
                 await RunImportTaskAsync("Steam session refresh", web.RefreshSteamSessionAsync).ConfigureAwait(false);
                 await RunImportTaskAsync("Bilibili session refresh", web.RefreshBilibiliSessionAsync).ConfigureAwait(false);
                 await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates).ConfigureAwait(false);
-                foreach (var source in PubWebUtil.KylcSources)
-                    await RunImportTaskAsync(source.ToString(), () => pubWeb.FetchKylcRates(source)).ConfigureAwait(false);
+                // Rotate by local calendar date so a failed bank never blocks the next day's bank.
+                var kylcSource = PubWebUtil.KylcSources[DateOnly.FromDateTime(today).DayNumber % PubWebUtil.KylcSources.Length];
+                await RunImportTaskAsync(kylcSource.ToString(), () => pubWeb.FetchKylcRates(kylcSource)).ConfigureAwait(false);
                 await mail.RunWithMailSessionScope(async () =>
                 {
                     await RunScheduledImportTaskAsync("ICBC", StatementImportProvider.ICBCBillMail,
