@@ -692,6 +692,8 @@ namespace MyBook
         public List<StatementImportSummaryViewModel> LatestStatementImports { get; set; } = [];
         public string ImportRuntimeText { get; private set; } = "导入未启用";
         public bool HasImportFailureMarker { get; private set; }
+        public bool HasMarketDataFailureMarker { get; private set; }
+        public bool HasAnyFailureMarker => HasImportFailureMarker || HasMarketDataFailureMarker;
         public ObservableCollection<RecordDetailRowViewModel> RecordDetails { get; } = [];
         public ObservableCollection<AccountBalanceRowViewModel> DetailAccountBalances { get; } = [];
         public ObservableCollection<AllocatedExpenseBucketViewModel> AllocatedExpenseBuckets { get; } = [];
@@ -1244,6 +1246,13 @@ namespace MyBook
             {
                 HasImportFailureMarker = status.HasImportFailureMarker;
                 OnPropertyChanged(nameof(HasImportFailureMarker));
+                OnPropertyChanged(nameof(HasAnyFailureMarker));
+            }
+            if (HasMarketDataFailureMarker != status.HasMarketDataFailureMarker)
+            {
+                HasMarketDataFailureMarker = status.HasMarketDataFailureMarker;
+                OnPropertyChanged(nameof(HasMarketDataFailureMarker));
+                OnPropertyChanged(nameof(HasAnyFailureMarker));
             }
             if (!String.IsNullOrWhiteSpace(status.CurrentTaskName))
             {

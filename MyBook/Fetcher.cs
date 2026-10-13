@@ -34,6 +34,7 @@ namespace MyBook
         FetchRuntimeStatus runtimeStatus = new();
         const int DefaultSIMPollIntervalMinutes = 5;
         const string ImportFailureMarkerFileName = "MyBook.import-failed.tmp";
+        const string MarketDataFailureMarkerFileName = "MyBook.market-data-failed.tmp";
         static readonly UTF8Encoding ImportFailureMarkerEncoding = new(false);
         static readonly object importFailureMarkerLock = new();
 
@@ -87,7 +88,7 @@ namespace MyBook
                 }
                 catch (Exception e)
                 {
-                    CreateImportFailureMarker("market prices", e);
+                    CreateImportFailureMarker("market prices", e, marketData: true);
                     Console.WriteLine($"market prices failed: {e.Message}");
                 }
                 finally { Volatile.Write(ref marketPricesRunning, 0); }
@@ -143,10 +144,10 @@ namespace MyBook
                 SetCurrentTask("每日导入");
                 await RunImportTaskAsync("Steam session refresh", web.RefreshSteamSessionAsync).ConfigureAwait(false);
                 await RunImportTaskAsync("Bilibili session refresh", web.RefreshBilibiliSessionAsync).ConfigureAwait(false);
-                await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates).ConfigureAwait(false);
+                await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates, marketData: true).ConfigureAwait(false);
                 // Rotate by local calendar date so a failed bank never blocks the next day's bank.
                 var kylcSource = PubWebUtil.KylcSources[DateOnly.FromDateTime(today).DayNumber % PubWebUtil.KylcSources.Length];
-                await RunImportTaskAsync(kylcSource.ToString(), () => pubWeb.FetchKylcRates(kylcSource)).ConfigureAwait(false);
+                await RunImportTaskAsync(kylcSource.ToString(), () => pubWeb.FetchKylcRates(kylcSource), marketData: true).ConfigureAwait(false);
                 await mail.RunWithMailSessionScope(async () =>
                 {
                     await RunScheduledImportTaskAsync("ICBC", StatementImportProvider.ICBCBillMail,
@@ -310,7 +311,7 @@ namespace MyBook
             });
         }
 
-        private async Task RunImportTaskAsync(string name, Func<Task> fetch)
+        private async Task RunImportTaskAsync(string name, Func<Task> fetch, bool marketData = false)
         {
             SetCurrentTask(name);
             try
@@ -319,7 +320,7 @@ namespace MyBook
             }
             catch (Exception e)
             {
-                CreateImportFailureMarker(name, e);
+                CreateImportFailureMarker(name, e, marketData);
                 Console.WriteLine($"scheduled {name} fetch fail: {e.Message}");
             }
             finally
@@ -334,35 +335,39 @@ namespace MyBook
             {
                 var status = runtimeStatus.Clone();
                 status.HasImportFailureMarker = File.Exists(GetImportFailureMarkerPath());
+                status.HasMarketDataFailureMarker = File.Exists(GetImportFailureMarkerPath(marketData: true));
                 return status;
             }
         }
 
-        private static string GetImportFailureMarkerPath()
+        private static string GetImportFailureMarkerPath(bool marketData = false)
         {
-            return Path.Combine(AppContext.BaseDirectory, ImportFailureMarkerFileName);
+            return Path.Combine(AppContext.BaseDirectory, marketData ? MarketDataFailureMarkerFileName : ImportFailureMarkerFileName);
         }
 
         public void ClearImportFailureMarker()
         {
             lock (importFailureMarkerLock)
+            {
                 File.Delete(GetImportFailureMarkerPath());
+                File.Delete(GetImportFailureMarkerPath(marketData: true));
+            }
         }
 
-        private static void CreateImportFailureMarker(string taskName, Exception exception)
+        private static void CreateImportFailureMarker(string taskName, Exception exception, bool marketData = false)
         {
             OnImportFailed(taskName, exception);
             try
             {
                 var content = String.Join(
                     Environment.NewLine,
-                    "MyBook import failed",
+                    marketData ? "MyBook market data failed (B)" : "MyBook import failed (A)",
                     DateTime.Now.ToString("O", CultureInfo.InvariantCulture),
                     taskName,
                     exception.GetType().FullName ?? exception.GetType().Name)
                     + Environment.NewLine;
                 lock (importFailureMarkerLock)
-                    File.WriteAllText(GetImportFailureMarkerPath(), content, ImportFailureMarkerEncoding);
+                    File.WriteAllText(GetImportFailureMarkerPath(marketData), content, ImportFailureMarkerEncoding);
             }
             catch (Exception markerException)
             {
@@ -428,6 +433,7 @@ namespace MyBook
         public DateTime? LastFetchTime { get; set; }
         public DateTime? NextFetchTime { get; set; }
         public bool HasImportFailureMarker { get; set; }
+        public bool HasMarketDataFailureMarker { get; set; }
 
         public FetchRuntimeStatus Clone()
         {

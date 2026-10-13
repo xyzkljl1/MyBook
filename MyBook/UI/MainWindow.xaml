@@ -127,12 +127,16 @@
                                Margin="10,0,0,0"/>
                 </Grid>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0"
-                            Visibility="{Binding HasImportFailureMarker, Converter={StaticResource BooleanToVisibility}}">
-                    <TextBox Style="{StaticResource SelectableText}" Text="导入失败" FontSize="12" Foreground="#B91C1C"
-                             VerticalAlignment="Center"/>
-                    <Button Width="26" Height="24" Margin="6,0,0,0"
+                            Visibility="{Binding HasAnyFailureMarker, Converter={StaticResource BooleanToVisibility}}">
+                    <TextBox Style="{StaticResource SelectableText}" Text="导入失败 A" FontSize="12" Foreground="#B91C1C"
+                             VerticalAlignment="Center" Margin="0,0,6,0"
+                             Visibility="{Binding HasImportFailureMarker, Converter={StaticResource BooleanToVisibility}}"/>
+                    <TextBox Style="{StaticResource SelectableText}" Text="行情失败 B" FontSize="12" Foreground="#B91C1C"
+                             VerticalAlignment="Center" Margin="0,0,6,0"
+                             Visibility="{Binding HasMarketDataFailureMarker, Converter={StaticResource BooleanToVisibility}}"/>
+                    <Button Width="26" Height="24"
                             FontFamily="Segoe MDL2 Assets" FontSize="13" Content="&#xE894;"
-                            ToolTip="清除失败标记（不重试导入）" AutomationProperties.Name="清除失败标记"
+                            ToolTip="清除全部失败标记（不重试）" AutomationProperties.Name="清除全部失败标记"
                             Click="ClearImportFailureMarker_Click"/>
                 </StackPanel>
                 <TextBox Style="{StaticResource SelectableText}"
