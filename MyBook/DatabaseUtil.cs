@@ -1004,12 +1004,19 @@ namespace MyBook
         {
             var result = new List<Record>();
             var (recordDate, postingDate) = GetInitializationRecordDates(records, importTime);
-            var initializedAccountIds = new HashSet<int>();
+            // The restored Start snapshot already supplies these accounts' opening balances.
+            var startSnapshot = GetStartSnapshot();
+            var initializedAccountIds = startSnapshot is null
+                ? new HashSet<int>()
+                : db.Queryable<SnapshotItem>()
+                    .Where(item => item._snapshot_Id == startSnapshot.Id && item._account_Id.HasValue)
+                    .Select(item => item._account_Id!.Value)
+                    .ToList().ToHashSet();
 
             if (holdingAccount is not null && beginningHoldings is not null)
             {
                 var account = GetPostingAccount(holdingAccount);
-                if (!AccountHasHistory(account))
+                if (!initializedAccountIds.Contains(account.Id) && !AccountHasHistory(account))
                 {
                     foreach (var holding in beginningHoldings)
                     {
