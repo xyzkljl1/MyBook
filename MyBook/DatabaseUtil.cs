@@ -4704,6 +4704,10 @@ namespace MyBook
             if (record.Reason == "手续费" && record.DestAccount == "取款费用")
                 return record.Reason;
 
+            // Account-level withholding (such as lending-income tax) may have no security attribution.
+            if (record.Reason == "税费" && String.IsNullOrWhiteSpace(record.DestAccount))
+                return record.Reason;
+
             if (record.Reason == "持仓价格变动")
             {
                 if (holdingsById.TryGetValue(record._holding_Id, out var holding)
