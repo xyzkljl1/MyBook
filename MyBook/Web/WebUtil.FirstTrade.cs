@@ -258,9 +258,12 @@ namespace MyBook
                         _ => throw new FirstTradeException("unsupported account history transaction type")
                     };
                 }
-                cash += tx.Amount;
+                cash += tx.Amount - tx.WithheldTax;
                 AddRecord(tx.Amount, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
                     tx.Date, isInternal, null, 0, postingDate, reason == "转账" ? "" : tx.Symbol);
+                if (tx.WithheldTax != 0)
+                    AddRecord(-tx.WithheldTax, "税费", source + "|tax|" + tx.Description,
+                        tx.Date, false, null, 0, postingDate, tx.Symbol);
             }
             // 出于神秘原因first返回的余额会自己浮动。
             if (Math.Abs(cash - endingCash) > 1m) // USD
@@ -308,6 +311,7 @@ namespace MyBook
             public DateTime? SettlementDate { get; init; }
             public decimal Commission { get; init; }
             public decimal Fees { get; init; }
+            public decimal WithheldTax { get; init; }
         }
 
         internal sealed record FirstTradeTransferEvidence(DateTime Date, string Symbol, decimal Quantity,

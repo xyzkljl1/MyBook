@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -14,6 +16,8 @@ namespace MyBook
         private readonly DatabaseUtil? database;
         private readonly HttpClient httpClient;
         private readonly HttpClient googleHttpClient;
+        private readonly HttpClient directHttpClient;
+        private readonly HttpClient secondaryHttpClient;
 
         public PubWebUtil(IConfigurationRoot config, DatabaseUtil? database = null)
         {
@@ -21,6 +25,8 @@ namespace MyBook
             this.database = database;
             httpClient = CreateHttpClient(ParsePubWebProxyConfig(config["pubweb_proxy"]));
             googleHttpClient = CreateHttpClient(ParsePubWebProxyConfig(config["pubweb_google_proxy"], "pubweb_google_proxy"));
+            directHttpClient = CreateHttpClient(null);
+            secondaryHttpClient = CreateHttpClient(ParsePubWebProxyConfig(config["pubweb_proxy2"], "pubweb_proxy2"));
         }
 
         public Task<MarketPrice?> Fetch(Holding holding)
@@ -109,9 +115,17 @@ namespace MyBook
         }
 
         internal async Task FetchMarketPricesAsync(IReadOnlyList<(string Code, HoldingType HoldingType)> targets,
-            KrakenPubUtil kraken, Action<MarketPrice> onPrice)
+            KrakenPubUtil kraken, Action<MarketPrice> onPrice, bool scheduled = false)
         {
+            var startedAt = DateTimeOffset.Now;
+            var elapsed = Stopwatch.StartNew();
+            var results = new Dictionary<(string Code, HoldingType Type), MarketPrice>();
             var errors = new List<Exception>();
+            void Report(MarketPrice quote)
+            {
+                results[(quote.Code, quote.HoldingType)] = quote;
+                onPrice(quote);
+            }
             foreach (var target in targets.Where(target => target.HoldingType != HoldingType.Crypto))
             {
                 try
@@ -119,7 +133,7 @@ namespace MyBook
                     var quote = await FetchWithRetry(async () =>
                         await Fetch(target.Code, target.HoldingType).ConfigureAwait(false)
                         ?? throw new InvalidOperationException($"Missing market price: {target.Code} ({target.HoldingType}).")).ConfigureAwait(false);
-                    onPrice(quote);
+                    Report(quote);
                 }
                 catch (Exception e) { errors.Add(e); }
             }
@@ -128,9 +142,10 @@ namespace MyBook
                 var crypto = await FetchWithRetry(() => kraken.FetchLatestUsdPricesAsync(targets
                     .Where(target => target.HoldingType == HoldingType.Crypto).Select(target => target.Code))).ConfigureAwait(false);
                 foreach (var quote in crypto)
-                    onPrice(quote);
+                    Report(quote);
             }
             catch (Exception e) { errors.Add(e); }
+            WriteMarketPriceLog(startedAt, elapsed.Elapsed, targets, results, errors, scheduled);
             if (errors.Count > 0)
                 throw new AggregateException("Market price requests failed.", errors);
 
@@ -146,6 +161,37 @@ namespace MyBook
             }
         }
 
+        private static void WriteMarketPriceLog(DateTimeOffset startedAt, TimeSpan elapsed,
+            IReadOnlyList<(string Code, HoldingType HoldingType)> targets,
+            IReadOnlyDictionary<(string Code, HoldingType Type), MarketPrice> results, List<Exception> errors, bool scheduled)
+        {
+            try
+            {
+                var content = new StringBuilder().AppendLine(FormattableString.Invariant(
+                    $"[{startedAt:O}] trigger={(scheduled ? "scheduled" : "manual-test")}; end={DateTimeOffset.Now:O}; elapsed={elapsed.TotalSeconds:F3}s; result={(errors.Count == 0 ? "OK" : "FAIL")}; succeeded={results.Count}; missing={targets.Count - results.Count}; errors={errors.Count}"));
+                foreach (var target in targets)
+                    content.AppendLine(results.TryGetValue(target, out var quote)
+                        ? FormattableString.Invariant($"OK {target.Code}/{target.HoldingType}: {quote.Price} {quote.Currency}; fetchedAt={quote.FetchedAt:O}")
+                        : $"MISSING {target.Code}/{target.HoldingType}");
+                foreach (var error in errors.SelectMany(error => error is AggregateException aggregate
+                    ? aggregate.Flatten().InnerExceptions.AsEnumerable() : [error]))
+                {
+                    // These providers construct public request summaries without credentials or response bodies.
+                    var detail = error is InvalidOperationException &&
+                        (error.Message.StartsWith("Google Finance GET www.google.com/finance/quote/", StringComparison.Ordinal)
+                        || error.Message.StartsWith("Kraken GET api.kraken.com/0/public/Ticker", StringComparison.Ordinal))
+                        ? error.Message.Replace('\r', ' ').Replace('\n', ' ') : error.GetType().FullName;
+                    content.AppendLine($"ERROR {detail}");
+                }
+                File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "MyBook.market-prices.log"),
+                    content.AppendLine().ToString(), new UTF8Encoding(false));
+            }
+            catch (Exception)
+            {
+                Console.Error.WriteLine("Could not write market price log.");
+            }
+        }
+
         public Task<List<Holding>> Fetch(Account account)
         {
             Console.WriteLine("skip account holding fetch: fetcher is not configured");
@@ -156,6 +202,8 @@ namespace MyBook
         {
             httpClient.Dispose();
             googleHttpClient.Dispose();
+            directHttpClient.Dispose();
+            secondaryHttpClient.Dispose();
         }
 
         public async Task<JObject?> HttpGetJson(string url)

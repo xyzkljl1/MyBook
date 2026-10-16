@@ -49,16 +49,23 @@ partial class PubWebUtil
             throw new ArgumentOutOfRangeException(nameof(through), "Kylc history requires a completed date range in Beijing time.");
 
         var result = new List<RateHistory>();
+        // Keep both quote directions together while distributing each bank's currency batch.
+        var (client, route) = currency switch
+        {
+            CurrencyType.HKD => (httpClient, "pubweb_proxy"),
+            CurrencyType.GBP => (secondaryHttpClient, "pubweb_proxy2"),
+            _ => (directHttpClient, "direct")
+        };
         var path = $"www.kylc.com/huilv/d-{bankCode}-{currency.ToString().ToLowerInvariant()}" + (reverse ? ".html" : "/hui_buy.html");
         for (var start = from; start <= through;)
         {
             var end = through.DayNumber - start.DayNumber > 364 ? start.AddDays(364) : through;
             // The site's date picker requires two distinct dates, even for a one-day lookup.
             var queryStart = start == end ? start.AddDays(-1) : start;
-            var request = $"Kylc GET {path} ({start:yyyy-MM-dd} to {end:yyyy-MM-dd})";
+            var request = $"Kylc GET {path} ({start:yyyy-MM-dd} to {end:yyyy-MM-dd}; route={route})";
             try
             {
-                using var response = await httpClient.GetAsync($"https://{path}?datefrom={queryStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}&dateto={end.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}").ConfigureAwait(false);
+                using var response = await client.GetAsync($"https://{path}?datefrom={queryStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}&dateto={end.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}").ConfigureAwait(false);
                 if (response.StatusCode != HttpStatusCode.OK)
                     throw new InvalidOperationException($"{request}: HTTP {(int)response.StatusCode}.");
                 var html = await response.Content.ReadAsStringAsync().ConfigureAwait(false);

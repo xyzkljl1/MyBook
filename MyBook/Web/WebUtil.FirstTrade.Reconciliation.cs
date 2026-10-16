@@ -14,7 +14,7 @@ partial class WebUtil
 {
     private sealed record FirstTradeExportRow(DateTime Date, DateTime? Settlement, string Type, string Symbol,
         decimal Quantity, decimal Price, decimal Amount, string Description, string? Subaccount = null,
-        string? FitId = null, decimal? Commission = null, decimal? Fees = null);
+        string? FitId = null, decimal? Commission = null, decimal? Fees = null, decimal WithheldTax = 0);
 
     private static List<FirstTradeTransaction>? ReconcileFirstTradeSources(FirstTradeAccountCapture item)
     {
@@ -29,6 +29,7 @@ partial class WebUtil
             if (date < item.HistoryFrom.Date || date > item.HistoryThrough.Date)
                 throw new FirstTradeException("out-of-range history transaction");
             var type = FirstTradeText(row, "trans_str");
+            if (type == "WITHDRAW") type = "WITHDRAWAL";
             var description = FirstTradeText(row, "description");
             var subaccount = FirstTradeText(row, "account_type");
             var symbol = FirstTradeText(row, "symbol", allowEmpty: true);
@@ -38,7 +39,8 @@ partial class WebUtil
             if (subaccount is not ("Cash" or "Margin")) throw new FirstTradeException("unsupported history subaccount");
             var tx = new FirstTradeTransaction("", date, type, description, subaccount, symbol, quantity, price, amount);
             var csvRow = Match(csv, tx, "CSV");
-            var ofxRow = Match(ofx, tx, "OFX");
+            var withheldTax = csvRow?.WithheldTax ?? 0;
+            var ofxRow = Match(ofx, tx, "OFX", withheldTax);
             // Missing rows after the report's coverage date are normal publication lag.
             // Validate the rest of the capture before waiting, so lag cannot hide covered-row conflicts.
             var requiresOfx = !(type == "OTHER" && quantity != 0);
@@ -77,18 +79,19 @@ partial class WebUtil
             var identity = hash + ":" + occurrence;
             result.Add(tx with { Key = ofxRow?.FitId is string id ? "ofx:" + id : "v2:" + identity,
                 Identity = identity, SettlementDate = csvRow.Settlement ?? ofxRow?.Settlement,
-                Commission = commission, Fees = fees });
+                Commission = commission, Fees = fees, WithheldTax = withheldTax });
         }
         if (csv.Any(InRange) || ofx.Any(InRange)) throw new FirstTradeException("export contains transactions missing from API history");
         return pending ? null : result;
 
         bool InRange(FirstTradeExportRow row) => row.Date >= item.HistoryFrom.Date && row.Date <= item.HistoryThrough.Date;
 
-        static FirstTradeExportRow? Match(List<FirstTradeExportRow> rows, FirstTradeTransaction tx, string source)
+        static FirstTradeExportRow? Match(List<FirstTradeExportRow> rows, FirstTradeTransaction tx, string source, decimal withheldTax = 0)
         {
-            // CSV labels cash deposits OTHER; the API supplies DEPOSIT and OFX confirms the credit.
+            // CSV labels cash transfers OTHER; API and OFX must agree on direction and amount.
             var candidates = rows.Where(r => r.Date == tx.Date
-                && (r.Type == tx.Type || source == "CSV" && r.Type == "OTHER" && tx.Type == "DEPOSIT") && r.Amount == tx.Amount
+                && (r.Type == tx.Type || source == "CSV" && r.Type == "OTHER" && tx.Type is "DEPOSIT" or "WITHDRAWAL")
+                && r.Amount == tx.Amount - withheldTax
                 && Math.Abs(r.Quantity) == Math.Abs(tx.Quantity) && r.Price == tx.Price
                 && (r.Quantity == 0 || r.Symbol == tx.Symbol)
                 && (r.Subaccount is null || r.Subaccount.Equals(tx.Subaccount, StringComparison.OrdinalIgnoreCase))).ToList();
@@ -126,7 +129,8 @@ partial class WebUtil
                 var tx = matches[0];
                 if (identity.Length > 0 && (identity != tx.Identity
                     || group.Where(r => r.Source.Contains("|fee|", StringComparison.Ordinal)).Sum(r => r.v) != -tx.Fees
-                    || group.Where(r => r.Source.Contains("|commission|", StringComparison.Ordinal)).Sum(r => r.v) != -tx.Commission))
+                    || group.Where(r => r.Source.Contains("|commission|", StringComparison.Ordinal)).Sum(r => r.v) != -tx.Commission
+                    || group.Where(r => r.Source.Contains("|tax|", StringComparison.Ordinal)).Sum(r => r.v) != -tx.WithheldTax))
                     throw new FirstTradeException($"previously imported transaction details revised on {tx.Date:yyyy-MM-dd}");
                 if (!known.Add(matches[0].Key)) throw new FirstTradeException("multiple previous transactions match one incoming transaction");
             }
@@ -161,9 +165,19 @@ partial class WebUtil
             if (fields.Length != expected.Length || FirstTradeDecimal(fields[7]) != 0 || fields[12] is not ("Trade" or "Financial"))
                 throw new FirstTradeException("unsupported CSV row or accrued interest");
             var type = fields[3].ToUpperInvariant() switch { "BUY" => "BOUGHT", "SELL" => "SOLD", var value => value };
+            decimal withheldTax = 0;
+            if (type == "INTEREST" && fields[4].StartsWith("FULLYPAID LENDING REBATE", StringComparison.Ordinal)
+                && fields[4].Contains("TAX WITHHELD", StringComparison.Ordinal))
+            {
+                // CSV reports gross lending income and names the tax in its description; OFX reports net income.
+                var tax = Regex.Matches(fields[4], @"TAX WITHHELD[^$\r\n]*\$([0-9]+\.[0-9]{2})(?![0-9.])");
+                if (tax.Count != 1) throw new FirstTradeException("missing or ambiguous lending withholding tax in CSV");
+                withheldTax = FirstTradeDecimal(tax[0].Groups[1].Value);
+                if (withheldTax > FirstTradeDecimal(fields[8])) throw new FirstTradeException("lending withholding tax exceeds income");
+            }
             result.Add(new(FirstTradeDate(fields[5], "yyyy-MM-dd"), FirstTradeDate(fields[6], "yyyy-MM-dd"),
                 type, fields[0], FirstTradeDecimal(fields[1]), fields[2].Length == 0 ? 0 : FirstTradeDecimal(fields[2]),
-                FirstTradeDecimal(fields[8]), fields[4], Commission: FirstTradeDecimal(fields[9]), Fees: FirstTradeDecimal(fields[10])));
+                FirstTradeDecimal(fields[8]), fields[4], Commission: FirstTradeDecimal(fields[9]), Fees: FirstTradeDecimal(fields[10]), WithheldTax: withheldTax));
         }
         return result;
     }
@@ -202,8 +216,9 @@ partial class WebUtil
                 "INCOME" when Text("INCOMETYPE") == "INTEREST" || description.StartsWith("FULLYPAID LENDING REBATE", StringComparison.Ordinal) => "INTEREST",
                 "INVBANKTRAN" when Text("NAME") is "XFER CASH TO MARGIN" or "XFER MARGIN TO CASH" => "OTHER",
                 "INVBANKTRAN" when Text("TRNTYPE") is "DEP" or "CREDIT" => "DEPOSIT",
+                "INVBANKTRAN" when Text("TRNTYPE") == "DEBIT" && Number("TRNAMT") < 0 => "WITHDRAWAL",
                 "INVBANKTRAN" when Text("TRNTYPE") == "FEE" => "FEE",
-                _ => throw new FirstTradeException("unsupported OFX transaction type")
+                _ => throw new FirstTradeException($"unsupported OFX transaction type: {Regex.Replace(row.Name.LocalName, "[^A-Z_]", "?")}; subtype={Regex.Replace(Text("TRNTYPE") + Text("INCOMETYPE") + Text("BUYTYPE") + Text("SELLTYPE"), "[^A-Z_]", "?")}; date={Date(Text("DTTRADE").Length > 0 ? Text("DTTRADE") : Text("DTPOSTED")):yyyy-MM-dd}")
             };
             var trade = type is "BOUGHT" or "SOLD";
             if (trade && (Text("COMMISSION").Length == 0 || Text("FEES").Length == 0)) throw new FirstTradeException("OFX trade charges missing");

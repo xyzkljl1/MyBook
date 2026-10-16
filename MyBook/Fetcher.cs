@@ -84,7 +84,7 @@ namespace MyBook
                     // Only read the held symbols; live quotes never update accounting data.
                     var targets = new DatabaseUtil(config).GetMarketPriceTargets();
                     using var quotes = new PubWebUtil(config);
-                    await quotes.FetchMarketPricesAsync(targets, new KrakenPubUtil(), CacheMarketPrice).ConfigureAwait(false);
+                    await quotes.FetchMarketPricesAsync(targets, new KrakenPubUtil(), CacheMarketPrice, scheduled: true).ConfigureAwait(false);
                 }
                 catch (Exception e)
                 {
