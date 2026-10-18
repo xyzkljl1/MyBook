@@ -97,7 +97,7 @@ namespace MyBook
         {
             DateOnly QuoteDate(RateHistory rate) => rate.source == RateSource.GoogleFinance
                 ? DateOnly.FromDateTime(DateTime.SpecifyKind(rate.rateDate, DateTimeKind.Local).ToUniversalTime())
-                : KylcDate(rate.rateDate);
+                : BeijingQuoteDate(rate.rateDate);
             var reverseByDate = reverse.ToDictionary(QuoteDate);
             var result = new List<RateHistory>();
             foreach (var rate in forward)

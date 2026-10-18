@@ -43,7 +43,7 @@ namespace MyBook
             config = new ConfigurationBuilder().AddJsonFile("config.json", false).Build();
             marketPriceTimer?.Dispose();
             marketPriceTimer = new Timer(_ => RunMarketPricesInBackground(), null,
-                TimeSpan.Zero, TimeSpan.FromMinutes(15));
+                TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(15));
             if (IsDebugBuild())
             {
                 Console.WriteLine("skip scheduled imports in DEBUG");
@@ -146,8 +146,8 @@ namespace MyBook
                 await RunImportTaskAsync("Bilibili session refresh", web.RefreshBilibiliSessionAsync).ConfigureAwait(false);
                 await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates, marketData: true).ConfigureAwait(false);
                 // Rotate by local calendar date so a failed bank never blocks the next day's bank.
-                var kylcSource = PubWebUtil.KylcSources[DateOnly.FromDateTime(today).DayNumber % PubWebUtil.KylcSources.Length];
-                await RunImportTaskAsync(kylcSource.ToString(), () => pubWeb.FetchKylcRates(kylcSource), marketData: true).ConfigureAwait(false);
+                var bankSource = PubWebUtil.HuilvbaSources[DateOnly.FromDateTime(today).DayNumber % PubWebUtil.HuilvbaSources.Length];
+                await RunImportTaskAsync(bankSource.ToString(), () => pubWeb.FetchHuilvbaRates(bankSource), marketData: true).ConfigureAwait(false);
                 await mail.RunWithMailSessionScope(async () =>
                 {
                     await RunScheduledImportTaskAsync("ICBC", StatementImportProvider.ICBCBillMail,

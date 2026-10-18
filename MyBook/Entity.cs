@@ -158,7 +158,9 @@ namespace MyBook
         private decimal _quantity = 0;
     }
 
-    public enum RateSource { GoogleFinance, IFastWebsite, IFastMail, KylcCcb, KylcIcbc, KylcCib, KylcHfBank }
+    // Kylc values identify retained historical rows only; new bank quotes come from Huilvba.
+    public enum RateSource { GoogleFinance, IFastWebsite, IFastMail, KylcCcb, KylcIcbc, KylcCib, KylcHfBank,
+        HlbCcb, HlbIcbc, HlbCib, HlbHfBank }
 
     [SugarTable("RateHistory")]
     [SugarIndex("idx_RateHistory_source_currency_date", nameof(source), OrderByType.Asc, nameof(currency), OrderByType.Asc, nameof(rateDate), OrderByType.Asc)]
@@ -167,7 +169,7 @@ namespace MyBook
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public int Id { get; set; }
 
-        [SugarColumn(DefaultValue = "GoogleFinance", ColumnDataType = "enum('GoogleFinance','IFastWebsite','IFastMail','KylcCcb','KylcIcbc','KylcCib','KylcHfBank')", SqlParameterDbType = typeof(EnumToStringConvert))]
+        [SugarColumn(DefaultValue = "GoogleFinance", ColumnDataType = "enum('GoogleFinance','IFastWebsite','IFastMail','KylcCcb','KylcIcbc','KylcCib','KylcHfBank','HlbCcb','HlbIcbc','HlbCib','HlbHfBank')", SqlParameterDbType = typeof(EnumToStringConvert))]
         public RateSource source { get; set; } = RateSource.GoogleFinance;
 
         [SugarColumn(DefaultValue = "RMB", ColumnDataType = MySqlEnumColumnTypes.CurrencyType, SqlParameterDbType = typeof(EnumToStringConvert))]

@@ -44,7 +44,7 @@ Place initial IBKR CSV reports named `IBKR_INITIAL_*.csv` in the private, ignore
 - **Nexus:** monthly Donation Points income through GraphQL.
 - **Bilibili:** shell wallet balance through the website API. Run `dotnet MyBook.dll --bilibili-login` from the build-output directory and scan the console QR code with the Bilibili app. This mode only authorizes and saves the program's independent session; it does not start the dashboard or background tasks. Automatic session maintenance runs daily, independently of imports.
 - **Steam:** account/wallet information through SteamKit2 and wallet transactions from authenticated purchase-history pages, both using `steam_proxy`. Run `dotnet MyBook.dll --steam-login` from the build-output directory to enter credentials and complete Steam Guard; `dotnet MyBook.dll --steam-login --saved` uses the stored session.
-- **Exchange rates:** daily historical quotes against CNY from Google Finance and Kylc bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR). Currency valuations use the latest available Google historical rates.
+- **Exchange rates:** daily historical quotes against CNY from Google Finance and Huilvba bank quote pages (CCB, ICBC, Industrial Bank and Hengfeng Bank; USD, HKD, GBP and EUR). Currency valuations use the latest available Google historical rates.
 
 Configure the corresponding accounts and fixed import starting points before importing.
 
@@ -60,7 +60,7 @@ Copy-Item MyBook\config.json.example MyBook\config.json
 
 - `database_connection`: MySQL connection string; an empty value uses the built-in local default.
 - `yahoo_user` / `yahoo_pass`, `gmail_user` / `gmail_app_pwd`: statement-mail credentials.
-- `mail_proxy`: optional proxy for PayPal mail and FirstTrade. Other modules fetch mail and attachments directly, ignoring system proxies. `pubweb_google_proxy`: optional HTTP proxy for Google Finance stock prices and exchange rates; `pubweb_proxy`: optional proxy for other public web requests. Kylc requests use direct connections, `pubweb_proxy` and `pubweb_proxy2`. Empty proxy settings use direct connections.
+- `mail_proxy`: optional proxy for PayPal mail and FirstTrade. Other modules fetch mail and attachments directly, ignoring system proxies. `pubweb_google_proxy`: optional HTTP proxy for Google Finance stock prices and exchange rates; `pubweb_proxy`: optional proxy for other public web requests. Huilvba requests use direct connections, `pubweb_proxy` and `pubweb_proxy2`. Empty proxy settings use direct connections.
 - `alphavantage_key`: market-data key; `ib_gateway_port`: Interactive Brokers gateway port.
 - `nexus_api_key`: Nexus personal API key used by current imports.
 - `kraken_api_key` / `kraken_api_secret`, `etherscan_api_key`: credentials for read-only Kraken and Ethereum queries.
@@ -120,7 +120,7 @@ dotnet build MyBook\MyBook.csproj -v minimal /p:UseSharedCompilation=false
 
 Import progress and scheduling use dates in the runtime machine's local time zone. Source timestamps are converted before taking their dates. Statement periods and transaction dates retain their financial meaning; integrations handle UTC days, US Eastern dates and other source-specific query ranges. Changing the runtime time zone changes calendar-day scheduling boundaries.
 
-Historical rate timestamps use local time, separately from retrieval time. Kylc supplies dates only; its dates use Beijing midnight converted to local time as date markers, not actual publication times.
+Historical rate timestamps use local time, separately from retrieval time. Daily bank quotes use Beijing midnight converted to local time as date markers, not actual publication times.
 
 Release builds check for daily imports immediately on startup and every 24 hours afterward, fetching exchange rates first. Automatic cycles are attempted at most once per local calendar day, including across restarts; a failed or interrupted cycle waits until a later day unless retried manually. Debug builds do not schedule imports. Each cycle runs configured, enabled integrations whose query intervals have elapsed. Intervals must be positive and become due on the specified day. Failed queries do not restart the interval. A zero missing-report deadline disables only overdue errors, not network, parsing or financial validation errors.
 
