@@ -3737,9 +3737,11 @@ namespace MyBook
                 .ToList();
             var assetSummaryPoints = BuildAssetSummaryPoints(assetSummaryBalances, records, exchangeRates, today.Date);
             var todayAssetSummary = assetSummaryPoints.LastOrDefault(point => point.IsToday);
+            var latestImports = BuildLatestStatementImportSummaries();
 
             return new DashboardData
             {
+                MarketValuationStartDate = GetMarketValuationStartDate(latestImports, investmentRecords),
                 MarketHoldings = holdings.Where(holding => holding.quantity != 0
                     && holding.holdingType is HoldingType.NASDAQ or HoldingType.ARCA or HoldingType.SHANGHAI or HoldingType.Crypto).ToList(),
                 LiveHoldings = holdings.Where(holding => holding.quantity != 0 && !Holding.IsSingleValueAsset(holding.holdingType)).ToList(),
@@ -3792,11 +3794,36 @@ namespace MyBook
                     .Where(currency => currency != CurrencyType.RMB && !exchangeRates.ContainsKey(currency))
                     .OrderBy(currency => currency)
                     .ToList(),
-                LatestStatementImports = BuildLatestStatementImportSummaries(),
+                LatestStatementImports = latestImports,
                 LastMonthStart = lastMonthStart,
                 LastMonthEnd = lastMonthEnd,
                 MonthlyFlowStartMonth = firstMonth
             };
+        }
+
+        private static DateTime? GetMarketValuationStartDate(
+            List<StatementImportSummaryData> imports, List<Record> investmentRecords)
+        {
+            var dates = new List<DateTime>();
+            foreach (var import in imports)
+            {
+                // Use the valuation's source date, not the date the report was received or saved.
+                if (import.Provider == StatementImportProvider.IBKRReportMail
+                    && DateTime.TryParseExact(import.StatementKey.Split('_').Last(), "yyyy-MM-dd",
+                        CultureInfo.InvariantCulture, DateTimeStyles.None, out var reportDate))
+                    dates.Add(reportDate);
+                if (import.Provider == StatementImportProvider.FirstTradeApi
+                    && Int64.TryParse(import.StatementKey.Split(':').Last(), out var timestamp))
+                    dates.Add(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(
+                        DateTimeOffset.FromUnixTimeMilliseconds(timestamp), "Eastern Standard Time").Date);
+            }
+            // Schwab does not persist quote timestamps separately; valuation records retain their source dates.
+            var schwabDates = investmentRecords
+                .Where(record => record.Source.StartsWith("PlaidSchwab/valuation/", StringComparison.Ordinal))
+                .GroupBy(record => record._account_Id)
+                .Select(group => group.Max(record => record.date).Date);
+            dates.AddRange(schwabDates);
+            return dates.Count == 0 ? null : dates.Min();
         }
 
         private List<StatementImportSummaryData> BuildLatestStatementImportSummaries()

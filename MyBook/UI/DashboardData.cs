@@ -3,6 +3,7 @@ namespace MyBook
     public class DashboardData
     {
         internal List<Holding> MarketHoldings { get; set; } = [];
+        internal DateTime? MarketValuationStartDate { get; set; }
         internal List<Holding> LiveHoldings { get; set; } = [];
         internal Dictionary<int, string> HoldingAccountNames { get; set; } = [];
         internal List<AccountBalance> MarketBalances { get; set; } = [];

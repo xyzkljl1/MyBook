@@ -665,6 +665,7 @@ namespace MyBook
         MonthlyFlowAccountStatisticsViewModel? selectedMonthlyAccount;
         InvestmentAccountStatisticsViewModel? selectedInvestmentAccount;
         List<Holding> marketHoldings = [];
+        DateTime? marketValuationStartDate;
         List<AccountBalance> marketBalances = [];
         Dictionary<CurrencyType, decimal> marketExchangeRates = [];
         bool showMarketChangeForToday;
@@ -1029,6 +1030,7 @@ namespace MyBook
             var viewModel = new DashboardViewModel
             {
                 marketHoldings = data.MarketHoldings,
+                marketValuationStartDate = data.MarketValuationStartDate,
                 LiveHoldings = new(data.LiveHoldings, data.HoldingAccountNames, data.MarketExchangeRates),
                 marketBalances = data.MarketBalances,
                 marketExchangeRates = data.MarketExchangeRates,
@@ -1197,8 +1199,10 @@ namespace MyBook
             var text = amount.HasValue
                 ? $"{(amount > 0 ? "+" : amount < 0 ? "-" : "")}¥{Math.Abs(amount.Value):N2}"
                 : "";
+            var periodText = marketValuationStartDate is DateTime start
+                ? $"{Math.Max(0, (DateTime.Today - start.Date).Days)}日以来浮动" : "浮动";
             var timeText = !amount.HasValue ? ""
-                : $"~{Math.Max(0, (int)(DateTimeOffset.Now - times.Max()).TotalMinutes)}min";
+                : $"{periodText} · ~{Math.Max(0, (int)(DateTimeOffset.Now - times.Max()).TotalMinutes)}min";
             if (MarketChangeRmb == amount && MarketChangeText == text && MarketChangeTimeText == timeText)
                 return;
             MarketChangeRmb = amount;

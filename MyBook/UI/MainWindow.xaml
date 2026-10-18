@@ -158,7 +158,7 @@
                              Text="{Binding TotalAssets.ExactText}"
                              FontSize="13"
                              Foreground="#64748B"/>
-                    <TextBlock Text="不计本日浮动"
+                    <TextBlock Text="不计浮动"
                                FontSize="11" Foreground="#64748B" Margin="0,2,0,0"/>
                 </StackPanel>
                 <StackPanel Margin="16,21,0,0"
