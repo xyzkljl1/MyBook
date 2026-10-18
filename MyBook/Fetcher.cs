@@ -145,9 +145,8 @@ namespace MyBook
                 await RunImportTaskAsync("Steam session refresh", web.RefreshSteamSessionAsync).ConfigureAwait(false);
                 await RunImportTaskAsync("Bilibili session refresh", web.RefreshBilibiliSessionAsync).ConfigureAwait(false);
                 await RunImportTaskAsync("exchange rate", pubWeb.FetchScheduledExchangeRates, marketData: true).ConfigureAwait(false);
-                // Rotate by local calendar date so a failed bank never blocks the next day's bank.
-                var bankSource = PubWebUtil.HuilvbaSources[DateOnly.FromDateTime(today).DayNumber % PubWebUtil.HuilvbaSources.Length];
-                await RunImportTaskAsync(bankSource.ToString(), () => pubWeb.FetchHuilvbaRates(bankSource), marketData: true).ConfigureAwait(false);
+                foreach (var bankSource in PubWebUtil.HuilvbaSources)
+                    await RunImportTaskAsync(bankSource.ToString(), () => pubWeb.FetchHuilvbaRates(bankSource), marketData: true).ConfigureAwait(false);
                 await mail.RunWithMailSessionScope(async () =>
                 {
                     await RunScheduledImportTaskAsync("ICBC", StatementImportProvider.ICBCBillMail,
