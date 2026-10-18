@@ -265,17 +265,20 @@ namespace MyBook
 
         private static BOCStatementHeader ParseBOCStatementHeader(List<BOCPdfLine> lines)
         {
-            foreach (var line in lines)
+            var heading = lines.FirstOrDefault(line => line.PageNumber == 1
+                && line.Words.Any(word => word.Text == "账单日" && word.Left >= 150 && word.Left < 300))
+                ?? throw new MailParseException("Parse BOC statement fail, missing account-summary heading");
+            foreach (var line in lines.Where(line => line.PageNumber == 1 && line.Bottom < heading.Bottom))
             {
+                // A zero-debt statement may omit the payment due date. Read only the statement-date column;
+                // transaction/posting dates in the detail table must never identify the summary row.
                 var dateWords = line.Words
-                    .Where(word => BOCDateRegex.IsMatch(word.Text))
-                    .OrderBy(word => word.Left)
+                    .Where(word => word.Left >= 150 && word.Left < 300 && BOCDateRegex.IsMatch(word.Text))
                     .ToList();
-                if (dateWords.Count != 2)
+                if (dateWords.Count != 1)
                     continue;
 
-                var paymentDueDate = ParseBOCDate(dateWords[0].Text);
-                var statementClosingDate = ParseBOCDate(dateWords[1].Text);
+                var statementClosingDate = ParseBOCDate(dateWords[0].Text);
                 var currentBalances = new Dictionary<CurrencyType, decimal>
                 {
                     [CurrencyType.RMB] = ReadBOCSingleAmount(line, 300, 449, "current RMB total balance due")
@@ -293,7 +296,7 @@ namespace MyBook
                         throw new MailParseException($"Parse BOC statement fail, duplicate {currency} total balance due");
                 }
 
-                return new BOCStatementHeader(paymentDueDate, statementClosingDate, currentBalances);
+                return new BOCStatementHeader(statementClosingDate, currentBalances);
             }
 
             throw new MailParseException("Parse BOC statement fail, missing account-summary date and balance row");
@@ -546,7 +549,7 @@ namespace MyBook
         private static bool TryParseBOCCurrency(string value, out CurrencyType currency)
         {
             return Enum.TryParse(value.Trim(), false, out currency)
-                && Enum.IsDefined(currency);
+                && Enum.IsDefined(currency) && currency.ToString() == value.Trim();
         }
 
         private static bool IsBOCAmount(string value)
@@ -587,7 +590,6 @@ namespace MyBook
             public string Text => String.Join(" ", Words.Select(word => word.Text));
         }
         private sealed record BOCStatementHeader(
-            DateTime PaymentDueDate,
             DateTime StatementClosingDate,
             Dictionary<CurrencyType, decimal> CurrentBalanceDue);
         private sealed record BOCAccountSummary(
