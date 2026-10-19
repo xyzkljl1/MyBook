@@ -28,6 +28,8 @@ namespace MyBook
         Forms.NotifyIcon? trayIcon;
         Drawing.Icon? trayIconImage;
         bool isExitRequested;
+        bool isLoadingDashboard;
+        long loadedDashboardRevision;
         bool isLoadingRecordDetails;
         bool isAdjustingDetailSelection;
         bool isLoadingAllocatedExpenses;
@@ -45,15 +47,6 @@ namespace MyBook
             RefreshImportRuntimeStatus();
             importStatusTimer.Start();
             _ = LoadDashboardAsync();
-        }
-
-        private async void Refresh_Click(object sender, RoutedEventArgs e)
-        {
-            var viewModel = DataContext as DashboardViewModel;
-            if (viewModel is not null && !ConfirmDiscardRecordDetailChanges(viewModel))
-                return;
-
-            await LoadDashboardAsync(viewModel?.DetailStartDate, viewModel?.DetailEndDate, viewModel?.SelectedDetailAccountFilterKey);
         }
 
         private void AddRecordDetail_Click(object sender, RoutedEventArgs e)
@@ -369,6 +362,10 @@ namespace MyBook
             string? detailAccountFilterKey = null,
             DateTime? monthlyFlowStartMonth = null)
         {
+            if (isLoadingDashboard)
+                return;
+            isLoadingDashboard = true;
+            var revision = fetcher.GetRuntimeStatus().DashboardRevision;
             try
             {
                 var previousViewModel = DataContext as DashboardViewModel;
@@ -403,6 +400,11 @@ namespace MyBook
             {
                 DataContext = DashboardViewModel.FromError(e.Message);
                 RefreshImportRuntimeStatus();
+            }
+            finally
+            {
+                loadedDashboardRevision = revision;
+                isLoadingDashboard = false;
             }
         }
 
@@ -527,11 +529,24 @@ namespace MyBook
                 (endExclusive.Year - startInclusive.Year) * 12 + endExclusive.Month - startInclusive.Month);
         }
 
-        private void ImportStatusTimer_Tick(object? sender, EventArgs e)
+        private async void ImportStatusTimer_Tick(object? sender, EventArgs e)
         {
             RefreshImportRuntimeStatus();
             if (DataContext is DashboardViewModel viewModel)
                 viewModel.UpdateMarketPrices(fetcher.GetMarketPrices());
+
+            if (isLoadingDashboard || isLoadingRecordDetails || isLoadingAllocatedExpenses
+                || loadedDashboardRevision == fetcher.GetRuntimeStatus().DashboardRevision)
+                return;
+
+            var current = DataContext as DashboardViewModel;
+            // Keep the refresh pending until edits are saved or discarded, including uncommitted cell input.
+            if (Keyboard.FocusedElement is TextBox { IsReadOnly: false }
+                || RecordDetailsGrid.Items is IEditableCollectionView { IsEditingItem: true }
+                || current?.HasPendingDetailChanges() == true)
+                return;
+
+            await LoadDashboardAsync(current?.DetailStartDate, current?.DetailEndDate, current?.SelectedDetailAccountFilterKey);
         }
 
         private void ClearImportFailureMarker_Click(object sender, RoutedEventArgs e)
@@ -1093,6 +1108,15 @@ namespace MyBook
         {
             LiveHoldings.ShowAccounts = source.LiveHoldings.ShowAccounts;
             ShowInvestmentInUsd = source.ShowInvestmentInUsd;
+            InvestmentModeIndex = source.InvestmentModeIndex;
+            SelectedInvestmentAccount = InvestmentAccounts.FirstOrDefault(account =>
+                account.DisplayName == source.SelectedInvestmentAccount?.DisplayName) ?? InvestmentAccounts.FirstOrDefault();
+            var reasonMonth = ReasonMonthSeries.FindIndex(series => series.MonthLabel == source.SelectedReasonMonthLabel);
+            if (reasonMonth >= 0)
+                SelectedReasonMonthIndex = reasonMonth;
+            if (source.SelectedAssetSummaryOffset != source.AssetSummaryMaximum
+                && AssetSummaries.FirstOrDefault(summary => summary.DateLabel == source.SelectedAssetDateText) is { } selectedSummary)
+                SelectedAssetSummaryOffset = selectedSummary.DayOffset;
             showSingleCurrencyMonthly = source.ShowSingleCurrencyMonthly;
             selectedMonthlyAccount = MonthlyAccounts.FirstOrDefault(account =>
                 String.Equals(account.DisplayName, source.SelectedMonthlyAccount?.DisplayName, StringComparison.Ordinal)) ??

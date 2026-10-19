@@ -213,7 +213,11 @@ namespace MyBook
             finally
             {
                 if (started)
-                    UpdateRuntimeStatus(status => status.LastFetchTime = DateTime.Now);
+                    UpdateRuntimeStatus(status =>
+                    {
+                        status.LastFetchTime = DateTime.Now;
+                        status.DashboardRevision++;
+                    });
                 SetCurrentTask(null);
                 fetchLock.Release();
             }
@@ -279,6 +283,7 @@ namespace MyBook
             }
             finally
             {
+                UpdateRuntimeStatus(status => status.DashboardRevision++);
                 simPollLock.Release();
             }
         }
@@ -431,6 +436,7 @@ namespace MyBook
         public DateTime? CurrentTaskStartedAt { get; set; }
         public DateTime? LastFetchTime { get; set; }
         public DateTime? NextFetchTime { get; set; }
+        public long DashboardRevision { get; set; }
         public bool HasImportFailureMarker { get; set; }
         public bool HasMarketDataFailureMarker { get; set; }
 

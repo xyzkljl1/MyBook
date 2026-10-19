@@ -96,16 +96,7 @@
 
         <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,12">
             <StackPanel DockPanel.Dock="Right" Width="420" VerticalAlignment="Top" Margin="18,4,0,0">
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <TextBlock Text="{Binding SnapshotTimeText}" FontSize="12" Foreground="#64748B" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                    <Button Width="70" Height="30"
-                            Background="#0F766E"
-                            Foreground="White"
-                            BorderThickness="0"
-                            FontSize="12"
-                            Content="刷新"
-                            Click="Refresh_Click"/>
-                </StackPanel>
+                <TextBlock Text="{Binding SnapshotTimeText}" FontSize="12" Foreground="#64748B" HorizontalAlignment="Right"/>
                 <Grid Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
