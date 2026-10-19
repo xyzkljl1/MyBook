@@ -214,6 +214,8 @@ partial class WebUtil
                 "SELLSTOCK" when Text("SELLTYPE") == "SELL" => "SOLD",
                 "INCOME" when Text("INCOMETYPE") == "DIV" => "DIVIDEND",
                 "INCOME" when Text("INCOMETYPE") == "INTEREST" || description.StartsWith("FULLYPAID LENDING REBATE", StringComparison.Ordinal) => "INTEREST",
+                "INCOME" when Text("INCOMETYPE") == "MISC"
+                    && description.StartsWith("INTEREST ON CREDIT BALANCE", StringComparison.Ordinal) => "INTEREST",
                 "INVBANKTRAN" when Text("NAME") is "XFER CASH TO MARGIN" or "XFER MARGIN TO CASH" => "OTHER",
                 "INVBANKTRAN" when Text("TRNTYPE") is "DEP" or "CREDIT" => "DEPOSIT",
                 "INVBANKTRAN" when Text("TRNTYPE") == "DEBIT" && Number("TRNAMT") < 0 => "WITHDRAWAL",
