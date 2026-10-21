@@ -18,6 +18,7 @@ partial class MailUtil
             or "註冊成功-請激活賬戶（Application Successful-Account Activation Needed）"
             or "【螞蟻銀行香港】電郵地址驗證碼"
             or "您最近一期的電子結單已經備妥(Your latest e-Statement is ready)"
+            or "關於修改螞蟻銀行（香港）有限公司（「本行」）個人銀行服務條款的通知"
             or "eM+ HKD Savings Account Interest Rate Adjustment 餘額+港幣活期賬戶年利率調整") return false;
         throw new MailParseException("Unsupported Ant mail subject.");
     }
