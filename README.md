@@ -60,7 +60,7 @@ Copy-Item MyBook\config.json.example MyBook\config.json
 
 - `database_connection`: MySQL connection string; an empty value uses the built-in local default.
 - `yahoo_user` / `yahoo_pass`, `gmail_user` / `gmail_app_pwd`: statement-mail credentials.
-- `mail_proxy`: optional proxy for PayPal mail and FirstTrade. Other modules fetch mail and attachments directly, ignoring system proxies. `pubweb_google_proxy`: optional HTTP proxy for Google Finance stock prices and exchange rates; `pubweb_proxy`: optional proxy for other public web requests. Huilvba requests use direct connections, `pubweb_proxy` and `pubweb_proxy2`. Empty proxy settings use direct connections.
+- `mail_proxy`: optional proxy for PayPal mail and FirstTrade. Other modules fetch mail and attachments directly, ignoring system proxies. `pubweb_google_proxy`: optional HTTP proxy for Google Finance historical exchange rates; `pubweb_proxy`: optional proxy for Google Finance stock prices and other public web requests. Huilvba requests use direct connections, `pubweb_proxy` and `pubweb_proxy2`. Empty proxy settings use direct connections.
 - `alphavantage_key`: market-data key; `ib_gateway_port`: Interactive Brokers gateway port.
 - `nexus_api_key`: Nexus personal API key used by current imports.
 - `kraken_api_key` / `kraken_api_secret`, `etherscan_api_key`: credentials for read-only Kraken and Ethereum queries.
