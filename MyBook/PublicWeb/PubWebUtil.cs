@@ -40,10 +40,8 @@ namespace MyBook
             switch (holdingType)
             {
                 case HoldingType.NASDAQ:
-                    ret = new Currency(await FetchGoogleFinanceStock(code, "NASDAQ").ConfigureAwait(false), CurrencyType.USD);
-                    break;
                 case HoldingType.ARCA:
-                    ret = new Currency(await FetchGoogleFinanceStock(code, "NYSEARCA").ConfigureAwait(false), CurrencyType.USD);
+                    ret = new Currency(await FetchYahooFinanceStock(code).ConfigureAwait(false), CurrencyType.USD);
                     break;
                 case HoldingType.UST:
                     Console.WriteLine("skip UST price: fetcher is not configured");
@@ -178,7 +176,7 @@ namespace MyBook
                 {
                     // These providers construct public request summaries without credentials or response bodies.
                     var detail = error is InvalidOperationException &&
-                        (error.Message.StartsWith("Google Finance GET www.google.com/finance/quote/", StringComparison.Ordinal)
+                        (error.Message.StartsWith("Yahoo Finance GET query1.finance.yahoo.com/v8/finance/chart/", StringComparison.Ordinal)
                         || error.Message.StartsWith("Kraken GET api.kraken.com/0/public/Ticker", StringComparison.Ordinal))
                         ? error.Message.Replace('\r', ' ').Replace('\n', ' ') : error.GetType().FullName;
                     content.AppendLine($"ERROR {detail}");
