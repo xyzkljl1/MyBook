@@ -42,15 +42,20 @@ namespace MyBook
 
             Records records = new();
             var statementEndDate = ParseICBCStatementEndDate(billText);
-            var statementKey = statementEndDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-            if (!ShouldImportStatementMail(ICBCProvider, statementKey, GetMailDate(message), firstMailDeadline))
+            var statementDateKey = statementEndDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            // Older imports used only the date, before separate account statements occurred.
+            if (database.IsStatementKeyImported(ICBCProvider, statementDateKey))
                 return false;
 
             var tables = FormUtil.ReadFromHTML(billText);
             if (!IsICBCInlineBillTables(tables))
                 throw new MailParseException("Parse ICBC Bill Fail, Invalid Tables");
-            var beginningAccountBalances = ParseICBCAccountBalances(tables[1], 1);
             var accountBalances = ParseICBCAccountBalances(tables[1], 4);
+            var statementKey = statementDateKey + "/" + String.Join(",",
+                accountBalances.Select(balance => balance.Account!.Id).Distinct().Order());
+            if (!ShouldImportStatementMail(ICBCProvider, statementKey, GetMailDate(message), firstMailDeadline))
+                return false;
+            var beginningAccountBalances = ParseICBCAccountBalances(tables[1], 1);
             // 只从汇总表登记卡号；交易明细里的卡号只用于该交易本身，不能作为卡号来源。
             var internalCardNos = ParseICBCInternalCardNos(tables[1]);
 
