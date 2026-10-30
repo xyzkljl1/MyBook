@@ -38,8 +38,12 @@ namespace MyBook
         {
             const string request = "Kraken GET api.kraken.com/0/public/Ticker: HTTP 200";
             var json = JObject.Parse(text);
-            if (json["error"] is not JArray errors || errors.Count != 0 || json["result"] is not JObject result)
-                throw new InvalidOperationException($"{request}; ticker API error or missing result.");
+            if (json["error"] is not JArray errors)
+                throw new InvalidOperationException($"{request}; invalid error field (type={json["error"]?.Type.ToString() ?? "Missing"}).");
+            if (errors.Count != 0)
+                throw new InvalidOperationException($"{request}; API errors: {String.Join(", ", errors.Select(DescribeTickerError).Distinct())}.");
+            if (json["result"] is not JObject result)
+                throw new InvalidOperationException($"{request}; invalid result field (type={json["result"]?.Type.ToString() ?? "Missing"}); error array empty.");
             return symbols.Select(symbol =>
             {
                 var value = result[symbol + "/USD"]?["c"]?[0]?.Value<string>();
@@ -47,6 +51,25 @@ namespace MyBook
                     throw new InvalidOperationException($"{request}; missing positive {symbol}/USD last trade price.");
                 return new MarketPrice(symbol, HoldingType.Crypto, price, CurrencyType.USD, fetchedAt);
             }).ToList();
+        }
+
+        private static string DescribeTickerError(JToken error)
+        {
+            if (error.Type != JTokenType.String)
+                return $"InvalidErrorEntry(type={error.Type})";
+            // Only known protocol codes reach logs; never include arbitrary response text.
+            var code = error.Value<string>() ?? "";
+            return code switch
+            {
+                "EAPI:Rate limit exceeded" or "EGeneral:Too many requests" => $"RateLimited ({code})",
+                "EService:Unavailable" or "EService:Busy" => $"ServiceUnavailable ({code})",
+                "EGeneral:Internal error" => "InternalError (EGeneral:Internal error)",
+                "EGeneral:Temporary lockout" => "TemporaryLockout (EGeneral:Temporary lockout)",
+                "EAPI:Bad request" or "EGeneral:Invalid arguments" or "EQuery:Unknown asset pair" => $"InvalidRequest ({code})",
+                _ when code.StartsWith("EService:Throttled:", StringComparison.Ordinal)
+                    || code.StartsWith("EService: Throttled:", StringComparison.Ordinal) => "RateLimited (EService:Throttled)",
+                _ => "UnrecognizedApiError"
+            };
         }
 
         public async Task<KrakenDailyPriceSet> FetchDailyUsdPricesAsync(
