@@ -366,13 +366,40 @@ namespace MyBook
             var result = new List<JObject>();
             string? query = null;
             DateTime? previousTime = null;
+            var resource = path.Split('/').Last() switch
+            {
+                "transactions" => "transactions",
+                "internal-transactions" => "internal-transactions",
+                "token-transfers" => "token-transfers",
+                _ => throw new ArgumentException("Unsupported Blockscout resource.", nameof(path))
+            };
+            var page = 0;
             do
             {
-                using var response = await sharedHttpClient.GetAsync($"{BlockscoutApiBaseUrl}/{path}{query}", cancellationToken).ConfigureAwait(false);
-                var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                    throw new InvalidOperationException($"Blockscout request failed: {(int)response.StatusCode} {response.ReasonPhrase}.");
-                var json = JObject.Parse(text);
+                // Keep the address, pagination query and response body out of error logs.
+                var request = $"Blockscout GET eth.blockscout.com/api/v2/addresses/[redacted]/{resource}; page={++page}";
+                JObject json;
+                int? httpStatus = null;
+                try
+                {
+                    using var response = await sharedHttpClient.GetAsync($"{BlockscoutApiBaseUrl}/{path}{query}", cancellationToken).ConfigureAwait(false);
+                    httpStatus = (int)response.StatusCode;
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        var status = (int)response.StatusCode;
+                        var category = status == 429 ? "RateLimited" : status >= 500 ? "ServerError"
+                            : status is 401 or 403 ? "AccessDenied" : "HttpError";
+                        var retryAfter = response.Headers.RetryAfter?.ToString() ?? "absent";
+                        throw new InvalidOperationException($"{request}: HTTP {status}; {category}; Retry-After={retryAfter}.");
+                    }
+                    json = JObject.Parse(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+                }
+                catch (HttpRequestException exception)
+                { throw new InvalidOperationException($"{request}: HTTP {httpStatus?.ToString() ?? "unavailable"}; transport {exception.HttpRequestError}."); }
+                catch (OperationCanceledException)
+                { throw new InvalidOperationException($"{request}: HTTP {httpStatus?.ToString() ?? "unavailable"}; {(cancellationToken.IsCancellationRequested ? "Cancelled" : "Timeout")}."); }
+                catch (JsonException)
+                { throw new InvalidOperationException($"{request}: HTTP {httpStatus}; InvalidJson."); }
                 var items = (json["items"] as JArray ?? new JArray()).OfType<JObject>().ToList();
                 var reachedEarlierEvent = false;
                 foreach (var item in items)
