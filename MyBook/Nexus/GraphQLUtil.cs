@@ -59,10 +59,17 @@ namespace MyBook
             var result = JObject.Parse(responseText);
             var errors = result["errors"] as JArray;
             if (errors is not null && errors.Count > 0)
-                throw new InvalidOperationException($"Nexus GraphQL error: {FormatGraphQLErrors(errors)}");
+                throw new NexusGraphQLException(errors);
 
             var data = result["data"] as JObject;
             return data ?? throw new InvalidOperationException($"Nexus GraphQL response has no data: {responseText}");
+        }
+
+        private sealed class NexusGraphQLException(JArray errors)
+            : InvalidOperationException($"Nexus GraphQL error: {FormatGraphQLErrors(errors)}")
+        {
+            public bool IsNotFound { get; } = errors.Count > 0 && errors.All(error =>
+                error["extensions"]?["code"]?.Value<string>() == "NOT_FOUND");
         }
 
         private static string FormatGraphQLErrors(JArray errors)

@@ -78,12 +78,21 @@ namespace MyBook
                 }
                 """;
 
-            var data = await ExecuteNexusQuery(query, new
+            JObject data;
+            try
             {
-                accountId = resolvedAccountId,
-                year,
-                month
-            });
+                data = await ExecuteNexusQuery(query, new
+                {
+                    accountId = resolvedAccountId,
+                    year,
+                    month
+                });
+            }
+            catch (NexusGraphQLException exception) when (exception.IsNotFound)
+            {
+                // An unpublished monthly report may return NOT_FOUND instead of null; keep progress for N/M scheduling.
+                return null;
+            }
             if (data["userMonthlyReport"]?.Type == JTokenType.Null)
                 return null;
             var report = data["userMonthlyReport"] as JObject
