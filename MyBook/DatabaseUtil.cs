@@ -860,12 +860,16 @@ namespace MyBook
             var recordsToSave = initializationRecords.Count == 0
                 ? beginningHoldingRestatementRecords.Concat(records).ToList()
                 : initializationRecords.Concat(beginningHoldingRestatementRecords).Concat(records).ToList();
+            // The bank report covers its own account only. Its known physical-cash counterpart
+            // shares the import and transaction, but has a separate record-derived balance.
+            var physicalCashRecords = records.Select(r => r.MatchedRecord).OfType<Record>()
+                .Where(r => r.Account is not null && IsPhysicalCashAccount(r.Account) && !records.Contains(r)).Distinct().ToList();
+            recordsToSave.AddRange(physicalCashRecords);
             foreach (var record in recordsToSave)
                 if (record.Account is not null)
                     ApplyAccountTransferRules(record, GetPostingAccount(record.Account));
             SaveRecordsCore(recordsToSave, statementImportId);
-            if (!hasExternalBalances)
-                ApplyRecordDeltasToHoldings(recordsToSave);
+            ApplyRecordDeltasToHoldings(hasExternalBalances ? physicalCashRecords : recordsToSave);
 
             if (internalCardNos is not null)
                 EnsureAccountInternalCardNos(internalCardNos);
@@ -2853,7 +2857,8 @@ namespace MyBook
             for (var i = 0; i < recordList.Count; i++)
                 recordList[i].Id = ids[i];
             foreach (var record in paired)
-                MatchInternalTransferPair(record, record.MatchedRecord!, "SameTradeSource");
+                MatchInternalTransferPair(record, record.MatchedRecord!,
+                    record.MatchedRecord!.Account is { } target && IsPhysicalCashAccount(target) ? "PhysicalCashTransfer" : "SameTradeSource");
         }
 
         private void ResolveRecordHolding(Record record, Account account)

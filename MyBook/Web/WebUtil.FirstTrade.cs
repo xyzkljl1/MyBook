@@ -90,12 +90,13 @@ namespace MyBook
                     database.GetStatementRecords(StatementImportProvider.FirstTradeApi, account),
                     symbol => GetFirstTradeEquityHoldingType(item, symbol),
                     (date, symbol, quantity) => database.GetFirstTradeTransferEvidence(account, date, symbol, quantity,
-                        GetFirstTradeEquityHoldingType(item, symbol)));
+                        GetFirstTradeEquityHoldingType(item, symbol)), database.PrepareFirstTradeAtmWithdrawal);
                 if (import is null) return null;
                 imports.Add(import);
             }
             var saved = database.SaveStatementRecordsAndHoldingsOnce(imports);
-            return imports.Where((_, index) => saved[index]).Sum(import => import.Records.Count);
+            return imports.Where((_, index) => saved[index]).Sum(import => import.Records
+                .Concat(import.Records.Select(r => r.MatchedRecord).OfType<Record>()).Distinct().Count());
         }
 
         internal static HoldingType GetFirstTradeEquityHoldingType(FirstTradeAccountCapture item, string symbol)
@@ -118,7 +119,8 @@ namespace MyBook
         internal static StatementRecordHoldingImport? BuildFirstTradeImport(FirstTradeCapture capture,
             FirstTradeAccountCapture item, Account account, List<Holding> beginning,
             List<Record> previousRecords, Func<string, HoldingType> resolveEquity,
-            Func<DateTime, string, decimal, FirstTradeTransferEvidence>? resolveTransfer = null)
+            Func<DateTime, string, decimal, FirstTradeTransferEvidence>? resolveTransfer = null,
+            Action<Record>? prepareAtmWithdrawal = null)
         {
             var transactions = ReconcileFirstTradeSources(item);
             if (transactions is null) return null;
@@ -259,8 +261,10 @@ namespace MyBook
                     };
                 }
                 cash += tx.Amount - tx.WithheldTax;
-                AddRecord(tx.Amount, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
+                var cashRecord = AddRecord(tx.Amount, reason, source + "|cash|" + tx.Type + " " + tx.Subaccount + " " + tx.Description,
                     tx.Date, isInternal, null, 0, postingDate, reason == "转账" ? "" : tx.Symbol);
+                if (tx.Type == "WITHDRAWAL" && tx.Description.Contains("CASH ADVANCE ATM ", StringComparison.Ordinal))
+                    (prepareAtmWithdrawal ?? throw new FirstTradeException("ATM withdrawal requires physical cash valuation"))(cashRecord);
                 if (tx.WithheldTax != 0)
                     AddRecord(-tx.WithheldTax, "税费", source + "|tax|" + tx.Description,
                         tx.Date, false, null, 0, postingDate, tx.Symbol);
