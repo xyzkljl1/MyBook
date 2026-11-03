@@ -31,6 +31,7 @@ partial class WebUtil
             var type = FirstTradeText(row, "trans_str");
             if (type == "WITHDRAW") type = "WITHDRAWAL";
             var description = FirstTradeText(row, "description");
+            type = NormalizeFirstTradeCashType(type, description);
             var subaccount = FirstTradeText(row, "account_type");
             var symbol = FirstTradeText(row, "symbol", allowEmpty: true);
             var quantity = FirstTradeNumber(row, "quantity");
@@ -88,9 +89,11 @@ partial class WebUtil
 
         static FirstTradeExportRow? Match(List<FirstTradeExportRow> rows, FirstTradeTransaction tx, string source, decimal withheldTax = 0)
         {
-            // CSV labels cash transfers OTHER; API and OFX must agree on direction and amount.
+            // CSV labels cash transfers OTHER. OFX also labels the separately reported card fee DEBIT.
             var candidates = rows.Where(r => r.Date == tx.Date
-                && (r.Type == tx.Type || source == "CSV" && r.Type == "OTHER" && tx.Type is "DEPOSIT" or "WITHDRAWAL")
+                && (r.Type == tx.Type || source == "CSV" && r.Type == "OTHER" && tx.Type is "DEPOSIT" or "WITHDRAWAL"
+                    || source == "OFX" && r.Type == "WITHDRAWAL" && tx.Type == "FEE"
+                        && NormalizeFirstTradeCashType("OTHER", tx.Description) == "FEE")
                 && r.Amount == tx.Amount - withheldTax
                 && Math.Abs(r.Quantity) == Math.Abs(tx.Quantity) && r.Price == tx.Price
                 && (r.Quantity == 0 || r.Symbol == tx.Symbol)
@@ -104,6 +107,14 @@ partial class WebUtil
             return found;
         }
         static string Clean(string value) => Regex.Replace(value.ToUpperInvariant(), @"\s+", " ").Trim();
+    }
+
+    private static string NormalizeFirstTradeCashType(string type, string description)
+    {
+        if (type != "OTHER") return type;
+        if (description.Contains("CASH ADVANCE ATM ", StringComparison.Ordinal)) return "WITHDRAWAL";
+        if (description.Contains("FOREIGN CARD TRANSACTION FEE ", StringComparison.Ordinal)) return "FEE";
+        return type;
     }
 
     private static bool IsFirstTradeSubaccountTransfer(FirstTradeTransaction tx) => tx.Type == "OTHER" && tx.Quantity != 0
@@ -165,6 +176,7 @@ partial class WebUtil
             if (fields.Length != expected.Length || FirstTradeDecimal(fields[7]) != 0 || fields[12] is not ("Trade" or "Financial"))
                 throw new FirstTradeException("unsupported CSV row or accrued interest");
             var type = fields[3].ToUpperInvariant() switch { "BUY" => "BOUGHT", "SELL" => "SOLD", var value => value };
+            type = NormalizeFirstTradeCashType(type, fields[4]);
             decimal withheldTax = 0;
             if (type == "INTEREST" && fields[4].StartsWith("FULLYPAID LENDING REBATE", StringComparison.Ordinal)
                 && fields[4].Contains("TAX WITHHELD", StringComparison.Ordinal))
