@@ -112,10 +112,14 @@ partial class WebUtil
     private static string NormalizeFirstTradeCashType(string type, string description)
     {
         if (type != "OTHER") return type;
+        if (IsFirstTradeFeeReimbursement(description)) return "FEE_REFUND";
         if (description.Contains("CASH ADVANCE ATM ", StringComparison.Ordinal)) return "WITHDRAWAL";
         if (description.Contains("FOREIGN CARD TRANSACTION FEE ", StringComparison.Ordinal)) return "FEE";
         return type;
     }
+
+    private static bool IsFirstTradeFeeReimbursement(string description) =>
+        Regex.IsMatch(description, @"\bTRANSACTION FEE REIMB\b", RegexOptions.CultureInvariant);
 
     private static bool IsFirstTradeSubaccountTransfer(FirstTradeTransaction tx) => tx.Type == "OTHER" && tx.Quantity != 0
         && ((tx.Subaccount == "Cash" && (tx.Description.EndsWith("TFR to Type 2", StringComparison.Ordinal)
@@ -229,6 +233,8 @@ partial class WebUtil
                 "INCOME" when Text("INCOMETYPE") == "MISC"
                     && description.StartsWith("INTEREST ON CREDIT BALANCE", StringComparison.Ordinal) => "INTEREST",
                 "INVBANKTRAN" when Text("NAME") is "XFER CASH TO MARGIN" or "XFER MARGIN TO CASH" => "OTHER",
+                "INVBANKTRAN" when Text("TRNTYPE") == "CREDIT"
+                    && (IsFirstTradeFeeReimbursement(Text("NAME")) || IsFirstTradeFeeReimbursement(description)) => "FEE_REFUND",
                 "INVBANKTRAN" when Text("TRNTYPE") is "DEP" or "CREDIT" => "DEPOSIT",
                 "INVBANKTRAN" when Text("TRNTYPE") == "DEBIT" && Number("TRNAMT") < 0 => "WITHDRAWAL",
                 "INVBANKTRAN" when Text("TRNTYPE") == "FEE" => "FEE",

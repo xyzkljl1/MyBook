@@ -94,7 +94,8 @@ namespace MyBook
                 if (import is null) return null;
                 imports.Add(import);
             }
-            var saved = database.SaveStatementRecordsAndHoldingsOnce(imports);
+            var saved = database.SaveStatementRecordsAndHoldingsOnce(imports,
+                afterSaveInTransaction: database.OffsetFirstTradeFeeRefunds);
             return imports.Where((_, index) => saved[index]).Sum(import => import.Records
                 .Concat(import.Records.Select(r => r.MatchedRecord).OfType<Record>()).Distinct().Count());
         }
@@ -256,6 +257,7 @@ namespace MyBook
                         "INTEREST" => "利息",
                         "DIVIDEND" => "股息",
                         "FEE" when tx.Amount < 0 => "手续费",
+                        "FEE_REFUND" when tx.Amount > 0 => "退款",
                         "TAX" when tx.Amount < 0 => "税费",
                         _ => throw new FirstTradeException("unsupported account history transaction type")
                     };

@@ -729,7 +729,8 @@ namespace MyBook
 
         public List<bool> SaveStatementRecordsAndHoldingsOnce(
             IEnumerable<StatementRecordHoldingImport> imports,
-            bool combineAccounts = false)
+            bool combineAccounts = false,
+            Action<int>? afterSaveInTransaction = null)
         {
             var importList = imports.ToList();
             var statements = combineAccounts
@@ -768,7 +769,10 @@ namespace MyBook
                         shouldValidateBeginningBalances[import.Provider] = true;
                     }
                     if (statementImportId.HasValue)
+                    {
+                        afterSaveInTransaction?.Invoke(statementImportId.Value);
                         savedStatementImportIds.Add(statementImportId.Value);
+                    }
                     saved.Add(statementImportId.HasValue);
                 }
 
