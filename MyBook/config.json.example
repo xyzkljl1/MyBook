@@ -27,6 +27,7 @@
     "pubweb_proxy2":  "",
     "pubweb_google_proxy":  "",
     "nexus_api_key":  "",
+    "Kraken_proxy":  "",
     "kraken_api_key":  "",
     "kraken_api_secret":  "",
     "etherscan_api_key":  "",

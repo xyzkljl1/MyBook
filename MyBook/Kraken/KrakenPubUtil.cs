@@ -1,5 +1,6 @@
 using Newtonsoft.Json.Linq;
 using System.Globalization;
+using System.Net;
 using System.Net.Http;
 
 namespace MyBook
@@ -12,16 +13,16 @@ namespace MyBook
         private readonly SemaphoreSlim cacheLock = new(1, 1);
         private readonly Dictionary<(string Asset, DateTime Date), KrakenDailyPrice> cache = new();
 
-        internal async Task<List<MarketPrice>> FetchLatestUsdPricesAsync(IEnumerable<string> assets)
+        internal async Task<List<MarketPrice>> FetchLatestUsdPricesAsync(IEnumerable<string> assets, HttpClient client)
         {
             var symbols = assets.Select(GetBaseAsset).Distinct(StringComparer.Ordinal).ToList();
             if (symbols.Count == 0) return [];
             foreach (var symbol in symbols) ValidateSupportedAsset(symbol);
-            const string request = "Kraken GET api.kraken.com/0/public/Ticker";
+            const string request = "Kraken GET api.kraken.com/0/public/Ticker (route=Kraken_proxy)";
             try
             {
                 var pairs = String.Join(",", symbols.Select(symbol => symbol + "USD"));
-                using var response = await sharedHttpClient.GetAsync(
+                using var response = await client.GetAsync(
                     $"https://api.kraken.com/0/public/Ticker?pair={Uri.EscapeDataString(pairs)}&assetVersion=1").ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                     throw new InvalidOperationException($"{request}: HTTP {(int)response.StatusCode}.");
@@ -217,9 +218,9 @@ namespace MyBook
                 throw new InvalidOperationException($"Unsupported crypto asset: {asset}.");
         }
 
-        private static HttpClient CreateHttpClient()
+        internal static HttpClient CreateHttpClient(IWebProxy? proxy = null)
         {
-            var client = new HttpClient { Timeout = RequestTimeout };
+            var client = new HttpClient(new HttpClientHandler { Proxy = proxy }) { Timeout = RequestTimeout };
             client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 KrakenPubUtil");
             return client;
         }

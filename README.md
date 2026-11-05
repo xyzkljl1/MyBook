@@ -63,7 +63,7 @@ Copy-Item MyBook\config.json.example MyBook\config.json
 - `mail_proxy`: optional proxy for PayPal mail and FirstTrade. Other modules fetch mail and attachments directly, ignoring system proxies. `pubweb_google_proxy`: optional HTTP proxy for Yahoo Finance stock prices and Google Finance historical exchange rates; `pubweb_proxy`: optional proxy for other public web requests. Huilvba requests use direct connections, `pubweb_proxy` and `pubweb_proxy2`. Empty proxy settings use direct connections.
 - `alphavantage_key`: market-data key; `ib_gateway_port`: Interactive Brokers gateway port.
 - `nexus_api_key`: Nexus personal API key used by current imports.
-- `kraken_api_key` / `kraken_api_secret`, `etherscan_api_key`: credentials for read-only Kraken and Ethereum queries.
+- `Kraken_proxy`: required HTTP proxy for real-time Kraken cryptocurrency quotes. `kraken_api_key` / `kraken_api_secret`, `etherscan_api_key`: credentials for read-only Kraken and Ethereum queries.
 - `sim_imsi`: expected SIM IMSI; leave empty to disable polling. `sim_poll_interval_minutes` defaults to 5 when unset or below 1.
 
 ### Plaid / Schwab
