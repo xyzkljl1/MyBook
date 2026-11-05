@@ -15,7 +15,7 @@ namespace MyBook
         {
             this.database = database;
             this.config = config;
-            this.krakenPub = krakenPub ?? new KrakenPubUtil();
+            this.krakenPub = krakenPub ?? new KrakenPubUtil(config["Kraken_proxy"]);
         }
 
         private string EtherscanApiKey => RequiredConfig(config, "etherscan_api_key");

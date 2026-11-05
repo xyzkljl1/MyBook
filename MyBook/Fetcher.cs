@@ -58,7 +58,7 @@ namespace MyBook
             web = new(config, database);
             wise = new(config, database);
             plaid = new(config, database);
-            var krakenPub = new KrakenPubUtil();
+            var krakenPub = new KrakenPubUtil(config["Kraken_proxy"]);
             kraken = new(config, database, krakenPub);
             crypto = new(config, database, krakenPub);
             sim = new(database);
@@ -84,7 +84,7 @@ namespace MyBook
                     // Only read the held symbols; live quotes never update accounting data.
                     var targets = new DatabaseUtil(config).GetMarketPriceTargets();
                     using var quotes = new PubWebUtil(config);
-                    await quotes.FetchMarketPricesAsync(targets, new KrakenPubUtil(), CacheMarketPrice, scheduled: true).ConfigureAwait(false);
+                    await quotes.FetchMarketPricesAsync(targets, CacheMarketPrice, scheduled: true).ConfigureAwait(false);
                 }
                 catch (Exception e)
                 {

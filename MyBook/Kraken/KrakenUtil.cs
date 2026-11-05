@@ -14,7 +14,6 @@ namespace MyBook
         private const string EthereumUsdtContract = "0xdac17f958d2ee523a2206206994597c13d831ec7";
         private const int LedgerPageSize = 50;
         private const int FundingPageSize = 50;
-        private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(20);
         private static long lastNonce;
 
         private readonly string apiKey;
@@ -36,7 +35,7 @@ namespace MyBook
                 throw new InvalidOperationException("kraken_api_secret is not valid Base64.", exception);
             }
             this.database = database;
-            this.krakenPub = krakenPub ?? new KrakenPubUtil();
+            this.krakenPub = krakenPub ?? new KrakenPubUtil(config["Kraken_proxy"]);
         }
 
         public async Task FetchDailyReportsAsync(DateTime since, CancellationToken cancellationToken = default)
@@ -581,6 +580,7 @@ namespace MyBook
             await requestLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                using var client = krakenPub.CreateHttpClient("MyBook/1.0 KrakenDailyImporter");
                 for (var attempt = 1; ; attempt++)
                 {
                     try
@@ -597,7 +597,6 @@ namespace MyBook
                         request.Headers.Add("API-Key", apiKey);
                         request.Headers.Add("API-Sign", CreateSignature(path, nonce, postData));
 
-                        using var client = CreateHttpClient();
                         using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
                         var responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                         if (!response.IsSuccessStatusCode)
@@ -623,13 +622,6 @@ namespace MyBook
             {
                 requestLock.Release();
             }
-        }
-
-        private static HttpClient CreateHttpClient()
-        {
-            var client = new HttpClient { Timeout = RequestTimeout };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 KrakenDailyImporter");
-            return client;
         }
 
         private string CreateSignature(string path, string nonce, string postData)

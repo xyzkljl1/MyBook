@@ -245,9 +245,10 @@ namespace MyBook
             DateTime fromUtc,
             CancellationToken cancellationToken)
         {
-            var normalTask = FetchBlockscoutItemsAsync($"addresses/{address}/transactions", fromUtc, cancellationToken);
-            var internalTask = FetchBlockscoutItemsAsync($"addresses/{address}/internal-transactions", fromUtc, cancellationToken);
-            var tokenTask = FetchBlockscoutItemsAsync($"addresses/{address}/token-transfers", fromUtc, cancellationToken);
+            using var client = krakenPub.CreateHttpClient("MyBook/1.0 CryptoUtil");
+            var normalTask = FetchBlockscoutItemsAsync(client, $"addresses/{address}/transactions", fromUtc, cancellationToken);
+            var internalTask = FetchBlockscoutItemsAsync(client, $"addresses/{address}/internal-transactions", fromUtc, cancellationToken);
+            var tokenTask = FetchBlockscoutItemsAsync(client, $"addresses/{address}/token-transfers", fromUtc, cancellationToken);
             await Task.WhenAll(normalTask, internalTask, tokenTask).ConfigureAwait(false);
             var result = new List<EthereumAssetEvent>();
 
@@ -358,7 +359,8 @@ namespace MyBook
             return result;
         }
 
-        private async Task<List<JObject>> FetchBlockscoutItemsAsync(
+        private static async Task<List<JObject>> FetchBlockscoutItemsAsync(
+            HttpClient client,
             string path,
             DateTime fromUtc,
             CancellationToken cancellationToken)
@@ -377,12 +379,12 @@ namespace MyBook
             do
             {
                 // Keep the address, pagination query and response body out of error logs.
-                var request = $"Blockscout GET eth.blockscout.com/api/v2/addresses/[redacted]/{resource}; page={++page}";
+                var request = $"Blockscout GET eth.blockscout.com/api/v2/addresses/[redacted]/{resource}; page={++page}; route=Kraken_proxy";
                 JObject json;
                 int? httpStatus = null;
                 try
                 {
-                    using var response = await sharedHttpClient.GetAsync($"{BlockscoutApiBaseUrl}/{path}{query}", cancellationToken).ConfigureAwait(false);
+                    using var response = await client.GetAsync($"{BlockscoutApiBaseUrl}/{path}{query}", cancellationToken).ConfigureAwait(false);
                     httpStatus = (int)response.StatusCode;
                     if (!response.IsSuccessStatusCode)
                     {
@@ -406,7 +408,7 @@ namespace MyBook
                 {
                     var time = DateTime.Parse(RequiredText(item, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal);
                     if (previousTime.HasValue && time > previousTime.Value)
-                        throw new InvalidOperationException($"Blockscout {path} response is not ordered newest first.");
+                        throw new InvalidOperationException($"{request}: HTTP {httpStatus}; response is not ordered newest first.");
                     previousTime = time;
                     if (time >= fromUtc)
                         result.Add(item);

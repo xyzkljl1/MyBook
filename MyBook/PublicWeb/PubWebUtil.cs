@@ -18,13 +18,13 @@ namespace MyBook
         private readonly HttpClient googleHttpClient;
         private readonly HttpClient directHttpClient;
         private readonly HttpClient secondaryHttpClient;
-        private readonly string? krakenProxy;
+        private readonly KrakenPubUtil kraken;
 
         public PubWebUtil(IConfigurationRoot config, DatabaseUtil? database = null)
         {
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             this.database = database;
-            krakenProxy = config["Kraken_proxy"];
+            kraken = new KrakenPubUtil(config["Kraken_proxy"]);
             httpClient = CreateHttpClient(ParsePubWebProxyConfig(config["pubweb_proxy"]));
             googleHttpClient = CreateHttpClient(ParsePubWebProxyConfig(config["pubweb_google_proxy"], "pubweb_google_proxy"));
             directHttpClient = CreateHttpClient(null);
@@ -115,7 +115,7 @@ namespace MyBook
         }
 
         internal async Task FetchMarketPricesAsync(IReadOnlyList<(string Code, HoldingType HoldingType)> targets,
-            KrakenPubUtil kraken, Action<MarketPrice> onPrice, bool scheduled = false)
+            Action<MarketPrice> onPrice, bool scheduled = false)
         {
             var startedAt = DateTimeOffset.Now;
             var elapsed = Stopwatch.StartNew();
@@ -142,9 +142,7 @@ namespace MyBook
                 var assets = targets.Where(target => target.HoldingType == HoldingType.Crypto).Select(target => target.Code).ToList();
                 if (assets.Count > 0)
                 {
-                    var proxy = ParsePubWebProxyConfig(krakenProxy, "Kraken_proxy")
-                        ?? throw new InvalidOperationException("Kraken GET api.kraken.com/0/public/Ticker: Kraken_proxy is required.");
-                    using var client = KrakenPubUtil.CreateHttpClient(proxy);
+                    using var client = kraken.CreateHttpClient();
                     var crypto = await FetchWithRetry(() => kraken.FetchLatestUsdPricesAsync(assets, client)).ConfigureAwait(false);
                     foreach (var quote in crypto)
                         Report(quote);
@@ -266,7 +264,7 @@ namespace MyBook
             return client;
         }
 
-        private static IWebProxy? ParsePubWebProxyConfig(string? value, string configKey = "pubweb_proxy")
+        internal static IWebProxy? ParsePubWebProxyConfig(string? value, string configKey = "pubweb_proxy")
         {
             if (String.IsNullOrWhiteSpace(value))
                 return null;

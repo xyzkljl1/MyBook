@@ -1,15 +1,13 @@
 using Newtonsoft.Json.Linq;
 using System.Globalization;
-using System.Net;
 using System.Net.Http;
 
 namespace MyBook
 {
-    sealed class KrakenPubUtil
+    sealed class KrakenPubUtil(string? proxyAddress)
     {
         private const string KrakenOhlcUrl = "https://api.kraken.com/0/public/OHLC";
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(20);
-        private static readonly HttpClient sharedHttpClient = CreateHttpClient();
         private readonly SemaphoreSlim cacheLock = new(1, 1);
         private readonly Dictionary<(string Asset, DateTime Date), KrakenDailyPrice> cache = new();
 
@@ -145,11 +143,12 @@ namespace MyBook
             var pair = asset + "USD";
             var url = $"{KrakenOhlcUrl}?pair={Uri.EscapeDataString(pair)}&assetVersion=1&interval=1440&since={since.ToString(CultureInfo.InvariantCulture)}";
             string text;
+            using var client = CreateHttpClient();
             for (var attempt = 1; ; attempt++)
             {
                 try
                 {
-                    using var response = await sharedHttpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
+                    using var response = await client.GetAsync(url, cancellationToken).ConfigureAwait(false);
                     text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                     if (!response.IsSuccessStatusCode)
                         throw new InvalidOperationException($"Kraken OHLC request failed for {pair}: {(int)response.StatusCode} {response.ReasonPhrase}.");
@@ -218,10 +217,12 @@ namespace MyBook
                 throw new InvalidOperationException($"Unsupported crypto asset: {asset}.");
         }
 
-        internal static HttpClient CreateHttpClient(IWebProxy? proxy = null)
+        internal HttpClient CreateHttpClient(string userAgent = "MyBook/1.0 KrakenPubUtil")
         {
+            var proxy = PubWebUtil.ParsePubWebProxyConfig(proxyAddress, "Kraken_proxy")
+                ?? throw new InvalidOperationException("Kraken_proxy is required for Kraken requests.");
             var client = new HttpClient(new HttpClientHandler { Proxy = proxy }) { Timeout = RequestTimeout };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("MyBook/1.0 KrakenPubUtil");
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
             return client;
         }
     }
