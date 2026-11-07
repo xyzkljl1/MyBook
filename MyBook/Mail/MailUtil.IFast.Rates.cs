@@ -55,14 +55,15 @@ partial class MailUtil
         doc.LoadHtml(message.HtmlBody ?? "");
         var text = NormalizeMailText(WebUtility.HtmlDecode(message.TextBody ?? doc.DocumentNode.InnerText));
         var matches = Regex.Matches(text, isAdvanceNotice
-            ? @"interest rate for (?<currency>[A-Z]{3}) Multi-Currency Current Account will change from (?<old>\d+(?:\.\d+)?)% AER to (?<new>\d+(?:\.\d+)?)% AER\.\s*This change will take effect on (?<date>\d{1,2} [A-Za-z]{3} \d{4})\."
-            : @"Currency:\s*(?<currency>[A-Z]{3})\s*Interest Rate:\s*(?<old>\d+(?:\.\d+)?)% AER\s*\(\d+(?:\.\d+)?% gross\) variable\s*New Interest Rate:\s*(?<new>\d+(?:\.\d+)?)% AER\s*\((?<gross>\d+(?:\.\d+)?)% gross\) variable\s*Effective Date:\s*(?<date>\d{1,2} [A-Za-z]{3} \d{4})",
+            ? @"interest rate for (?<currency>[A-Z]{3}) Multi-Currency Current Account will change from (?<old>\d+(?:\.\d+)?)% AER to (?<new>\d+(?:\.\d+)?)% AER\.\s*This change will take effect on (?<date>\d{1,2} [A-Za-z]+ \d{4})\."
+            : @"Currency:\s*(?<currency>[A-Z]{3})\s*Interest Rate:\s*(?<old>\d+(?:\.\d+)?)% AER\s*\(\d+(?:\.\d+)?% gross\) variable\s*New Interest Rate:\s*(?<new>\d+(?:\.\d+)?)% AER\s*\((?<gross>\d+(?:\.\d+)?)% gross\) variable\s*Effective Date:\s*(?<date>\d{1,2} [A-Za-z]+ \d{4})",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        // A notice can also announce ISA changes; only current-account entries belong to this rate history.
         if (matches.Count == 0 || matches.Count != Regex.Matches(text,
-            isAdvanceNotice ? "will change from" : "Currency:", RegexOptions.IgnoreCase).Count)
+            isAdvanceNotice ? @"interest rate for \S+ Multi-Currency Current Account" : "Currency:", RegexOptions.IgnoreCase).Count)
             throw new MailParseException("Unsupported or incomplete IFast rate notice.");
         var result = matches.Select(match => new IFastRateNotice(new Currency(0, match.Groups["currency"].Value.ToUpperInvariant()).t,
-            DateTime.ParseExact(match.Groups["date"].Value, "d MMM yyyy", CultureInfo.InvariantCulture),
+            DateTime.ParseExact(match.Groups["date"].Value, ["d MMM yyyy", "d MMMM yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None),
             Decimal.Parse(match.Groups["old"].Value, CultureInfo.InvariantCulture) / 100m,
             Decimal.Parse(match.Groups["new"].Value, CultureInfo.InvariantCulture) / 100m,
             match.Groups["gross"].Success ? Decimal.Parse(match.Groups["gross"].Value, CultureInfo.InvariantCulture) / 100m : null)).ToList();
