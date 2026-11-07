@@ -11,18 +11,37 @@ namespace MyBook
         IReadOnlyDictionary<(string Code, HoldingType HoldingType), MarketPrice> prices =
             new Dictionary<(string, HoldingType), MarketPrice>();
         bool showAccounts;
+        readonly List<AssetHistoryPoint> history;
+        readonly Dictionary<(int AccountId, CurrencyType Currency), decimal> bookBalances;
+        int historyRangeIndex = 1;
 
         internal LiveHoldingsViewModel(List<Holding> holdings, IReadOnlyDictionary<int, string> accountNames,
-            IReadOnlyDictionary<CurrencyType, decimal> exchangeRates)
+            IReadOnlyDictionary<CurrencyType, decimal> exchangeRates, List<AssetHistoryPoint>? history = null,
+            List<AccountBalance>? balances = null)
         {
             this.holdings = holdings;
             this.accountNames = accountNames;
             this.exchangeRates = exchangeRates;
+            this.history = history ?? [];
+            bookBalances = (balances ?? []).ToDictionary(balance => (balance._account_Id, balance.t), balance => balance.v);
             RebuildRows();
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
         public List<LiveHoldingRow> Rows { get; private set; } = [];
+        public List<AssetHistoryPoint> HistoryPoints { get; private set; } = [];
+        public string HistoryBasisText { get; private set; } = "";
+        public int HistoryRangeIndex
+        {
+            get => historyRangeIndex;
+            set
+            {
+                if (value is < 0 or > 3 || historyRangeIndex == value) return;
+                historyRangeIndex = value;
+                RebuildHistory();
+                PropertyChanged?.Invoke(this, new(nameof(HistoryRangeIndex)));
+            }
+        }
         public int ModeIndex
         {
             get => ShowAccounts ? 1 : 0;
@@ -88,6 +107,42 @@ namespace MyBook
                 .ToList();
             RefreshQuoteAges();
             PropertyChanged?.Invoke(this, new(nameof(Rows)));
+            RebuildHistory();
+        }
+
+        void RebuildHistory()
+        {
+            var today = history.LastOrDefault()?.Date ?? DateTime.Today;
+            var since = HistoryRangeIndex switch
+            {
+                0 => today.AddDays(-7),
+                1 => today.AddMonths(-1),
+                2 => today.AddMonths(-6),
+                _ => today.AddYears(-1)
+            };
+            HistoryPoints = history.Where(point => point.Date >= since).ToList();
+            var complete = Rows.Count > 0 && Rows.All(row => row.Value.HasValue && exchangeRates.ContainsKey(row.Currency));
+            if (complete && HistoryPoints.LastOrDefault() is { TotalRmb: decimal bookValue } current)
+            {
+                // Revalue each account/currency before rounding, as in the dashboard's total fluctuation.
+                var changes = holdings.GroupBy(holding => (holding._account_Id, holding.totalPrice.t))
+                    .Sum(group =>
+                    {
+                        var change = group.Sum(holding =>
+                        {
+                            var code = holding.holdingType == HoldingType.Crypto ? KrakenPubUtil.GetBaseAsset(holding.code) : holding.code;
+                            return Holding.CalculateTotalValue(holding.quantity, prices[(code, holding.holdingType)].Price, holding.holdingType)
+                                - holding.totalPrice.v;
+                        });
+                        var baseline = bookBalances.GetValueOrDefault(group.Key);
+                        var rate = exchangeRates[group.Key.t];
+                        return Currency.RoundMoney((baseline + change) * rate) - Currency.RoundMoney(baseline * rate);
+                    });
+                HistoryPoints[^1] = current with { TotalRmb = Currency.RoundMoney(bookValue + changes) };
+            }
+            HistoryBasisText = complete ? "历史为账面余额，当前含实时浮动" : "账面余额（当前报价未齐）";
+            PropertyChanged?.Invoke(this, new(nameof(HistoryPoints)));
+            PropertyChanged?.Invoke(this, new(nameof(HistoryBasisText)));
         }
 
         void RefreshQuoteAges()

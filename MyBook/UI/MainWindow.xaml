@@ -663,15 +663,31 @@
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="240"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <local:SegmentedSelector SelectedIndex="{Binding LiveHoldings.ModeIndex, Mode=TwoWay}"
+                        <DockPanel Margin="0,0,0,8">
+                            <local:SegmentedSelector DockPanel.Dock="Right" SelectedIndex="{Binding LiveHoldings.HistoryRangeIndex, Mode=TwoWay}"
+                                                     HorizontalAlignment="Right" AutomationProperties.Name="总资金变化时间范围">
+                                <ListBoxItem Content="周"/>
+                                <ListBoxItem Content="月"/>
+                                <ListBoxItem Content="半年"/>
+                                <ListBoxItem Content="年"/>
+                            </local:SegmentedSelector>
+                            <StackPanel>
+                                <TextBlock Text="总资金变化（人民币，含现金）" FontWeight="SemiBold"/>
+                                <TextBlock Text="{Binding LiveHoldings.HistoryBasisText}" Foreground="#64748B" FontSize="12" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </DockPanel>
+                        <local:AssetHistoryChart Grid.Row="1" Points="{Binding LiveHoldings.HistoryPoints}" Margin="0,0,0,12"/>
+                        <local:SegmentedSelector Grid.Row="2" SelectedIndex="{Binding LiveHoldings.ModeIndex, Mode=TwoWay}"
                                                  HorizontalAlignment="Left" Margin="0,0,0,8"
                                                  AutomationProperties.Name="实时持仓显示方式">
                             <ListBoxItem Content="按标的汇总"/>
                             <ListBoxItem Content="按账户展开"/>
                         </local:SegmentedSelector>
-                        <DataGrid Grid.Row="1" ItemsSource="{Binding LiveHoldings.Rows}" AutoGenerateColumns="False"
+                        <DataGrid Grid.Row="3" ItemsSource="{Binding LiveHoldings.Rows}" AutoGenerateColumns="False"
                                   Grid.IsSharedSizeScope="True"
                                   IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
                                   HeadersVisibility="Column" GridLinesVisibility="Horizontal"

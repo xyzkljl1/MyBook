@@ -5,6 +5,7 @@ namespace MyBook
         internal List<Holding> MarketHoldings { get; set; } = [];
         internal DateTime? MarketValuationStartDate { get; set; }
         internal List<Holding> LiveHoldings { get; set; } = [];
+        internal List<AssetHistoryPoint> LiveAssetHistory { get; set; } = [];
         internal Dictionary<int, string> HoldingAccountNames { get; set; } = [];
         internal List<AccountBalance> MarketBalances { get; set; } = [];
         internal Dictionary<CurrencyType, decimal> MarketExchangeRates { get; set; } = [];
@@ -26,6 +27,8 @@ namespace MyBook
         public DateTime LastMonthEnd { get; set; }
         public DateTime MonthlyFlowStartMonth { get; set; }
     }
+
+    public sealed record AssetHistoryPoint(DateTime Date, decimal? TotalRmb);
 
     public class AssetSummaryPoint
     {

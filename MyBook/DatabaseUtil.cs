@@ -3735,7 +3735,15 @@ namespace MyBook
             string HoldingKey(Record record) => BuildHoldingInvestmentKey(record, holdingNames, holdingsById);
             var exchangeRates = GetCurrencyToRmbRates();
             var assetSummaryDates = BuildAssetSummaryDates(today.Date);
-            var assetSummaryBalances = BuildAssetSummaryBalanceSets(assetSummaryDates, balances, today.Date);
+            var liveHoldings = holdings.Where(holding => holding.quantity != 0 && !Holding.IsSingleValueAsset(holding.holdingType)).ToList();
+            var liveAccountIds = liveHoldings.Select(holding => holding._account_Id).ToHashSet();
+            var historyStart = db.Queryable<Snapshot>().Where(snapshot => snapshot.maxStatementImportId >= 0)
+                .Select(snapshot => snapshot.effectiveDate).ToList().DefaultIfEmpty(today.Date).Min();
+            if (historyStart < today.Date.AddYears(-1)) historyStart = today.Date.AddYears(-1);
+            var historyDates = Enumerable.Range(0, Math.Max(0, (today.Date - historyStart).Days + 1))
+                .Select(offset => historyStart.AddDays(offset)).ToHashSet();
+            var assetSummaryBalances = BuildAssetSummaryBalanceSets(
+                assetSummaryDates.Union(historyDates).OrderBy(date => date).ToList(), balances, today.Date);
             var usedCurrencies = balances
                 .Select(balance => balance.t)
                 .Union(records.Select(record => record.t))
@@ -3744,7 +3752,7 @@ namespace MyBook
                 .Union(assetSummaryBalances.SelectMany(point => point.Balances.Select(balance => balance.t)))
                 .Distinct()
                 .ToList();
-            var assetSummaryPoints = BuildAssetSummaryPoints(assetSummaryBalances, records, exchangeRates, today.Date);
+            var assetSummaryPoints = BuildAssetSummaryPoints(assetSummaryBalances.Where(point => assetSummaryDates.Contains(point.Date)).ToList(), records, exchangeRates, today.Date);
             var todayAssetSummary = assetSummaryPoints.LastOrDefault(point => point.IsToday);
             var latestImports = BuildLatestStatementImportSummaries();
 
@@ -3753,7 +3761,14 @@ namespace MyBook
                 MarketValuationStartDate = GetMarketValuationStartDate(latestImports, investmentRecords),
                 MarketHoldings = holdings.Where(holding => holding.quantity != 0
                     && holding.holdingType is HoldingType.NASDAQ or HoldingType.ARCA or HoldingType.SHANGHAI or HoldingType.Crypto).ToList(),
-                LiveHoldings = holdings.Where(holding => holding.quantity != 0 && !Holding.IsSingleValueAsset(holding.holdingType)).ToList(),
+                LiveHoldings = liveHoldings,
+                LiveAssetHistory = assetSummaryBalances.Where(point => historyDates.Contains(point.Date)).Select(point =>
+                {
+                    var included = point.Balances.Where(balance => liveAccountIds.Contains(balance._account_Id)).ToList();
+                    return new AssetHistoryPoint(point.Date, point.HasData && liveAccountIds.Count > 0
+                        && included.All(balance => exchangeRates.ContainsKey(balance.t))
+                        ? BuildTotalAssetsRmb(included, exchangeRates) : null);
+                }).ToList(),
                 HoldingAccountNames = accounts,
                 MarketBalances = balances,
                 MarketExchangeRates = exchangeRates,

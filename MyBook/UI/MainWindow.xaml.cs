@@ -1046,7 +1046,7 @@ namespace MyBook
             {
                 marketHoldings = data.MarketHoldings,
                 marketValuationStartDate = data.MarketValuationStartDate,
-                LiveHoldings = new(data.LiveHoldings, data.HoldingAccountNames, data.MarketExchangeRates),
+                LiveHoldings = new(data.LiveHoldings, data.HoldingAccountNames, data.MarketExchangeRates, data.LiveAssetHistory, data.MarketBalances),
                 marketBalances = data.MarketBalances,
                 marketExchangeRates = data.MarketExchangeRates,
                 SnapshotTimeText = "最新",
@@ -1107,6 +1107,7 @@ namespace MyBook
         public void CopyDashboardSettingsFrom(DashboardViewModel source)
         {
             LiveHoldings.ShowAccounts = source.LiveHoldings.ShowAccounts;
+            LiveHoldings.HistoryRangeIndex = source.LiveHoldings.HistoryRangeIndex;
             ShowInvestmentInUsd = source.ShowInvestmentInUsd;
             InvestmentModeIndex = source.InvestmentModeIndex;
             SelectedInvestmentAccount = InvestmentAccounts.FirstOrDefault(account =>
