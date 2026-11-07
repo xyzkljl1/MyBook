@@ -21,6 +21,11 @@ public sealed class AssetHistoryChart : Grid
 
     readonly Canvas canvas = new() { Background = Brushes.Transparent, ClipToBounds = true };
     readonly TextBox selected = Label("");
+    readonly Line hoverLine = new()
+    {
+        Stroke = Brushes.SlateGray, StrokeThickness = 1, StrokeDashArray = new() { 4, 3 },
+        IsHitTestVisible = false, Visibility = Visibility.Collapsed
+    };
     const double Left = 95, Right = 12, Top = 12, Bottom = 28;
 
     public AssetHistoryChart()
@@ -34,6 +39,7 @@ public sealed class AssetHistoryChart : Grid
         Children.Add(canvas);
         canvas.SizeChanged += (_, _) => Draw();
         canvas.MouseMove += SelectNearest;
+        canvas.MouseLeave += (_, _) => hoverLine.Visibility = Visibility.Collapsed;
     }
 
     static TextBox Label(string text) => new()
@@ -44,11 +50,25 @@ public sealed class AssetHistoryChart : Grid
     };
 
     void SelectNearest(object sender, MouseEventArgs args)
+        => UpdateHover(args.GetPosition(canvas));
+
+    void UpdateHover(Point position)
     {
-        if (Points is not { Count: > 0 } points || canvas.ActualWidth <= Left + Right) return;
-        var fraction = Math.Clamp((args.GetPosition(canvas).X - Left) / (canvas.ActualWidth - Left - Right), 0, 1);
+        hoverLine.Visibility = Visibility.Collapsed;
+        if (Points is not { Count: > 0 } points || hoverLine.Parent != canvas
+            || canvas.ActualWidth <= Left + Right || canvas.ActualHeight <= Top + Bottom
+            || position.X < Left || position.X > canvas.ActualWidth - Right
+            || position.Y < Top || position.Y > canvas.ActualHeight - Bottom) return;
+        var width = canvas.ActualWidth - Left - Right;
+        var fraction = (position.X - Left) / width;
         var date = points[0].Date.AddDays((points[^1].Date - points[0].Date).TotalDays * fraction);
-        Show(points.MinBy(point => Math.Abs((point.Date - date).TotalDays))!);
+        var nearest = points.MinBy(point => Math.Abs((point.Date - date).TotalDays))!;
+        Show(nearest);
+        hoverLine.X1 = hoverLine.X2 = Left + (nearest.Date - points[0].Date).TotalDays
+            / Math.Max(1, (points[^1].Date - points[0].Date).TotalDays) * width;
+        hoverLine.Y1 = Top;
+        hoverLine.Y2 = canvas.ActualHeight - Bottom;
+        hoverLine.Visibility = Visibility.Visible;
     }
 
     void Show(AssetHistoryPoint point) => selected.Text = point.TotalRmb is decimal amount
@@ -57,6 +77,7 @@ public sealed class AssetHistoryChart : Grid
     void Draw()
     {
         canvas.Children.Clear();
+        hoverLine.Visibility = Visibility.Collapsed;
         var available = Points?.Where(point => point.TotalRmb.HasValue).ToList() ?? [];
         if (available.Count == 0) { selected.Text = "暂无资金历史"; return; }
         Show(Points![^1]);
@@ -95,12 +116,9 @@ public sealed class AssetHistoryChart : Grid
                 canvas.Children.Add(line);
             }
             line.Points.Add(new(X(point), Y(value)));
-            // Mark isolated points too; missing history must not be connected across a gap.
-            var dot = new Ellipse { Width = 4, Height = 4, Fill = Brushes.Teal, IsHitTestVisible = false };
-            Canvas.SetLeft(dot, X(point) - 2);
-            Canvas.SetTop(dot, Y(value) - 2);
-            canvas.Children.Add(dot);
         }
+        canvas.Children.Add(hoverLine);
+        if (canvas.IsMouseOver) UpdateHover(Mouse.GetPosition(canvas));
     }
 
     void AddLabel(string text, double x, double y, double width, TextAlignment alignment = TextAlignment.Left)

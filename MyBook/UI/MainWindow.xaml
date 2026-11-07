@@ -745,7 +745,7 @@
                 </Border>
             </TabItem>
 
-            <TabItem Header="导入记录">
+            <TabItem x:Name="ImportRecordsTab" Header="导入记录" Visibility="Collapsed">
                 <Border Style="{StaticResource Card}" Margin="0,16,0,0">
                     <Grid>
                         <Grid.RowDefinitions>

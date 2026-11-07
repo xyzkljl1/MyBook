@@ -41,6 +41,9 @@ namespace MyBook
             AllocConsole();
 #endif
             InitializeComponent();
+#if DEBUG
+            ImportRecordsTab.Visibility = Visibility.Visible;
+#endif
             InitializeTrayIcon();
             importStatusTimer.Tick += ImportStatusTimer_Tick;
             fetcher.RunSchedule();
