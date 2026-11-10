@@ -21,8 +21,10 @@ partial class MailUtil
             SearchQuery.FromContains("@ifastgb.com").And(SearchQuery.SubjectContains("Interest rate update")
                 .Or(SearchQuery.SubjectContains(IFastRateIncreaseSubject))),
             null, GetMailDateTime).ConfigureAwait(false);
-        var notices = messages.SelectMany(ParseIFastRateNotice).ToList();
+        var notices = messages.OrderBy(GetMailDateTime).SelectMany(ParseIFastRateNotice).ToList();
         var history = database.GetRateHistory(RateSource.IFastWebsite, RateSource.IFastMail);
+        var fetchedAt = DateTime.Now;
+        var corrections = ResolveIFastRateNotices(history, notices, fetchedAt);
         using var web = new PubWebUtil(config);
         var observations = await web.ReadIFastInterestRates().ConfigureAwait(false);
         // Keep at most one copy of each observed rate per bank day, preserving its first observation time.
@@ -30,7 +32,6 @@ partial class MailUtil
             && item.currency == rate.currency && IFastRateBankDate(item) == IFastRateBankDate(rate)
             && item.grossRate == rate.grossRate && item.aer == rate.aer)).ToList();
         ValidateIFastRateNotices(history.Concat(rates).ToList(), notices);
-        var fetchedAt = DateTime.Now;
         rates.AddRange(notices.Select(notice => new RateHistory
         {
             source = RateSource.IFastMail,
@@ -41,7 +42,34 @@ partial class MailUtil
             grossRate = notice.Gross
         }));
         BuildIFastRateSchedule(history.Concat(rates).ToList());
-        database.SaveRateHistory(rates, completeMissingGross: true);
+        database.SaveIFastRateHistory(rates, corrections);
+    }
+
+    internal static List<RateHistory> ResolveIFastRateNotices(
+        List<RateHistory> history, List<IFastRateNotice> notices, DateTime fetchedAt)
+    {
+        var corrections = new List<RateHistory>();
+        for (var index = 0; index < notices.Count; index++)
+        {
+            var advance = notices[index];
+            var confirmation = notices.Skip(index + 1).FirstOrDefault(item => item.Currency == advance.Currency);
+            // Only confirmation emails contain Gross. The next notice for this currency must confirm
+            // the same old/new AER transition; its effective date supersedes the earlier forecast.
+            if (advance.Gross.HasValue || confirmation?.Gross is null
+                || advance.PreviousAer != confirmation.PreviousAer || advance.Aer != confirmation.Aer)
+                continue;
+            foreach (var stored in history.Where(item => item.source == RateSource.IFastMail
+                && item.currency == advance.Currency && IFastRateBankDate(item) == advance.Date
+                && item.aer == advance.Aer && item.grossRate is null))
+            {
+                stored.rateDate = IFastLocalTime(confirmation.Date);
+                stored.grossRate = confirmation.Gross;
+                stored.fetchedAt = fetchedAt;
+                corrections.Add(stored);
+            }
+            notices.RemoveAt(index--);
+        }
+        return corrections;
     }
 
     internal static List<IFastRateNotice> ParseIFastRateNotice(MimeMessage message)

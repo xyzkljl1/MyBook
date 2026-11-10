@@ -382,24 +382,39 @@ namespace MyBook
                 var request = $"Blockscout GET eth.blockscout.com/api/v2/addresses/[redacted]/{resource}; page={++page}; route=Kraken_proxy";
                 JObject json;
                 int? httpStatus = null;
+                var attempt = 0;
                 try
                 {
-                    using var response = await client.GetAsync($"{BlockscoutApiBaseUrl}/{path}{query}", cancellationToken).ConfigureAwait(false);
-                    httpStatus = (int)response.StatusCode;
-                    if (!response.IsSuccessStatusCode)
+                    for (attempt = 1; ; attempt++)
                     {
-                        var status = (int)response.StatusCode;
-                        var category = status == 429 ? "RateLimited" : status >= 500 ? "ServerError"
-                            : status is 401 or 403 ? "AccessDenied" : "HttpError";
-                        var retryAfter = response.Headers.RetryAfter?.ToString() ?? "absent";
-                        throw new InvalidOperationException($"{request}: HTTP {status}; {category}; Retry-After={retryAfter}.");
+                        httpStatus = null;
+                        try
+                        {
+                            using var response = await client.GetAsync($"{BlockscoutApiBaseUrl}/{path}{query}", cancellationToken).ConfigureAwait(false);
+                            httpStatus = (int)response.StatusCode;
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                var status = (int)response.StatusCode;
+                                var category = status == 429 ? "RateLimited" : status >= 500 ? "ServerError"
+                                    : status is 401 or 403 ? "AccessDenied" : "HttpError";
+                                var retryAfter = response.Headers.RetryAfter?.ToString() ?? "absent";
+                                throw new InvalidOperationException($"{request}: HTTP {status}; {category}; Retry-After={retryAfter}; attempts={attempt}.");
+                            }
+                            json = JObject.Parse(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+                            break;
+                        }
+                        catch (Exception exception) when (attempt < 3 && !cancellationToken.IsCancellationRequested
+                            && (exception is HttpRequestException or OperationCanceledException
+                                || exception is InvalidOperationException && httpStatus is >= 500 and <= 599))
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+                        }
                     }
-                    json = JObject.Parse(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
                 }
                 catch (HttpRequestException exception)
-                { throw new InvalidOperationException($"{request}: HTTP {httpStatus?.ToString() ?? "unavailable"}; transport {exception.HttpRequestError}."); }
+                { throw new InvalidOperationException($"{request}: HTTP {httpStatus?.ToString() ?? "unavailable"}; transport {exception.HttpRequestError}; attempts={attempt}."); }
                 catch (OperationCanceledException)
-                { throw new InvalidOperationException($"{request}: HTTP {httpStatus?.ToString() ?? "unavailable"}; {(cancellationToken.IsCancellationRequested ? "Cancelled" : "Timeout")}."); }
+                { throw new InvalidOperationException($"{request}: HTTP {httpStatus?.ToString() ?? "unavailable"}; {(cancellationToken.IsCancellationRequested ? "Cancelled" : "Timeout")}; attempts={attempt}."); }
                 catch (JsonException)
                 { throw new InvalidOperationException($"{request}: HTTP {httpStatus}; InvalidJson."); }
                 var items = (json["items"] as JArray ?? new JArray()).OfType<JObject>().ToList();

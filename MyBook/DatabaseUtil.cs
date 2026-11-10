@@ -5494,26 +5494,38 @@ namespace MyBook
                 .OrderBy(rate => rate.rateDate).ToList();
 
         internal void SaveRateHistory(IReadOnlyList<RateHistory> rates, bool completeMissingGross = false)
+            => ExecuteLockedTransaction(() => SaveRateHistoryCore(rates, completeMissingGross));
+
+        internal void SaveIFastRateHistory(IReadOnlyList<RateHistory> rates, IReadOnlyList<RateHistory> corrections)
         {
             ExecuteLockedTransaction(() =>
             {
-                foreach (var rate in rates)
-                {
-                    foreach (var value in new[] { rate.exchangeRateToRmb, rate.exchangeRateFromRmb }.OfType<decimal>())
-                    {
-                        if (value <= 0)
-                            throw new InvalidOperationException($"Invalid exchange rate: {rate.source}/{rate.currency} {rate.rateDate:O}.");
-                        MySqlDecimalColumnTypes.ValidateCurrencyValue(value, nameof(RateHistory));
-                    }
-                    var existing = db.Queryable<RateHistory>().Where(r => r.source == rate.source
-                        && r.currency == rate.currency && r.rateDate == rate.rateDate).First();
-                    if (existing is null)
-                        db.Insertable(rate).ExecuteCommand();
-                    else if (MergeRateHistoryValues(existing, rate, completeMissingGross))
-                        db.Updateable(existing).UpdateColumns(item => new
-                            { item.exchangeRateToRmb, item.exchangeRateFromRmb, item.grossRate, item.fetchedAt }).ExecuteCommand();
-                }
+                // Keep the original ID (including a fixed baseline) when confirmation corrects a forecast.
+                foreach (var correction in corrections)
+                    db.Updateable(correction).UpdateColumns(item => new
+                        { item.rateDate, item.grossRate, item.fetchedAt }).ExecuteCommand();
+                SaveRateHistoryCore(rates, completeMissingGross: true);
             });
+        }
+
+        private void SaveRateHistoryCore(IReadOnlyList<RateHistory> rates, bool completeMissingGross)
+        {
+            foreach (var rate in rates)
+            {
+                foreach (var value in new[] { rate.exchangeRateToRmb, rate.exchangeRateFromRmb }.OfType<decimal>())
+                {
+                    if (value <= 0)
+                        throw new InvalidOperationException($"Invalid exchange rate: {rate.source}/{rate.currency} {rate.rateDate:O}.");
+                    MySqlDecimalColumnTypes.ValidateCurrencyValue(value, nameof(RateHistory));
+                }
+                var existing = db.Queryable<RateHistory>().Where(r => r.source == rate.source
+                    && r.currency == rate.currency && r.rateDate == rate.rateDate).First();
+                if (existing is null)
+                    db.Insertable(rate).ExecuteCommand();
+                else if (MergeRateHistoryValues(existing, rate, completeMissingGross))
+                    db.Updateable(existing).UpdateColumns(item => new
+                        { item.exchangeRateToRmb, item.exchangeRateFromRmb, item.grossRate, item.fetchedAt }).ExecuteCommand();
+            }
         }
 
         internal static bool MergeRateHistoryValues(RateHistory existing, RateHistory rate, bool completeMissingGross = false)

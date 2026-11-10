@@ -942,17 +942,24 @@ namespace MyBook
             // The four-column dividend section includes payments in lieu; the five-column sections separate them.
             var chosen = blocks.Where(b => !separateDividends || b[0].Fields.Count == 5)
                 .OrderByDescending(b => b.Count).ThenByDescending(b => b.Sum(r => r.Fields.Count)).FirstOrDefault() ?? [];
-            var paymentsInLieu = sectionName == IBKRDividendSection ? ReadIBKRMoneyDetails(report, IBKRDividendPaymentInLieuSection) : [];
-            if (!separateDividends && paymentsInLieu.Count > 0)
+            // Interest also includes bond receipts/payments repeated in their own sections.
+            var separateDetails = sectionName switch
+            {
+                IBKRDividendSection => ReadIBKRMoneyDetails(report, IBKRDividendPaymentInLieuSection),
+                IBKRInterestSection => ReadIBKRMoneyDetails(report, IBKRBondInterestReceivedSection)
+                    .Concat(ReadIBKRMoneyDetails(report, IBKRBondInterestPaidSection)).ToList(),
+                _ => []
+            };
+            if (!separateDividends && separateDetails.Count > 0)
             {
                 chosen = chosen.ToList();
-                foreach (var payment in paymentsInLieu)
+                foreach (var payment in separateDetails)
                 {
                     var index = chosen.FindIndex(r => Key(r) == Key(payment));
                     if (index >= 0) chosen.RemoveAt(index);
                 }
             }
-            var covered = chosen.Concat(paymentsInLieu);
+            var covered = chosen.Concat(separateDetails);
             var counts = covered.GroupBy(Key).ToDictionary(g => g.Key, g => g.Count());
             foreach (var block in blocks)
                 foreach (var group in block.GroupBy(Key))
