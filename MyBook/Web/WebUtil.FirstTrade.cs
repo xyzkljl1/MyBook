@@ -375,7 +375,7 @@ namespace MyBook
 
         internal sealed partial class FirstTradeClient : IDisposable
         {
-            private enum Endpoint { Bootstrap, Login, VerifyCode, Accounts, Balances, Positions, History, Quote }
+            private enum Endpoint { Bootstrap, Login, VerifyCode, Accounts, Balances, Positions, History, Quote, Ohlc }
             private static readonly Uri Origin = new("https://api3x.firstrade.com/");
             // Shared client value from firstrade-api/urls.py, not a personal session credential.
             private const string ClientToken = "833w3XuIFycv18ybi";
@@ -557,6 +557,13 @@ namespace MyBook
                 => ReadAsync(Endpoint.Quote, "account=" + Uri.EscapeDataString(account)
                     + "&q=" + Uri.EscapeDataString(symbol), token);
 
+            // Read-only comparison helper; not used by imports. The 24-hour chart includes
+            // extended-hours minute OHLC, with Unix millisecond timestamps, not account valuation prices.
+            // Reuses this client's explicit proxy, session and expired-session retry behavior.
+            internal Task<JsonElement> ReadExtendedHoursPricesAsync(string symbol, CancellationToken token)
+                => ReadAsync(Endpoint.Ohlc, "symbol=" + Uri.EscapeDataString(symbol)
+                    + "&range=24h&_v=v2", token);
+
             private async Task<List<JsonElement>> ReadPagesAsync(Endpoint endpoint, string query, int pageSize, CancellationToken token)
             {
                 var pages = new List<JsonElement>();
@@ -678,6 +685,7 @@ namespace MyBook
                     Endpoint.Positions => ("/private/positions", HttpMethod.Get),
                     Endpoint.History => ("/private/account_history", HttpMethod.Get),
                     Endpoint.Quote => ("/public/quote", HttpMethod.Get),
+                    Endpoint.Ohlc => ("/public/ohlc", HttpMethod.Get),
                     _ => throw new FirstTradeException("endpoint is not allowed")
                 };
                 if ((method == HttpMethod.Post) != (form is not null))

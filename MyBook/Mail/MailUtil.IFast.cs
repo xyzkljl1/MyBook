@@ -45,6 +45,9 @@ partial class MailUtil
 
     private static bool IsIFastTransactionSubject(string subject)
     {
+        // Feature announcement, not an interest transaction or rate change.
+        if (subject == "Your Interest. Your Choice. Your Control.")
+            return false;
         if (subject is IFastReceiptSubject or IFastConversionSubject or IFastPaymentSubject)
             return true;
         if (Regex.IsMatch(subject, @"^(?:Your (?:Currency Conversion|payment|transfer|refund|interest)|QR Payment)", RegexOptions.IgnoreCase))
