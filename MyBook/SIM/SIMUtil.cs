@@ -228,12 +228,14 @@ namespace MyBook
             var parsedCount = 0;
             var deletedCount = 0;
             var processingFailures = new List<string>();
-            foreach (var message in OrderSIMMessagesForProcessing(messages))
+            var orderedMessages = PrepareICBCSIMMessagesForProcessing(messages, out var icbcBatches);
+            foreach (var message in orderedMessages)
             {
                 SIMMessageProcessResult result;
                 try
                 {
-                    result = ProcessSIMMessage(message, logLines);
+                    icbcBatches.TryGetValue(message, out var icbcBatch);
+                    result = ProcessSIMMessage(message, logLines, icbcBatch);
                     parsedCount++;
                 }
                 catch (Exception exception)
@@ -281,11 +283,11 @@ namespace MyBook
             return new SIMPollResult(parsedCount, deletedCount, logLines);
         }
 
-        private SIMMessageProcessResult ProcessSIMMessage(SIMMessage message, List<string> logLines)
+        private SIMMessageProcessResult ProcessSIMMessage(SIMMessage message, List<string> logLines, ICBCSIMBatch? icbcBatch)
         {
             if (IsICBCSender(message.Sender))
             {
-                var result = ParseICBCSIMMessage(message);
+                var result = ParseICBCSIMMessage(message, icbcBatch);
                 logLines.Add($"SIM SMS poll processed ICBC message index {message.Index} from {message.Sender}: {result.Description}.");
                 return result;
             }

@@ -575,6 +575,13 @@ namespace MyBook
                 .Any(it => it.provider == provider && it.statementKey == statementKey);
         }
 
+        public HashSet<string> GetImportedStatementKeys(StatementImportProvider provider, List<string> statementKeys)
+        {
+            return db.Queryable<StatementImport>()
+                .Where(import => import.provider == provider && statementKeys.Contains(import.statementKey))
+                .Select(import => import.statementKey).ToList().ToHashSet(StringComparer.Ordinal);
+        }
+
         public DateTime? GetLatestStatementImportTime(StatementImportProvider provider)
         {
             var latestImport = db.Queryable<StatementImport>()
@@ -5581,9 +5588,22 @@ namespace MyBook
         public List<Record> GetStatementRecords(StatementImportProvider provider, Account account, DateTime start, DateTime end)
         {
             var postingAccount = GetPostingAccount(account);
-            return GetStatementRecords(provider, start, end)
-                .Where(record => record._account_Id == postingAccount.Id)
+            return db.Queryable<Record>()
+                .Where(record => record._account_Id == postingAccount.Id && record.date >= start && record.date < end
+                    && SqlFunc.Subqueryable<StatementImport>().Where(import => import.Id == record._statementImport_Id
+                        && import.provider == provider).Any())
                 .ToList();
+        }
+
+        public Record? GetICBCSIMCompensationAnchor(Record compensation)
+        {
+            // A cross-day gap may start before the queried SMS range; fetch only its preceding balance anchor.
+            return db.Queryable<Record>()
+                .Where(record => record._account_Id == compensation._account_Id && record.t == compensation.t
+                    && record.Id < compensation.Id && !record.Source.Contains("ICBCSIMCompensation")
+                    && SqlFunc.Subqueryable<StatementImport>().Where(import => import.Id == record._statementImport_Id
+                        && import.provider == StatementImportProvider.ICBCSIMSMS).Any())
+                .OrderByDescending(record => record.Id).First();
         }
 
         public List<Record> GetStatementRecords(StatementImportProvider provider, Account account)

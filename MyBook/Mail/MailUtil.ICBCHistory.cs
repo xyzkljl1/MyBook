@@ -697,7 +697,9 @@ namespace MyBook
         private static bool IsICBCSIMRecordResolvedByHistory(Record record)
         {
             return IsICBCSIMRecordConfirmedByHistory(record)
-                || record.Source.Contains("supersededBy=ICBCHistoryDetail", StringComparison.OrdinalIgnoreCase);
+                || record.Source.Contains("supersededBy=ICBCHistoryDetail", StringComparison.OrdinalIgnoreCase)
+                || record.Source.Contains("supersededBy=ICBCSIMSMS", StringComparison.OrdinalIgnoreCase)
+                || record.Source.Contains("ICBCSIMCompensationReversal", StringComparison.OrdinalIgnoreCase);
         }
 
         private static ICBCHistoryDetailSIMInitializationConfirmation BuildICBCSIMInitializationConfirmation(

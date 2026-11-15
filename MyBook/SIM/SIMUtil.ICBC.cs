@@ -24,6 +24,123 @@ namespace MyBook
             return String.Equals(sender, "95588", StringComparison.OrdinalIgnoreCase);
         }
 
+        private IReadOnlyList<SIMMessage> PrepareICBCSIMMessagesForProcessing(IReadOnlyList<SIMMessage> messages,
+            out Dictionary<SIMMessage, ICBCSIMBatch> batches)
+        {
+            batches = [];
+            if (database is null)
+                return OrderSIMMessagesForProcessing(messages);
+
+            var completed = new HashSet<SIMMessage>();
+            var items = new List<ICBCSIMMessageOrdering>();
+            foreach (var message in messages)
+                if (IsICBCSender(message.Sender) && TryParseICBCSIMTransaction(message, out var transaction))
+                    items.Add(new(message, transaction, transaction.TransactionTime, 0));
+
+            foreach (var group in items.GroupBy(item => (item.Transaction!.CardTail, item.Transaction.Balance.t)))
+            {
+                var account = database.GetPostingAccount(database.GetAccountByTypeAndId(ICBCSIMAccountType, group.Key.CardTail));
+                if (account.isCredit)
+                    throw new InvalidOperationException("ICBC SIM SMS for credit account is not allowed.");
+                var pending = group.ToList();
+                var start = pending.Min(item => item.EffectiveTime).Date.AddDays(-1);
+                var end = pending.Max(item => item.Message.Time > item.EffectiveTime
+                    ? item.Message.Time : item.EffectiveTime).Date.AddDays(2);
+                var existing = database.GetStatementRecords(ICBCSIMProvider, account, start, end);
+                var batch = new ICBCSIMBatch(account,
+                    existing.Concat(database.GetStatementRecords(StatementImportProvider.ICBCHistoryDetailMail, account, start, end))
+                        .Concat(database.GetStatementRecords(StatementImportProvider.ICBCBillMail, account, start, end)).ToList(),
+                    database.GetImportedStatementKeys(ICBCSIMProvider,
+                        pending.Select(item => BuildICBCSIMStatementKey(account, item.Transaction!)).ToList()));
+                foreach (var item in pending)
+                    batches.Add(item.Message, batch);
+                foreach (var item in pending.ToList())
+                    if (batch.IsImported(item.Transaction!))
+                    {
+                        completed.Add(item.Message);
+                        pending.Remove(item);
+                    }
+                if (pending.Count == 0)
+                    continue;
+
+                foreach (var compensation in existing.Where(record => record.Fake && record.t == group.Key.t
+                    && record.Source.Contains("ICBCSIMCompensation", StringComparison.Ordinal)
+                    && !record.Source.Contains("supersededBy=", StringComparison.Ordinal)
+                    && !record.Source.Contains("reversesRecordId=", StringComparison.Ordinal)).OrderBy(record => record.Id))
+                {
+                    var chain = FindICBCSIMLateCompensationChain(compensation,
+                        database.GetICBCSIMCompensationAnchor(compensation), pending);
+                    if (chain.Count == 0)
+                        continue;
+                    var key = $"ICBCSIMReplacement-{compensation.Id}";
+                    var records = chain.Select(item => BuildICBCSIMRecord(account, item.Transaction!,
+                        BuildICBCSIMStatementKey(account, item.Transaction!), item.Message)).ToList();
+                    var reversal = new Record
+                    {
+                        Account = account,
+                        date = compensation.date,
+                        postingDate = compensation.postingDate,
+                        updateTime = DateTime.Now,
+                        DestAccount = compensation.DestAccount,
+                        Reason = compensation.Reason,
+                        Fake = true,
+                        isInternal = compensation.isInternal,
+                        DescCurrency = compensation.DescCurrency is null ? null
+                            : new Currency(-compensation.DescCurrency.v, compensation.DescCurrency.t),
+                        Source = $"code={key}; ICBCSIMCompensationReversal; reversesRecordId={compensation.Id}"
+                    };
+                    reversal.CopyFrom(new Currency(-compensation.v, compensation.t));
+                    records.Add(reversal);
+                    if (!database.TryGetAccountBalance(account, compensation.t, out var balance))
+                        throw new InvalidOperationException("ICBC late SMS replacement requires an existing balance.");
+                    // Real transactions exactly replace the inferred gap; do not rewind the current balance.
+                    var saved = database.SaveStatementRecordsOnce(ICBCSIMProvider, chain.Max(item => item.Message.Time), records,
+                        [new AccountBalance(account, balance)], key, [new AccountBalance(account, balance)],
+                        afterSaveInTransaction: _ => database.AppendRecordSourceSupplements([
+                            new(compensation.Id, key, $"code={key}; supersededBy=ICBCSIMSMS")]),
+                        forceValidateBeginningBalances: true);
+                    if (saved)
+                        batch.Records.AddRange(records);
+                    foreach (var item in chain)
+                    {
+                        batch.ImportedKeys.Add(BuildICBCSIMStatementKey(account, item.Transaction!));
+                        completed.Add(item.Message);
+                        pending.Remove(item);
+                    }
+                }
+            }
+
+            // Already imported messages must also bypass sorting after a successful commit but failed SMS deletion.
+            return messages.Where(completed.Contains)
+                .Concat(OrderSIMMessagesForProcessing(messages.Where(message => !completed.Contains(message)).ToList())).ToList();
+        }
+
+        private static List<ICBCSIMMessageOrdering> FindICBCSIMLateCompensationChain(
+            Record compensation, Record? anchor, List<ICBCSIMMessageOrdering> pending)
+        {
+            if (anchor is null || !TryParseICBCSIMSourceBalance(anchor.Source, out var opening)
+                || !TryParseICBCSIMSourceBalance(compensation.Source, out var ending)
+                || opening.t != compensation.t || ending.t != compensation.t || opening.v + compensation.v != ending.v)
+                return [];
+
+            var candidates = pending.Where(item => item.EffectiveTime >= (anchor.postingDate ?? anchor.date) - ICBCSIMOrderingWindow
+                && item.EffectiveTime <= (compensation.postingDate ?? compensation.date).AddSeconds(1) + ICBCSIMOrderingWindow).ToList();
+            if (candidates.Count == 0)
+                return [];
+            var chain = new List<ICBCSIMMessageOrdering>();
+            var balance = opening;
+            while (!CurrencyEquals(balance, ending))
+            {
+                var next = candidates.Where(item => CurrencyEquals(GetICBCSIMRequiredBeginningBalance(item.Transaction!), balance)).ToList();
+                if (next.Count != 1)
+                    throw new MailParseException($"ICBC late SMS cannot uniquely and completely replace compensation record {compensation.Id}.");
+                chain.Add(next[0]);
+                candidates.Remove(next[0]);
+                balance = next[0].Transaction!.Balance;
+            }
+            return chain;
+        }
+
         private static IReadOnlyList<SIMMessage> OrderSIMMessagesForProcessing(IReadOnlyList<SIMMessage> messages)
         {
             var items = messages
@@ -122,7 +239,7 @@ namespace MyBook
             return left.t == right.t && left.v == right.v;
         }
 
-        private SIMMessageProcessResult ParseICBCSIMMessage(SIMMessage message)
+        private SIMMessageProcessResult ParseICBCSIMMessage(SIMMessage message, ICBCSIMBatch? batch)
         {
             if (ICBCSIMIgnoredNotificationRegex.IsMatch(NormalizeICBCSIMText(message.Text)))
                 return new SIMMessageProcessResult("ignored ICBC credit-limit notification", true, true);
@@ -134,16 +251,9 @@ namespace MyBook
             if (database is null)
                 return new SIMMessageProcessResult("parsed ICBC transaction but no database is configured", false);
 
-            var cardAccount = database.GetAccountByTypeAndId(ICBCSIMAccountType, transaction.CardTail);
-            var postingAccount = database.GetPostingAccount(cardAccount);
-            if (postingAccount.isCredit)
-                throw new InvalidOperationException("ICBC SIM SMS for credit account is not allowed.");
-
+            var postingAccount = batch!.Account;
             var statementKey = BuildICBCSIMStatementKey(postingAccount, transaction);
-            if (database.IsStatementKeyImported(ICBCSIMProvider, statementKey))
-                return new SIMMessageProcessResult("duplicate ICBC SMS transaction", true);
-
-            if (IsMatchingICBCRecordAlreadyImported(postingAccount, transaction))
+            if (batch.IsImported(transaction))
                 return new SIMMessageProcessResult("matching ICBC transaction already exists", true);
 
             var hasCurrentBalance = database.TryGetAccountBalance(
@@ -176,6 +286,10 @@ namespace MyBook
                 statementKey,
                 [beginningBalance],
                 forceValidateBeginningBalances: hasCurrentBalance);
+
+            if (saved)
+                batch.Records.AddRange(records);
+            batch.ImportedKeys.Add(statementKey);
 
             return saved
                 ? new SIMMessageProcessResult(compensation is null
@@ -222,25 +336,20 @@ namespace MyBook
             return true;
         }
 
-        private bool IsMatchingICBCRecordAlreadyImported(Account postingAccount, ICBCSIMTransaction transaction)
+        private sealed class ICBCSIMBatch(Account account, List<Record> records, HashSet<string> importedKeys)
         {
-            return new[]
-                {
-                    ICBCSIMProvider,
-                    StatementImportProvider.ICBCHistoryDetailMail,
-                    StatementImportProvider.ICBCBillMail
-                }
-                .SelectMany(provider => database!.GetStatementRecords(
-                    provider,
-                    postingAccount,
-                    transaction.TransactionTime.Date.AddDays(-1),
-                    transaction.TransactionTime.Date.AddDays(2)))
-                .Any(record => IsMatchingICBCSIMRecord(record, transaction));
+            public Account Account { get; } = account;
+            public List<Record> Records { get; } = records;
+            public HashSet<string> ImportedKeys { get; } = importedKeys;
+
+            public bool IsImported(ICBCSIMTransaction transaction) =>
+                ImportedKeys.Contains(BuildICBCSIMStatementKey(Account, transaction))
+                || Records.Any(record => IsMatchingICBCSIMRecord(record, transaction));
         }
 
         private static bool IsMatchingICBCSIMRecord(Record record, ICBCSIMTransaction transaction)
         {
-            if (record.v != transaction.Amount.v || record.t != transaction.Amount.t)
+            if (record.Fake || record.v != transaction.Amount.v || record.t != transaction.Amount.t)
                 return false;
 
             var recordTime = record.postingDate ?? record.date;
