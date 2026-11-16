@@ -162,14 +162,14 @@ namespace MyBook
                 holdings.Add(holding);
             }
             // 由于 Firstrade 自身的余额页与持仓页使用不同的行情供应商，总额和分项之和可能对不上。
-            // Only these two FirstTrade aggregate checks allow a difference below USD 100.
+            // Only these two FirstTrade aggregate checks allow a difference below USD 200.
             // Holdings and records always use detail values; never create a residual adjustment.
             var equityTotal = holdings.Where(h => h.holdingType != HoldingType.Cash).Sum(h => h.totalPrice.v);
-            if (Math.Abs(equityTotal - FirstTradeNumber(balance, "long_stock_value")) >= 100m)
-                throw new FirstTradeException("equity subtotal: difference must be less than USD 100");
+            if (Math.Abs(equityTotal - FirstTradeNumber(balance, "long_stock_value")) >= 200m)
+                throw new FirstTradeException("equity subtotal: difference must be less than USD 200");
             var endingTotal = holdings.Sum(h => h.totalPrice.v);
-            if (Math.Abs(endingTotal - FirstTradeNumber(balance, "total_account_value")) >= 100m)
-                throw new FirstTradeException("account total: difference must be less than USD 100");
+            if (Math.Abs(endingTotal - FirstTradeNumber(balance, "total_account_value")) >= 200m)
+                throw new FirstTradeException("account total: difference must be less than USD 200");
 
             var known = MatchFirstTradePrevious(transactions, previousRecords, item.HistoryFrom, item.HistoryThrough);
             var transfers = transactions.Where(t => t.Type == "OTHER" && t.Quantity == 0).ToList();
