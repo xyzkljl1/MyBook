@@ -29,7 +29,10 @@ partial class WebUtil
             var saved = authorize ? null : JsonSerializer.Deserialize<SteamSessionState>(sessionStore.Read()
                 ?? throw new InvalidOperationException("No saved Steam session; complete initial authorization first."));
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromMinutes(3));
+            var timeoutDuration = TimeSpan.FromMinutes(3);
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            timeout.CancelAfter(timeoutDuration);
+            var operation = SteamSessionOperation.Connect;
             var client = new SteamClient(SteamConfiguration.Create(builder => builder
                 .WithProtocolTypes(ProtocolTypes.WebSocket)
                 .WithHttpClientFactory(_ => new HttpClient(CreateSteamHttpHandler()))));
@@ -39,11 +42,18 @@ partial class WebUtil
             var loggedOn = new TaskCompletionSource<SteamUser.LoggedOnCallback>(TaskCreationOptions.RunContinuationsAsynchronously);
             var account = new TaskCompletionSource<SteamUser.AccountInfoCallback>(TaskCreationOptions.RunContinuationsAsynchronously);
             var wallet = new TaskCompletionSource<SteamUser.WalletInfoCallback>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var disconnected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var loggedOff = new TaskCompletionSource<EResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             using var connectionSubscription = manager.Subscribe<SteamClient.ConnectedCallback>(_ => connected.TrySetResult());
             using var loginSubscription = manager.Subscribe<SteamUser.LoggedOnCallback>(value => loggedOn.TrySetResult(value));
             using var accountSubscription = manager.Subscribe<SteamUser.AccountInfoCallback>(value => account.TrySetResult(value));
             using var walletSubscription = manager.Subscribe<SteamUser.WalletInfoCallback>(value => wallet.TrySetResult(value));
-            using var disconnectSubscription = manager.Subscribe<SteamClient.DisconnectedCallback>(_ => timeout.Cancel());
+            using var logoutSubscription = manager.Subscribe<SteamUser.LoggedOffCallback>(value => loggedOff.TrySetResult(value.Result));
+            using var disconnectSubscription = manager.Subscribe<SteamClient.DisconnectedCallback>(value =>
+            {
+                disconnected.TrySetResult(value.UserInitiated);
+                timeout.Cancel();
+            });
             var pump = Task.Run(async () =>
             {
                 try
@@ -62,6 +72,7 @@ partial class WebUtil
                 await connected.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
                 if (authorize)
                 {
+                    operation = SteamSessionOperation.Authorize;
                     var auth = await client.Authentication.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
                     {
                         Username = loginName!, Password = password!, Authenticator = authenticator!,
@@ -73,6 +84,7 @@ partial class WebUtil
                         loginName = result.AccountName, refreshToken = result.RefreshToken
                     };
                 }
+                operation = SteamSessionOperation.LogOn;
                 user.LogOn(new SteamUser.LogOnDetails
                 {
                     Username = saved!.loginName, AccessToken = saved.refreshToken, ShouldRememberPassword = true,
@@ -83,6 +95,7 @@ partial class WebUtil
                     throw new InvalidOperationException($"Steam ClientLogOn: {login.Result}; extended={login.ExtendedResult}. Reauthorize if the saved session is invalid.");
                 // Commit credentials independently of later account queries, so their failure cannot lose a new token.
                 if (authorize) sessionStore.Save(JsonSerializer.Serialize(saved), newSession: true);
+                operation = SteamSessionOperation.RefreshToken;
                 var renewed = await client.Authentication.GenerateAccessTokenForAppAsync(client.SteamID!,
                     saved.refreshToken, allowRenewal: true).WaitAsync(timeout.Token).ConfigureAwait(false);
                 if (!String.IsNullOrEmpty(renewed.RefreshToken) && renewed.RefreshToken != saved.refreshToken)
@@ -92,12 +105,32 @@ partial class WebUtil
                 }
                 async Task<SteamLoginInfo> ReadInfo()
                 {
+                    operation = SteamSessionOperation.ReadAccount;
                     var info = await account.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+                    operation = SteamSessionOperation.ReadWallet;
                     var funds = await wallet.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+                    operation = SteamSessionOperation.Fetch;
                     return new SteamLoginInfo(client.SteamID!.ConvertToUInt64(), info.PersonaName,
                         funds.HasWallet, funds.Currency, funds.LongBalance / 100m, funds.LongBalanceDelayed / 100m);
                 }
+                operation = SteamSessionOperation.Fetch;
                 return await fetch(ReadInfo, renewed.AccessToken, timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                // Capture before cleanup cancels the token and deliberately disconnects the client.
+                // Only typed protocol results and timing are safe for the local failure log.
+                error.Data[typeof(SteamFailureDiagnostic)] = new SteamFailureDiagnostic(
+                    operation, elapsed.Elapsed, connected.Task.IsCompletedSuccessfully,
+                    timeout.IsCancellationRequested, elapsed.Elapsed >= timeoutDuration,
+                    cancellationToken.IsCancellationRequested,
+                    disconnected.Task.IsCompletedSuccessfully,
+                    disconnected.Task.IsCompletedSuccessfully ? disconnected.Task.Result : null,
+                    loggedOn.Task.IsCompletedSuccessfully ? loggedOn.Task.Result.Result : null,
+                    loggedOn.Task.IsCompletedSuccessfully ? loggedOn.Task.Result.ExtendedResult : null,
+                    loggedOff.Task.IsCompletedSuccessfully ? loggedOff.Task.Result : null,
+                    error is AuthenticationException authError ? authError.Result : null);
+                throw;
             }
             finally
             {
@@ -108,13 +141,24 @@ partial class WebUtil
         }
         catch (AuthenticationException e)
         {
-            throw new InvalidOperationException($"Steam Authentication: {e.Result}.");
+            var error = new InvalidOperationException($"Steam Authentication: {e.Result}.");
+            error.Data[typeof(SteamFailureDiagnostic)] = e.Data[typeof(SteamFailureDiagnostic)];
+            throw error;
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException e) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new InvalidOperationException("Steam login/account query timed out or disconnected.");
+            var error = new InvalidOperationException("Steam login/account query timed out or disconnected.");
+            error.Data[typeof(SteamFailureDiagnostic)] = e.Data[typeof(SteamFailureDiagnostic)];
+            throw error;
         }
     }
+
+    internal enum SteamSessionOperation { Connect, Authorize, LogOn, RefreshToken, ReadAccount, ReadWallet, Fetch }
+
+    internal sealed record SteamFailureDiagnostic(SteamSessionOperation Operation, TimeSpan Elapsed,
+        bool Connected, bool CancellationRequested, bool DeadlineElapsed, bool ExternalCancellation,
+        bool Disconnected, bool? DisconnectUserInitiated, EResult? LogOnResult, EResult? LogOnExtendedResult,
+        EResult? LogOffResult, EResult? AuthenticationResult);
 
     private HttpClientHandler CreateSteamHttpHandler()
     {
