@@ -794,6 +794,29 @@ namespace MyBook
             });
         }
 
+        // Called inside the Wise statement transaction. A settlement only reclassifies
+        // the posted debit: the principal plus any new fee must equal that debit.
+        internal void ApplyWisePendingChanges(List<WiseUtil.PendingChange> changes, int statementImportId)
+        {
+            foreach (var change in changes)
+            {
+                var old = change.Original;
+                var part = change.Replacement;
+                var count = db.Updateable<Record>()
+                    .SetColumns(r => new Record { Source = part.Source, v = part.v, DestAccount = part.DestAccount,
+                        isInternal = part.isInternal, _descCurrency_v = part._descCurrency_v, _descCurrency_t = part._descCurrency_t,
+                        allocatedExpenseCacheDirty = true, updateTime = part.updateTime })
+                    .Where(r => r.Id == old.Id && r.Source == old.Source && r.v == old.v && r.t == old.t
+                        && r._statementImport_Id == old._statementImport_Id && r.matchedRecordId == null && !r.isRefundMatched)
+                    .ExecuteCommand();
+                if (count != 1) throw new InvalidOperationException("Wise pending debit changed before settlement.");
+                if (change.Fee is Record fee) SaveRecordsCore([fee], statementImportId);
+            }
+            foreach (var id in changes.Where(c => c.Replacement.isInternal)
+                .Select(c => c.Original._statementImport_Id).Distinct())
+                MatchInternalTransfersAroundStatement(id);
+        }
+
         private int? SaveStatementImportCore(
             StatementImportProvider provider,
             DateTime time,
@@ -2630,6 +2653,7 @@ namespace MyBook
 
         private static bool IsTransferPrincipal(Record record) =>
             record.Reason == "转账"
+            && !WiseUtil.IsPendingDebit(record.Source)
             && !(record.Source.StartsWith("WiseApi/", StringComparison.Ordinal) && record.Source.EndsWith("/gross", StringComparison.Ordinal));
 
         internal static void ApplyAccountTransferRules(Record record, Account account)

@@ -51,6 +51,7 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             if (start.HasValue && queryStart < start.Value) queryStart = start.Value;
             var existingRecords = database.GetAccountRecords(account)
                 .Where(record => record.Source.StartsWith("WiseApi/", StringComparison.Ordinal)).ToList();
+            queryStart = GetPendingQueryStart(queryStart, existingRecords, DateTime.Today);
 
             using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
                 { BaseAddress = new Uri("https://api.wise.com"), Timeout = TimeSpan.FromSeconds(15) };
@@ -126,17 +127,30 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
             var activities = await Activities();
             ValidateExistingActivities(activities, existingRecords, queryStart.LocalDateTime);
             var records = new List<Record>();
+            var settlements = new List<PendingChange>();
             // Reparse queried activities and reconcile their parts with the stored Records.
             foreach (var activity in activities)
             {
                 deadline.Token.ThrowIfCancellationRequested();
                 var key = EventKey(activity);
+                var prefix = EventSourcePrefix(activity);
+                var stored = existingRecords.Where(r => r.Source.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+                var debit = stored.SingleOrDefault(r => IsPendingDebit(r.Source));
                 var data = new EventData(activity, null, null, null);
+                if (IsCancelledTransfer(activity) && debit is not null)
+                {
+                    if (debit.Source == prefix + Pending)
+                        settlements.Add(new(debit, new Record { Source = prefix + AwaitingRefund, v = debit.v, t = debit.t,
+                            DestAccount = debit.DestAccount, updateTime = DateTime.Now }, null));
+                    continue;
+                }
                 if (Text(activity, "status") == "COMPLETED" && Text(activity["resource"]!, "type") == "TRANSFER")
                 {
                     var id = Id(activity["resource"]!, "id");
                     var transfer = (JObject)await Get($"/v1/transfers/{id}", "/v1/transfers/{id}");
                     if (Id(transfer, "id") != id) throw Error("transfer identity mismatch");
+                    if (Text(transfer, "status") == "funds_refunded")
+                        throw Error("transfer refund is not supported");
                     JObject? quote = null;
                     if (Optional(transfer, "quoteUuid") is string quoteId)
                     {
@@ -162,9 +176,20 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
                 }
                 stage = "activity parsing " + Hash(key)[..12];
                 var parsed = ParseEvent(data, account);
-                var evidence = FindCounterparty(data);
-                ApplyCounterparty(parsed, account, evidence);
-                records.AddRange(SelectNewRecords(activity, parsed, existingRecords));
+                if (parsed.Any(r => IsPendingDebit(r.Source)))
+                {
+                    if (latest is null) throw Error("pending debit requires a previous balance");
+                }
+                else
+                {
+                    ApplyCounterparty(parsed, account, FindCounterparty(data));
+                    if (debit is not null)
+                    {
+                        settlements.Add(SettleDebit(debit, parsed));
+                        continue;
+                    }
+                }
+                records.AddRange(SelectNewRecords(activity, parsed, stored));
             }
             var verification = await Activities();
             if (!activities.Select(Fingerprint).SequenceEqual(verification.Select(Fingerprint)))
@@ -184,14 +209,15 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
                 c => opening.GetValueOrDefault(c) + records.Where(r => r.t == c).Sum(r => r.v));
             EqualBalances(expected, ending, "opening plus records versus API balance");
             Console.WriteLine($"Wise API: scanned activities={activities.Count}, new records={records.Count}, currencies={ending.Count}");
-            if (latest is not null && records.Count == 0) return;
+            if (latest is not null && records.Count == 0 && settlements.Count == 0) return;
             stage = "atomic database write";
             deadline.Token.ThrowIfCancellationRequested();
-            var statementKey = $"WiseApi/{DateTime.Today:yyyy-MM-dd}/" + Hash(String.Join("\n", records.Select(r => r.Source).Order(StringComparer.Ordinal)));
+            var sources = records.Select(r => r.Source).Concat(settlements.Select(s => s.Replacement.Source));
+            var statementKey = $"WiseApi/{DateTime.Today:yyyy-MM-dd}/" + Hash(String.Join("\n", sources.Order(StringComparer.Ordinal)));
             database.SaveStatementRecordsAndHoldingsOnce([new(Provider, DateTime.Today, statementKey, account,
                 records, Holdings(account, ending), ending.Select(p => new AccountBalance(account, new(p.Value, p.Key))).ToList(),
                 opening.Select(p => new AccountBalance(account, new(p.Value, p.Key))).ToList(), beginning,
-                forceValidateBeginningBalances: latest is not null)]);
+                forceValidateBeginningBalances: latest is not null)], afterSaveInTransaction: id => database.ApplyWisePendingChanges(settlements, id));
         }
         catch (MailParseException e)
         {
@@ -208,18 +234,49 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
         finally { importLock.Release(); }
     }
 
+    private const string Pending = "pending";
+    private const string AwaitingRefund = "awaiting-refund";
+
+    internal static bool IsPendingDebit(string source) => source.StartsWith("WiseApi/", StringComparison.Ordinal)
+        && (source.EndsWith("/" + Pending, StringComparison.Ordinal) || source.EndsWith("/" + AwaitingRefund, StringComparison.Ordinal));
+
+    internal static DateTimeOffset GetPendingQueryStart(DateTimeOffset normalStart, IReadOnlyList<Record> existing, DateTime today)
+    {
+        var oldest = existing.Where(r => IsPendingDebit(r.Source))
+            .Min(r => (DateTime?)r.date.Date);
+        if (oldest is not DateTime date) return normalStart;
+        if (today.Date >= date.AddMonths(1))
+            throw Error($"unsettled debit from {date:yyyy-MM-dd} reached one calendar month");
+        var pendingStart = new DateTimeOffset(date);
+        return pendingStart < normalStart ? pendingStart : normalStart;
+    }
+
+    private static bool IsCancelledTransfer(JObject a) => Text(a, "type") == "TRANSFER"
+        && Text(a, "status") == "CANCELLED" && Text(a["resource"]!, "type") == "TRANSFER";
+
+    internal sealed record PendingChange(Record Original, Record Replacement, Record? Fee);
+
+    internal static PendingChange SettleDebit(Record debit, List<Record> parts)
+    {
+        var prefix = debit.Source[..(debit.Source.LastIndexOf('/') + 1)];
+        var principal = parts.SingleOrDefault(r => r.Source == prefix + "principal" || r.Source == prefix + "gross");
+        var fee = parts.SingleOrDefault(r => r.Source == prefix + "fee");
+        if (principal is null || debit.Source != prefix + Pending || parts.Count != (fee is null ? 1 : 2)
+            || parts.Any(r => r.t != debit.t || r.v >= 0 || r.date.Date != debit.date.Date) || parts.Sum(r => r.v) != debit.v)
+            throw Error("settled transfer differs from pending debit");
+        return new(debit, principal, fee);
+    }
+
     internal static void ValidateExistingActivities(IReadOnlyList<JObject> activities, IReadOnlyList<Record> existing, DateTime since)
     {
         var prefixes = activities.Select(EventSourcePrefix).ToArray();
-        if (existing.Any(record => record.date > since
+        if (existing.Any(record => (record.date > since || IsPendingDebit(record.Source) && record.date == since)
             && !prefixes.Any(prefix => record.Source.StartsWith(prefix, StringComparison.Ordinal))))
             throw Error("a previously imported activity disappeared; explicit reconciliation required");
     }
 
-    internal static List<Record> SelectNewRecords(JObject activity, List<Record> parsed, IReadOnlyList<Record> existing)
+    internal static List<Record> SelectNewRecords(JObject activity, List<Record> parsed, IReadOnlyList<Record> imported)
     {
-        var prefix = EventSourcePrefix(activity);
-        var imported = existing.Where(record => record.Source.StartsWith(prefix, StringComparison.Ordinal)).ToList();
         if (imported.Count == 0) return parsed;
         // Source supplements and later counterparty/matching annotations do not change the imported cash flow.
         // Compare the transaction day stored in Record, not source metadata or later annotations.
@@ -245,7 +302,8 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
         if (resourceType != supported) throw Error("activity/resource type mismatch");
         var status = Text(a, "status");
         if (status == "CANCELLED") return [];
-        if (status != "COMPLETED") throw Error("unsettled activity; retry after settlement");
+        var pending = status == "IN_PROGRESS" && type == "TRANSFER";
+        if (status != "COMPLETED" && !pending) throw Error("unsettled activity; retry after settlement");
         if (type == "CARD_ORDER") throw Error("completed card order accounting is not supported");
         var primary = ParseAmount(Text(a, "primaryAmount"));
         var secondary = Optional(a, "secondaryAmount") is string secondaryText ? ParseAmount(secondaryText) : null;
@@ -263,7 +321,13 @@ internal sealed partial class WiseUtil(IConfiguration config, DatabaseUtil datab
                 updateTime = DateTime.Now, Reason = reason, DestAccount = description.Length > 200 ? description[..200] : description,
                 Source = EventSourcePrefix(a) + suffix, DescCurrency = original, isInternal = false });
         }
-        if (type == "INTERBALANCE")
+        if (pending)
+        {
+            if (primary.Sign != "" || secondary?.Sign != "")
+                throw Error("pending transfer has no explicit outgoing gross amount");
+            Add(new(-secondary.Money.v, secondary.Money.t), "转账", Pending);
+        }
+        else if (type == "INTERBALANCE")
         {
             if (secondary is null || primary.Money.t == secondary.Money.t || primary.Sign != "" || secondary.Sign != "")
                 throw Error("unsupported conversion amounts");
