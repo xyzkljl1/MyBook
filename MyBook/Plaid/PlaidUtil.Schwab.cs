@@ -57,7 +57,8 @@ partial class PlaidUtil
                     .Concat(current.HasValue ? [current.Value] : []).Distinct().ToList();
                 return types.Count == 1 ? types[0] : throw SchwabRawError("missing or inconsistent equity market");
             }
-            var import = BuildSchwabRawImport(report, db.GetAccountRecords(account), account, beginning, queryTime.Date, Resolve);
+            var import = BuildSchwabRawImport(report, db.GetAccountRecords(account), account, beginning, queryTime.Date, Resolve, previous?.time);
+            if (import is null) return;
             // A successful empty day must also advance the query boundary.
             var shouldSave = previous is null || import.Records.Count != 0 || report.End > previousEnd;
             deadline.Token.ThrowIfCancellationRequested();
@@ -179,8 +180,8 @@ partial class PlaidUtil
         if (row.Properties().Any(p => !allowed.Contains(p.Name))) throw SchwabRawError("unexpected object field; schema review required");
     }
 
-    internal static StatementRecordHoldingImport BuildSchwabRawImport(SchwabRawReport report, List<Record> existingRecords,
-        Account account, List<Holding> beginning, DateTime sourceTime, Func<string, HoldingType> resolveEquity)
+    internal static StatementRecordHoldingImport? BuildSchwabRawImport(SchwabRawReport report, List<Record> existingRecords,
+        Account account, List<Holding> beginning, DateTime sourceTime, Func<string, HoldingType> resolveEquity, DateTime? lastSuccess)
     {
         if (account.relativeBalance || account.isCredit || account.usage != AccountUsage.Investment || account._primaryAccount_Id.HasValue)
             throw SchwabRawError("a primary absolute-balance investment account is required");
@@ -260,13 +261,15 @@ partial class PlaidUtil
             }
             cash -= tx.Amount;
         }
-        RawEqual(cash, ending.Single(h => h.holdingType == HoldingType.Cash).totalPrice.v, "cash from individual transactions");
+        if (AwaitingTransactions(cash, ending.Single(h => h.holdingType == HoldingType.Cash).totalPrice.v, "cash from individual transactions"))
+            return null;
         var endingAssets = ending.Where(h => h.holdingType != HoldingType.Cash).ToDictionary(h => (h.code, h.holdingType));
         foreach (var key in quantities.Keys.Union(endingAssets.Keys))
         {
             var holding = endingAssets.GetValueOrDefault(key) ?? beginning.FirstOrDefault(h => (h.code, h.holdingType) == key)
                 ?? securities.Values.Select(p => BuildRawHolding(p, account, resolveEquity)).First(h => (h.code, h.holdingType) == key);
-            RawEqual(quantities.GetValueOrDefault(key), endingAssets.GetValueOrDefault(key)?.quantity ?? 0, "security quantity from individual transactions");
+            if (AwaitingTransactions(quantities.GetValueOrDefault(key), endingAssets.GetValueOrDefault(key)?.quantity ?? 0, "security quantity from individual transactions"))
+                return null;
             var change = (endingAssets.GetValueOrDefault(key)?.totalPrice.v ?? 0) - values.GetValueOrDefault(key);
             if (change != 0)
             {
@@ -287,6 +290,14 @@ partial class PlaidUtil
         return new(SchwabRawProvider, sourceTime, SchwabRawPrefix + account.Id + "/" + report.End.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "/" + RawHash(JsonSerializer.Serialize(report)),
             account, records, ending, [new(account, new(report.Total, CurrencyType.USD))],
             [new(account, new(beginningValue, CurrencyType.USD))], beginning, recordDate: report.AsOf.Date);
+
+        bool AwaitingTransactions(decimal expected, decimal actual, string field)
+        {
+            if (lastSuccess.HasValue && (sourceTime.Date - lastSuccess.Value.Date).Days < 10)
+                return expected != actual;
+            RawEqual(expected, actual, field);
+            return false;
+        }
 
         Record Add(decimal value, string reason, string source, DateTime date, DateTime posted, bool internalTrade, Holding? holding, decimal quantity,
             string? destAccount = null)
